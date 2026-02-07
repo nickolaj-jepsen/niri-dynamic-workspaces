@@ -81,6 +81,19 @@ pub fn focus_or_create_workspace(name: &str) -> anyhow::Result<bool> {
     Ok(true)
 }
 
+/// Switch to a workspace (creating it if needed) and spawn programs on creation.
+///
+/// Combines [`focus_or_create_workspace`] with [`spawn_workspace_programs`].
+/// Returns a [`ReorderRequest`] when multiple programs were spawned, which
+/// the caller should pass to [`reorder_workspace_columns`].
+pub fn switch_workspace(name: &str, programs: &[String]) -> anyhow::Result<Option<ReorderRequest>> {
+    let created = focus_or_create_workspace(name)?;
+    if created {
+        return spawn_workspace_programs(name, programs);
+    }
+    Ok(None)
+}
+
 /// Spawn programs for a newly created workspace.
 ///
 /// Splits each command string on whitespace and spawns via niri IPC.
@@ -270,13 +283,10 @@ fn reorder_workspace_columns_inner(request: &ReorderRequest) -> anyhow::Result<(
 }
 
 /// Move the focused window to a named workspace, creating it if it doesn't exist.
-///
-/// Returns `true` if the workspace was newly created.
-pub fn move_window_to_workspace(name: &str) -> anyhow::Result<bool> {
+pub fn move_window_to_workspace(name: &str) -> anyhow::Result<()> {
     let workspaces = list_workspaces()?;
-    let exists = find_workspace_by_name(&workspaces, name).is_some();
 
-    if !exists {
+    if find_workspace_by_name(&workspaces, name).is_none() {
         let original_ws_id = workspaces
             .iter()
             .find(|w| w.is_focused)
@@ -296,9 +306,7 @@ pub fn move_window_to_workspace(name: &str) -> anyhow::Result<bool> {
         window_id: None,
         reference: WorkspaceReferenceArg::Name(name.to_string()),
         focus: true,
-    })?;
-
-    Ok(!exists)
+    })
 }
 
 /// Remove empty, unfocused dynamic workspaces matching the given prefix.

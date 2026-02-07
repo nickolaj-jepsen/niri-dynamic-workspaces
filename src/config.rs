@@ -27,6 +27,7 @@ struct GeneralConfig {
     workspace_prefix: String,
     default_programs: Vec<String>,
     auto_delete_empty: bool,
+    layout: String,
 }
 
 impl Default for GeneralConfig {
@@ -35,6 +36,7 @@ impl Default for GeneralConfig {
             workspace_prefix: "dyn-".to_string(),
             default_programs: Vec::new(),
             auto_delete_empty: true,
+            layout: "qwerty".to_string(),
         }
     }
 }
@@ -84,16 +86,21 @@ impl Default for KeybindsConfig {
 
 pub struct ResolvedConfig {
     pub workspace_prefix: String,
-    pub max_columns: u32,
-    pub min_columns: u32,
-    pub max_windows_per_card: usize,
-    pub app_name_max_chars: i32,
-    pub window_title_max_chars: i32,
     pub close_keybinds: Vec<Keybind>,
     pub default_programs: Vec<String>,
     pub workspace_programs: HashMap<char, Vec<String>>,
     pub workspace_names: HashMap<char, String>,
     pub auto_delete_empty: bool,
+    pub layout: &'static KeyboardLayout,
+}
+
+impl ResolvedConfig {
+    /// Return the programs configured for a workspace key, falling back to defaults.
+    pub fn programs_for(&self, ch: char) -> &[String] {
+        self.workspace_programs
+            .get(&ch)
+            .map_or(self.default_programs.as_slice(), Vec::as_slice)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -116,15 +123,116 @@ fn parse_modifier(name: &str) -> Option<ModifierType> {
 
 /// Returns `true` if `ch` is a valid workspace key character.
 ///
-/// Accepts lowercase letters (a–z), digits (0–9), and symbols reachable
-/// without Shift on a standard US keyboard.
+/// Accepts lowercase letters (a–z) and digits (0–9).
 pub fn is_workspace_char(ch: char) -> bool {
-    ch.is_ascii_lowercase()
-        || ch.is_ascii_digit()
-        || matches!(
-            ch,
-            ',' | '.' | '/' | ';' | '\'' | '[' | ']' | '-' | '=' | '`' | '\\'
-        )
+    ch.is_ascii_lowercase() || ch.is_ascii_digit()
+}
+
+// --- Keyboard layouts ---
+
+pub struct KeyboardLayout {
+    pub name: &'static str,
+    pub rows: &'static [&'static [char]],
+    pub row_offsets: &'static [f64],
+    pub widest_row_divisor: f64,
+}
+
+impl KeyboardLayout {
+    /// Compute the divisor from the row geometry.
+    ///
+    /// For each row: `(offset + key_count) - 1/8` gives the effective width
+    /// in key-units (gap = key/8). The divisor is the maximum across rows
+    /// plus one gap: `max * 9/8`.
+    #[cfg(test)]
+    fn compute_widest_row_divisor(&self) -> f64 {
+        self.rows
+            .iter()
+            .zip(self.row_offsets)
+            .map(|(row, &offset)| {
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "row lengths are at most 10, well within f64 precision"
+                )]
+                let n = row.len() as f64;
+                (9.0 * (offset + n) - 1.0) / 8.0
+            })
+            .fold(f64::NEG_INFINITY, f64::max)
+    }
+}
+
+const ROW_OFFSETS: &[f64] = &[0.0, 0.5, 0.75, 1.25];
+
+pub static LAYOUT_QWERTY: KeyboardLayout = KeyboardLayout {
+    name: "qwerty",
+    rows: &[
+        &['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'],
+        &['q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p'],
+        &['a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l'],
+        &['z', 'x', 'c', 'v', 'b', 'n', 'm'],
+    ],
+    row_offsets: ROW_OFFSETS,
+    widest_row_divisor: 11.6875,
+};
+
+pub static LAYOUT_AZERTY: KeyboardLayout = KeyboardLayout {
+    name: "azerty",
+    rows: &[
+        &['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'],
+        &['a', 'z', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p'],
+        &['q', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', 'm'],
+        &['w', 'x', 'c', 'v', 'b', 'n'],
+    ],
+    row_offsets: ROW_OFFSETS,
+    widest_row_divisor: 11.96875,
+};
+
+pub static LAYOUT_QWERTZ: KeyboardLayout = KeyboardLayout {
+    name: "qwertz",
+    rows: &[
+        &['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'],
+        &['q', 'w', 'e', 'r', 't', 'z', 'u', 'i', 'o', 'p'],
+        &['a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l'],
+        &['y', 'x', 'c', 'v', 'b', 'n', 'm'],
+    ],
+    row_offsets: ROW_OFFSETS,
+    widest_row_divisor: 11.6875,
+};
+
+pub static LAYOUT_DVORAK: KeyboardLayout = KeyboardLayout {
+    name: "dvorak",
+    rows: &[
+        &['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'],
+        &['p', 'y', 'f', 'g', 'c', 'r', 'l'],
+        &['a', 'o', 'e', 'u', 'i', 'd', 'h', 't', 'n', 's'],
+        &['q', 'j', 'k', 'x', 'b', 'm', 'w', 'v', 'z'],
+    ],
+    row_offsets: ROW_OFFSETS,
+    widest_row_divisor: 11.96875,
+};
+
+pub static LAYOUT_COLEMAK: KeyboardLayout = KeyboardLayout {
+    name: "colemak",
+    rows: &[
+        &['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'],
+        &['q', 'w', 'f', 'p', 'g', 'j', 'l', 'u', 'y'],
+        &['a', 'r', 's', 't', 'd', 'h', 'n', 'e', 'i', 'o'],
+        &['z', 'x', 'c', 'v', 'b', 'k', 'm'],
+    ],
+    row_offsets: ROW_OFFSETS,
+    widest_row_divisor: 11.96875,
+};
+
+pub static ALL_LAYOUTS: &[&KeyboardLayout] = &[
+    &LAYOUT_QWERTY,
+    &LAYOUT_AZERTY,
+    &LAYOUT_QWERTZ,
+    &LAYOUT_DVORAK,
+    &LAYOUT_COLEMAK,
+];
+
+pub fn lookup_layout(name: &str) -> Option<&'static KeyboardLayout> {
+    let lower = name.to_ascii_lowercase();
+    ALL_LAYOUTS.iter().find(|l| l.name == lower).copied()
 }
 
 fn parse_keybind(s: &str) -> Result<Keybind, String> {
@@ -167,23 +275,29 @@ impl Config {
                 }
             } else {
                 warnings.push(format!(
-                    "ignoring [workspace] key '{key}': must be a single workspace key (a-z, 0-9, or symbol)"
+                    "ignoring [workspace] key '{key}': must be a single workspace key (a-z or 0-9)"
                 ));
             }
         }
 
+        let layout = if let Some(l) = lookup_layout(&self.general.layout) {
+            l
+        } else {
+            warnings.push(format!(
+                "unknown layout '{}', defaulting to qwerty",
+                self.general.layout
+            ));
+            &LAYOUT_QWERTY
+        };
+
         let resolved = ResolvedConfig {
             workspace_prefix: self.general.workspace_prefix,
-            max_columns: self.layout.max_columns,
-            min_columns: self.layout.min_columns,
-            max_windows_per_card: self.layout.max_windows_per_card,
-            app_name_max_chars: self.layout.app_name_max_chars,
-            window_title_max_chars: self.layout.window_title_max_chars,
             close_keybinds,
             default_programs: self.general.default_programs,
             workspace_programs,
             workspace_names,
             auto_delete_empty: self.general.auto_delete_empty,
+            layout,
         };
 
         (resolved, warnings)
@@ -274,7 +388,7 @@ mod tests {
     fn parse_workspace_char_valid() {
         assert_eq!(parse_workspace_char("a"), Some('a'));
         assert_eq!(parse_workspace_char("0"), Some('0'));
-        assert_eq!(parse_workspace_char(","), Some(','));
+        assert_eq!(parse_workspace_char("z"), Some('z'));
     }
 
     #[test]
@@ -283,6 +397,7 @@ mod tests {
         assert_eq!(parse_workspace_char("ab"), None);
         assert_eq!(parse_workspace_char("A"), None);
         assert_eq!(parse_workspace_char("!"), None);
+        assert_eq!(parse_workspace_char(","), None);
     }
 
     // --- is_workspace_char ---
@@ -295,19 +410,17 @@ mod tests {
         // Digits
         assert!(is_workspace_char('0'));
         assert!(is_workspace_char('9'));
-        // Allowed symbols
-        for sym in [',', '.', '/', ';', '\'', '[', ']', '-', '=', '`', '\\'] {
-            assert!(is_workspace_char(sym), "expected '{sym}' to be valid");
-        }
         // Uppercase — rejected
         assert!(!is_workspace_char('A'));
         assert!(!is_workspace_char('Z'));
         // Space — rejected
         assert!(!is_workspace_char(' '));
-        // Shifted symbols — rejected
+        // Symbols — rejected
+        assert!(!is_workspace_char(','));
+        assert!(!is_workspace_char('/'));
+        assert!(!is_workspace_char('['));
         assert!(!is_workspace_char('!'));
         assert!(!is_workspace_char('@'));
-        assert!(!is_workspace_char('{'));
         // Multi-byte — rejected
         assert!(!is_workspace_char('å'));
         assert!(!is_workspace_char('ñ'));
@@ -384,6 +497,7 @@ mod tests {
         assert!(resolved.default_programs.is_empty());
         assert!(resolved.workspace_programs.is_empty());
         assert!(resolved.workspace_names.is_empty());
+        assert_eq!(resolved.layout.name, "qwerty");
     }
 
     #[test]
@@ -499,5 +613,84 @@ name = "Test"
         assert!(!resolved.workspace_programs.contains_key(&'b'));
         assert_eq!(resolved.workspace_names[&'a'], "Browser");
         assert_eq!(resolved.workspace_names[&'b'], "Test");
+    }
+
+    // --- Keyboard layout ---
+
+    #[test]
+    fn lookup_layout_known() {
+        assert_eq!(lookup_layout("qwerty").unwrap().name, "qwerty");
+        assert_eq!(lookup_layout("azerty").unwrap().name, "azerty");
+        assert_eq!(lookup_layout("qwertz").unwrap().name, "qwertz");
+        assert_eq!(lookup_layout("dvorak").unwrap().name, "dvorak");
+        assert_eq!(lookup_layout("colemak").unwrap().name, "colemak");
+    }
+
+    #[test]
+    fn lookup_layout_case_insensitive() {
+        assert_eq!(lookup_layout("QWERTY").unwrap().name, "qwerty");
+        assert_eq!(lookup_layout("Dvorak").unwrap().name, "dvorak");
+        assert_eq!(lookup_layout("CoLeMaK").unwrap().name, "colemak");
+    }
+
+    #[test]
+    fn lookup_layout_unknown() {
+        assert!(lookup_layout("workman").is_none());
+        assert!(lookup_layout("").is_none());
+    }
+
+    #[test]
+    fn resolve_known_layout() {
+        let config = Config {
+            general: GeneralConfig {
+                layout: "colemak".to_string(),
+                ..GeneralConfig::default()
+            },
+            ..Config::default()
+        };
+        let (resolved, warnings) = config.resolve();
+        assert!(warnings.is_empty());
+        assert_eq!(resolved.layout.name, "colemak");
+    }
+
+    #[test]
+    fn resolve_unknown_layout_warns_and_defaults() {
+        let config = Config {
+            general: GeneralConfig {
+                layout: "workman".to_string(),
+                ..GeneralConfig::default()
+            },
+            ..Config::default()
+        };
+        let (resolved, warnings) = config.resolve();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("workman"));
+        assert_eq!(resolved.layout.name, "qwerty");
+    }
+
+    #[test]
+    fn toml_with_layout() {
+        let toml_str = r#"
+[general]
+layout = "dvorak"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let (resolved, warnings) = config.resolve();
+        assert!(warnings.is_empty());
+        assert_eq!(resolved.layout.name, "dvorak");
+    }
+
+    #[test]
+    fn all_layouts_divisor_matches_computed() {
+        for layout in ALL_LAYOUTS {
+            let computed = layout.compute_widest_row_divisor();
+            assert!(
+                (layout.widest_row_divisor - computed).abs() < f64::EPSILON,
+                "{}: stored {} != computed {}",
+                layout.name,
+                layout.widest_row_divisor,
+                computed
+            );
+        }
     }
 }

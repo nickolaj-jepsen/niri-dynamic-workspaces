@@ -3,151 +3,89 @@ window {
 }
 
 .backdrop {
-    background-color: alpha(black, 0.3);
+    background-color: alpha(@window_bg_color, 0.85);
 }
 
 .popup-container {
-    background-color: @window_bg_color;
-    border-radius: 12px;
-    padding: 12px;
-    border: 1px solid @borders;
-    box-shadow: 0 8px 32px alpha(black, 0.3);
+    background-color: transparent;
 }
 
-.popup-container.delete-mode {
-    border: 1px solid @error_color;
+/* --- Keyboard keys --- */
+
+.keyboard {
+    margin: var(--key-margin) 0;
 }
 
-.popup-container.move-window-mode {
-    border: 1px solid #78aeed;
-}
-
-.workspace-grid {
-    background: transparent;
-}
-
-/* --- Card --- */
-
-.workspace-card {
+.keyboard-key {
     background-color: @card_bg_color;
-    border: 1px solid @borders;
-    border-radius: 8px;
-    padding: 0;
-    min-width: 180px;
-    min-height: 90px;
+    color: @card_fg_color;
+    border: 1px solid alpha(@card_fg_color, 0.15);
+    border-radius: var(--key-radius);
+    padding: var(--key-pad-v) var(--key-pad-h);
     transition: 200ms ease;
-    box-shadow: 0 1px 3px alpha(black, 0.1);
 }
 
-.workspace-card:hover {
-    box-shadow: 0 4px 12px alpha(black, 0.2);
+.keyboard-key:hover {
+    border-color: alpha(@card_fg_color, 0.3);
 }
 
-.workspace-card.focused,
-.workspace-card.active {
+.keyboard-key.active {
+    background-color: @accent_bg_color;
+    color: @accent_fg_color;
     border: 2px solid @accent_color;
 }
 
-.workspace-card.focused {
-    background-color: alpha(@card_bg_color, 0.9);
-}
-
-.workspace-card.urgent {
+.keyboard-key.urgent {
+    background-color: @warning_bg_color;
+    color: @warning_fg_color;
     border: 2px solid @warning_color;
 }
 
-.workspace-card.uncreated {
-    opacity: 0.5;
-    border-style: dashed;
+.keyboard-key.disabled {
+    opacity: 0.12;
 }
 
-/* --- Card header --- */
-
-.card-header {
-    padding: 8px 10px 4px 10px;
-}
-
-.card-key {
-    font-size: 22px;
+.key-char {
     font-weight: bold;
+    font-size: var(--font-char);
 }
 
-.card-name {
-    font-size: 14px;
-    opacity: 0.6;
+.key-name {
+    font-size: var(--font-name);
+    opacity: 0.7;
 }
 
-.card-window-count {
-    font-size: 10px;
+.key-apps {
+    font-size: var(--font-detail);
     opacity: 0.5;
-}
-
-/* --- Card divider --- */
-
-.card-divider {
-    margin: 2px 10px;
-    opacity: 0.3;
-}
-
-/* --- Card body --- */
-
-.card-body {
-    padding: 4px 10px 8px 10px;
-}
-
-.card-empty,
-.card-program {
-    font-size: 11px;
     font-style: italic;
 }
 
-.card-empty {
-    opacity: 0.4;
-}
-
-.card-program {
+.key-status {
+    font-size: var(--font-detail);
     opacity: 0.5;
 }
 
-/* --- Window rows --- */
-
-.window-row {
-    min-height: 18px;
-}
-
-.window-app-name {
-    font-size: 11px;
-    font-weight: bold;
-}
-
-.window-title {
-    font-size: 11px;
-    opacity: 0.5;
-}
-
-.window-overflow {
-    font-size: 10px;
-    opacity: 0.4;
-    margin-top: 2px;
-}
-
-/* --- Mode tabs --- */
+/* --- Mode tabs (bottom bar) --- */
 
 .mode-tabs {
-    margin-bottom: 8px;
-    spacing: 0;
+    background-color: @card_bg_color;
+    border: 1px solid alpha(@card_fg_color, 0.15);
+    margin-top: var(--section-gap);
+    border-radius: var(--tab-radius);
+    padding: var(--key-pad-v);
 }
 
 .mode-tab {
-    font-size: 13px;
     font-weight: bold;
-    letter-spacing: 0.3px;
-    padding: 4px 14px;
-    border-radius: 6px;
-    color: alpha(@view_fg_color, 0.4);
+    font-size: var(--font-tab);
+    padding: var(--key-pad-v) var(--tab-pad-h);
+    border-radius: var(--tab-radius);
+    color: alpha(@card_fg_color, 0.5);
 }
 
-.mode-tab.active.switch {
+.mode-tab.active.switch,
+.mode-tab.active.move-window {
     background-color: alpha(@accent_color, 0.15);
     color: @accent_color;
 }
@@ -157,29 +95,20 @@ window {
     color: @error_color;
 }
 
-.mode-tab.active.move-window {
-    background-color: alpha(#78aeed, 0.15);
-    color: #78aeed;
-}
-
 /* --- Hints & errors --- */
 
-.hint {
-    font-size: 15px;
-    padding: 16px 24px;
-}
-
 .hint-footer {
-    margin-top: 8px;
+    margin-top: var(--section-gap);
 }
 
 .hint-footer-item {
-    font-size: 11px;
+    font-size: var(--font-footer);
+    color: @card_fg_color;
     opacity: 0.5;
 }
 
 .error-message {
+    font-size: var(--font-footer);
+    margin-top: var(--key-margin);
     color: @error_color;
-    font-size: 12px;
-    margin-top: 8px;
 }

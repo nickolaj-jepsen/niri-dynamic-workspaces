@@ -1,16 +1,127 @@
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use glib::Propagation;
 use gtk4::prelude::*;
 use gtk4::{
-    Align, ApplicationWindow, Box as GtkBox, EventControllerKey, FlowBox, GestureClick, Label,
-    Orientation, Overlay, Revealer, RevealerTransitionType, Separator,
+    Align, ApplicationWindow, Box as GtkBox, EventControllerKey, GestureClick, Label, Orientation,
+    Overlay, Revealer, RevealerTransitionType,
 };
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
-use crate::config::ResolvedConfig;
+use crate::config::{KeyboardLayout, ResolvedConfig};
 use crate::niri;
+
+thread_local! {
+    static DYNAMIC_PROVIDER: RefCell<Option<gtk4::CssProvider>> = const { RefCell::new(None) };
+}
+
+struct KeyboardMetrics {
+    key_size: i32,
+    key_gap: i32,
+    layout: &'static KeyboardLayout,
+}
+
+impl KeyboardMetrics {
+    /// Compute key size so the keyboard fills ~80% of the monitor width.
+    /// The widest row determines the divisor (varies by layout).
+    /// With gap = key/8, total width ≈ divisor * key-widths.
+    fn from_monitor_width(width: i32, layout: &'static KeyboardLayout) -> Self {
+        let target = f64::from(width) * 0.80;
+        let key_size = ((target / layout.widest_row_divisor) as i32).clamp(48, 200);
+        let key_gap = (key_size + 7) / 8;
+        Self {
+            key_size,
+            key_gap,
+            layout,
+        }
+    }
+
+    fn row_margin(&self, row_idx: usize) -> i32 {
+        (self.layout.row_offsets[row_idx] * f64::from(self.key_size + self.key_gap)) as i32
+    }
+
+    /// Generate CSS custom properties scaled to the key size.
+    fn scaled_css_variables(&self) -> String {
+        let ks = self.key_size;
+        format!(
+            "window {{\n\
+             \x20 --key-margin: {km}px;\n\
+             \x20 --key-radius: {kr}px;\n\
+             \x20 --key-pad-v: {kpv}px;\n\
+             \x20 --key-pad-h: {kph}px;\n\
+             \x20 --font-char: {fc}px;\n\
+             \x20 --font-name: {fn_}px;\n\
+             \x20 --font-detail: {fd}px;\n\
+             \x20 --section-gap: {sg}px;\n\
+             \x20 --font-tab: {ft}px;\n\
+             \x20 --tab-pad-h: {tph}px;\n\
+             \x20 --tab-radius: {tr}px;\n\
+             \x20 --font-footer: {ff}px;\n\
+             }}",
+            km = ks / 8,
+            kr = ks / 8,
+            kpv = ks / 16,
+            kph = ks / 10,
+            fc = ks * 32 / 100,
+            fn_ = ks * 13 / 100,
+            fd = ks * 10 / 100,
+            sg = ks / 5,
+            ft = ks * 14 / 100,
+            tph = ks / 6,
+            tr = ks / 12,
+            ff = ks * 15 / 100,
+        )
+    }
+}
+
+fn get_monitor_width() -> i32 {
+    gdk4::Display::default()
+        .and_then(|d| d.monitors().item(0))
+        .and_then(|obj| obj.downcast::<gdk4::Monitor>().ok())
+        .map_or(1920, |m| m.geometry().width())
+}
+
+fn apply_scaled_css(css: &str) {
+    let Some(display) = gdk4::Display::default() else {
+        return;
+    };
+    DYNAMIC_PROVIDER.with(|cell| {
+        let mut opt = cell.borrow_mut();
+        if let Some(old) = opt.take() {
+            gtk4::style_context_remove_provider_for_display(&display, &old);
+        }
+        let provider = gtk4::CssProvider::new();
+        provider.load_from_data(css);
+        gtk4::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk4::STYLE_PROVIDER_PRIORITY_USER,
+        );
+        *opt = Some(provider);
+    });
+}
+
+fn display_key_char(ch: char) -> String {
+    if ch.is_ascii_lowercase() {
+        ch.to_uppercase().to_string()
+    } else {
+        ch.to_string()
+    }
+}
+
+fn clean_app_id(app_id: &str) -> String {
+    let segment = app_id.rsplit('.').next().unwrap_or(app_id);
+    let name = segment.replace(['-', '_'], " ");
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().to_string() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+// --- Modes ---
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -72,11 +183,21 @@ impl Mode {
             _ => None,
         }
     }
+
+    pub fn from_window(window: &gtk4::Window) -> Option<Self> {
+        Self::from_widget_name(window.widget_name().as_str())
+    }
+
+    const fn container_css_class(self) -> Option<&'static str> {
+        match self {
+            Self::Normal => None,
+            Self::Delete => Some("delete-mode"),
+            Self::MoveWindow => Some("move-window-mode"),
+        }
+    }
 }
 
-pub fn get_window_mode(window: &gtk4::Window) -> Option<Mode> {
-    Mode::from_widget_name(window.widget_name().as_str())
-}
+// --- Data types ---
 
 #[derive(Clone)]
 struct ActionContext {
@@ -85,11 +206,6 @@ struct ActionContext {
     error_label: Label,
     error_revealer: Revealer,
     config: Rc<ResolvedConfig>,
-}
-
-struct WindowInfo {
-    app_name: String,
-    title: String,
 }
 
 #[expect(
@@ -103,17 +219,24 @@ struct DynWorkspaceInfo {
     is_uncreated: bool,
     is_urgent: bool,
     name: Option<String>,
-    windows: Vec<WindowInfo>,
+    window_count: usize,
+    app_names: Vec<String>,
     configured_programs: Vec<String>,
 }
 
-fn clean_app_id(app_id: &str) -> String {
-    let segment = app_id.rsplit('.').next().unwrap_or(app_id);
-    let name = segment.replace(['-', '_'], " ");
-    let mut chars = name.chars();
-    match chars.next() {
-        Some(c) => c.to_uppercase().to_string() + chars.as_str(),
-        None => String::new(),
+impl DynWorkspaceInfo {
+    fn uncreated(ch: char) -> Self {
+        Self {
+            char_id: ch,
+            is_focused: false,
+            is_active: false,
+            is_uncreated: true,
+            is_urgent: false,
+            name: None,
+            window_count: 0,
+            app_names: Vec::new(),
+            configured_programs: Vec::new(),
+        }
     }
 }
 
@@ -144,21 +267,30 @@ fn build_dyn_workspace_infos(
 ) -> Vec<DynWorkspaceInfo> {
     let prefix = &config.workspace_prefix;
 
-    // Group windows by workspace_id and track urgency
-    let mut windows_by_ws: HashMap<u64, Vec<WindowInfo>> = HashMap::new();
+    // Count windows per workspace, track urgency, and collect app names
+    let mut window_counts: HashMap<u64, usize> = HashMap::new();
     let mut urgent_ws_ids: HashSet<u64> = HashSet::new();
+    let mut ws_app_names: HashMap<u64, Vec<String>> = HashMap::new();
     for w in windows {
         if let Some(ws_id) = w.workspace_id {
-            let app_name = w.app_id.as_deref().map(clean_app_id).unwrap_or_default();
-            let title = w.title.clone().unwrap_or_default();
-            windows_by_ws
-                .entry(ws_id)
-                .or_default()
-                .push(WindowInfo { app_name, title });
+            *window_counts.entry(ws_id).or_default() += 1;
             if w.is_urgent {
                 urgent_ws_ids.insert(ws_id);
             }
+            if let Some(ref app_id) = w.app_id {
+                if !app_id.is_empty() {
+                    ws_app_names
+                        .entry(ws_id)
+                        .or_default()
+                        .push(clean_app_id(app_id));
+                }
+            }
         }
+    }
+    // Sort and deduplicate app names per workspace
+    for names in ws_app_names.values_mut() {
+        names.sort();
+        names.dedup();
     }
 
     // Find the globally focused workspace
@@ -180,9 +312,10 @@ fn build_dyn_workspace_infos(
             let is_focused = Some(ws.id) == focused_ws_id;
             let is_active = !is_focused && ws.is_active;
 
-            let ws_windows = windows_by_ws.remove(&ws.id).unwrap_or_default();
+            let count = window_counts.get(&ws.id).copied().unwrap_or(0);
             let name = config.workspace_names.get(&ch).cloned();
             let is_urgent = urgent_ws_ids.contains(&ws.id);
+            let app_names = ws_app_names.remove(&ws.id).unwrap_or_default();
 
             Some(DynWorkspaceInfo {
                 char_id: ch,
@@ -191,7 +324,8 @@ fn build_dyn_workspace_infos(
                 is_uncreated: false,
                 is_urgent,
                 name,
-                windows: ws_windows,
+                window_count: count,
+                app_names,
                 configured_programs: Vec::new(),
             })
         })
@@ -209,184 +343,190 @@ fn build_dyn_workspace_infos(
         if live_chars.contains(&ch) {
             continue;
         }
-        let name = config.workspace_names.get(&ch).cloned();
-        let programs = config
+        let mut info = DynWorkspaceInfo::uncreated(ch);
+        info.name = config.workspace_names.get(&ch).cloned();
+        info.configured_programs = config
             .workspace_programs
             .get(&ch)
             .cloned()
             .unwrap_or_else(|| config.default_programs.clone());
-
-        infos.push(DynWorkspaceInfo {
-            char_id: ch,
-            is_focused: false,
-            is_active: false,
-            is_uncreated: true,
-            is_urgent: false,
-            name,
-            windows: Vec::new(),
-            configured_programs: programs,
-        });
+        infos.push(info);
     }
 
     infos.sort_by_key(|i| i.char_id);
     infos
 }
 
-fn build_card_header(info: &DynWorkspaceInfo) -> GtkBox {
-    let header = GtkBox::builder()
-        .orientation(Orientation::Horizontal)
-        .spacing(6)
-        .css_classes(["card-header"])
+// --- Keyboard layout builders ---
+
+/// Build a map of all keyboard keys to their workspace info.
+/// Keys without a live or configured workspace get a default empty entry.
+fn build_full_keyboard_info(config: &ResolvedConfig) -> HashMap<char, DynWorkspaceInfo> {
+    let live_infos = gather_dyn_workspaces(config);
+    let mut map: HashMap<char, DynWorkspaceInfo> = HashMap::new();
+
+    for info in live_infos {
+        map.insert(info.char_id, info);
+    }
+
+    for row in config.layout.rows {
+        for &ch in *row {
+            map.entry(ch)
+                .or_insert_with(|| DynWorkspaceInfo::uncreated(ch));
+        }
+    }
+
+    map
+}
+
+fn build_key_widget(
+    info: &DynWorkspaceInfo,
+    mode: Mode,
+    ctx: &ActionContext,
+    metrics: &KeyboardMetrics,
+) -> GtkBox {
+    let mut classes = vec!["keyboard-key"];
+
+    if info.is_focused || info.is_active {
+        classes.push("active");
+    }
+    if info.is_urgent {
+        classes.push("urgent");
+    }
+
+    let is_disabled = match mode {
+        Mode::MoveWindow => info.is_uncreated || info.is_focused,
+        Mode::Delete | Mode::Normal => info.is_uncreated,
+    };
+    if is_disabled {
+        classes.push("disabled");
+    }
+
+    let key_box = GtkBox::builder()
+        .orientation(Orientation::Vertical)
+        .spacing(0)
+        .css_classes(classes)
+        .halign(Align::Center)
+        .valign(Align::Center)
+        .build();
+    key_box.set_size_request(metrics.key_size, metrics.key_size);
+
+    // Inner box centers the label group vertically within the fixed-size key
+    let inner = GtkBox::builder()
+        .orientation(Orientation::Vertical)
+        .spacing(0)
+        .vexpand(true)
+        .valign(Align::Center)
+        .halign(Align::Center)
         .build();
 
-    let key_label = Label::builder()
-        .label(info.char_id.to_uppercase().to_string())
-        .css_classes(["card-key"])
+    // Key character label
+    let char_label = Label::builder()
+        .label(display_key_char(info.char_id))
+        .css_classes(["key-char"])
         .build();
-    header.append(&key_label);
+    inner.append(&char_label);
 
+    // Workspace name (if configured)
     if let Some(ref name) = info.name {
         let name_label = Label::builder()
             .label(name)
-            .css_classes(["card-name"])
+            .css_classes(["key-name"])
+            .ellipsize(gtk4::pango::EllipsizeMode::End)
+            .max_width_chars(8)
             .build();
-        header.append(&name_label);
+        inner.append(&name_label);
     }
 
-    let spacer = GtkBox::builder().hexpand(true).build();
-    header.append(&spacer);
-
-    let count_text = if info.is_uncreated {
-        "not created".to_string()
+    // App names (live workspaces) or configured programs (uncreated)
+    let apps_text = if !info.app_names.is_empty() {
+        info.app_names.join(", ")
+    } else if info.is_uncreated && !info.configured_programs.is_empty() {
+        info.configured_programs.join(", ")
     } else {
-        match info.windows.len() {
-            0 => "empty".to_string(),
-            1 => "1 window".to_string(),
-            n => format!("{n} windows"),
-        }
+        String::new()
     };
-    let count_label = Label::builder()
-        .label(&count_text)
-        .css_classes(["card-window-count"])
-        .build();
-    header.append(&count_label);
+    if !apps_text.is_empty() {
+        let apps_label = Label::builder()
+            .label(&apps_text)
+            .css_classes(["key-apps"])
+            .ellipsize(gtk4::pango::EllipsizeMode::End)
+            .max_width_chars(10)
+            .build();
+        inner.append(&apps_label);
+    }
 
-    header
+    // Status line
+    let status = if info.is_focused {
+        Some("focused".to_string())
+    } else if info.is_active {
+        Some("active".to_string())
+    } else if !info.is_uncreated && info.window_count == 0 {
+        Some("empty".to_string())
+    } else if info.window_count > 0 {
+        Some(match info.window_count {
+            1 => "1 win".to_string(),
+            n => format!("{n} win"),
+        })
+    } else {
+        None
+    };
+    if let Some(ref text) = status {
+        let status_label = Label::builder()
+            .label(text.as_str())
+            .css_classes(["key-status"])
+            .build();
+        inner.append(&status_label);
+    }
+
+    key_box.append(&inner);
+
+    // Click handler
+    let ch = info.char_id;
+    let click_ctx = ctx.clone();
+    let click = GestureClick::new();
+    click.connect_released(move |_, _, _, _| {
+        dispatch_action(ch, &click_ctx);
+    });
+    key_box.add_controller(click);
+
+    key_box
 }
 
-fn build_card_body(info: &DynWorkspaceInfo, config: &ResolvedConfig) -> GtkBox {
-    let body = GtkBox::builder()
+fn build_keyboard(
+    infos: &HashMap<char, DynWorkspaceInfo>,
+    mode: Mode,
+    ctx: &ActionContext,
+    metrics: &KeyboardMetrics,
+) -> GtkBox {
+    let keyboard = GtkBox::builder()
         .orientation(Orientation::Vertical)
-        .spacing(2)
-        .css_classes(["card-body"])
+        .spacing(metrics.key_gap)
+        .css_classes(["keyboard"])
+        .halign(Align::Center)
         .build();
 
-    if info.is_uncreated {
-        if info.configured_programs.is_empty() {
-            let empty_label = Label::builder()
-                .label("No programs configured")
-                .css_classes(["card-empty"])
-                .halign(Align::Start)
-                .build();
-            body.append(&empty_label);
-        } else {
-            for prog in &info.configured_programs {
-                let prog_label = Label::builder()
-                    .label(prog)
-                    .css_classes(["card-program"])
-                    .ellipsize(gtk4::pango::EllipsizeMode::End)
-                    .max_width_chars(config.app_name_max_chars + config.window_title_max_chars)
-                    .halign(Align::Start)
-                    .build();
-                body.append(&prog_label);
+    for (row_idx, row) in metrics.layout.rows.iter().enumerate() {
+        let row_box = GtkBox::builder()
+            .orientation(Orientation::Horizontal)
+            .spacing(metrics.key_gap)
+            .css_classes(["keyboard-row"])
+            .margin_start(metrics.row_margin(row_idx))
+            .build();
+
+        for &ch in *row {
+            if let Some(info) = infos.get(&ch) {
+                row_box.append(&build_key_widget(info, mode, ctx, metrics));
             }
         }
-    } else if info.windows.is_empty() {
-        let empty_label = Label::builder()
-            .label("No windows")
-            .css_classes(["card-empty"])
-            .halign(Align::Start)
-            .build();
-        body.append(&empty_label);
-    } else {
-        let max_show = if info.windows.len() > config.max_windows_per_card {
-            config.max_windows_per_card - 1
-        } else {
-            config.max_windows_per_card
-        };
-        for win in info.windows.iter().take(max_show) {
-            let row = GtkBox::builder()
-                .orientation(Orientation::Horizontal)
-                .spacing(6)
-                .css_classes(["window-row"])
-                .build();
 
-            let app_label = Label::builder()
-                .label(&win.app_name)
-                .css_classes(["window-app-name"])
-                .ellipsize(gtk4::pango::EllipsizeMode::End)
-                .max_width_chars(config.app_name_max_chars)
-                .halign(Align::Start)
-                .build();
-            row.append(&app_label);
-
-            let title_label = Label::builder()
-                .label(&win.title)
-                .css_classes(["window-title"])
-                .ellipsize(gtk4::pango::EllipsizeMode::End)
-                .max_width_chars(config.window_title_max_chars)
-                .hexpand(true)
-                .halign(Align::Start)
-                .build();
-            row.append(&title_label);
-
-            body.append(&row);
-        }
-
-        if info.windows.len() > config.max_windows_per_card {
-            let overflow = Label::builder()
-                .label(format!(
-                    "+{} more",
-                    info.windows.len() - (config.max_windows_per_card - 1)
-                ))
-                .css_classes(["window-overflow"])
-                .halign(Align::Start)
-                .build();
-            body.append(&overflow);
-        }
+        keyboard.append(&row_box);
     }
 
-    body
+    keyboard
 }
 
-fn build_workspace_card(info: &DynWorkspaceInfo, config: &ResolvedConfig) -> GtkBox {
-    let mut card_classes = vec!["workspace-card"];
-    if info.is_uncreated {
-        card_classes.push("uncreated");
-    } else if info.is_focused {
-        card_classes.push("focused");
-    } else if info.is_active {
-        card_classes.push("active");
-    }
-    if info.is_urgent {
-        card_classes.push("urgent");
-    }
-
-    let card = GtkBox::builder()
-        .orientation(Orientation::Vertical)
-        .spacing(0)
-        .css_classes(card_classes)
-        .build();
-
-    card.append(&build_card_header(info));
-
-    let divider = Separator::builder().css_classes(["card-divider"]).build();
-    card.append(&divider);
-
-    card.append(&build_card_body(info, config));
-
-    card
-}
+// --- UI construction ---
 
 pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode) {
     let window = ApplicationWindow::builder().application(app).build();
@@ -428,6 +568,7 @@ fn build_mode_tabs(window: &ApplicationWindow, config: &Rc<ResolvedConfig>, mode
         .orientation(Orientation::Horizontal)
         .spacing(0)
         .css_classes(["mode-tabs"])
+        .halign(Align::Center)
         .build();
     for m in Mode::all() {
         let mut classes = vec!["mode-tab", m.css_class()];
@@ -456,30 +597,20 @@ fn build_mode_tabs(window: &ApplicationWindow, config: &Rc<ResolvedConfig>, mode
     mode_tabs
 }
 
-fn build_hint_footer(has_workspaces: bool) -> GtkBox {
+fn build_hint_footer(metrics: &KeyboardMetrics) -> GtkBox {
     let footer = GtkBox::builder()
         .orientation(Orientation::Horizontal)
-        .spacing(12)
+        .spacing(metrics.key_size / 4)
         .css_classes(["hint-footer"])
         .halign(Align::Center)
         .build();
-    if has_workspaces {
-        let keys_hint = Label::builder()
-            .label("press key to select")
+    for text in ["press key to select", "Tab switch mode", "Escape close"] {
+        let label = Label::builder()
+            .label(text)
             .css_classes(["hint-footer-item"])
             .build();
-        footer.append(&keys_hint);
+        footer.append(&label);
     }
-    let tab_hint = Label::builder()
-        .label("Tab switch mode")
-        .css_classes(["hint-footer-item"])
-        .build();
-    footer.append(&tab_hint);
-    let close_hint = Label::builder()
-        .label("Escape close")
-        .css_classes(["hint-footer-item"])
-        .build();
-    footer.append(&close_hint);
     footer
 }
 
@@ -488,18 +619,10 @@ fn populate_overlay(window: &ApplicationWindow, config: &Rc<ResolvedConfig>, mod
     window.set_widget_name(mode.widget_name());
     remove_app_controllers(window);
 
-    let mut dyn_workspaces = gather_dyn_workspaces(config);
-    match mode {
-        Mode::Delete => dyn_workspaces.retain(|ws| !ws.is_uncreated),
-        Mode::MoveWindow => dyn_workspaces.retain(|ws| !ws.is_uncreated && !ws.is_focused),
-        Mode::Normal => {}
+    let mut container_classes = vec!["popup-container"];
+    if let Some(cls) = mode.container_css_class() {
+        container_classes.push(cls);
     }
-
-    let container_classes: Vec<&str> = match mode {
-        Mode::Delete => vec!["popup-container", "delete-mode"],
-        Mode::MoveWindow => vec!["popup-container", "move-window-mode"],
-        Mode::Normal => vec!["popup-container"],
-    };
 
     let container = GtkBox::builder()
         .orientation(Orientation::Vertical)
@@ -509,52 +632,7 @@ fn populate_overlay(window: &ApplicationWindow, config: &Rc<ResolvedConfig>, mod
         .valign(Align::Center)
         .build();
 
-    container.append(&build_mode_tabs(window, config, mode));
-
-    let grid = FlowBox::builder()
-        .css_classes(["workspace-grid"])
-        .max_children_per_line(config.max_columns)
-        .min_children_per_line(config.min_columns)
-        .selection_mode(gtk4::SelectionMode::None)
-        .homogeneous(true)
-        .focusable(false)
-        .build();
-
-    if dyn_workspaces.is_empty() {
-        let hint_text = match mode {
-            Mode::Delete => "No workspaces to delete",
-            Mode::MoveWindow => "Press a key to move window to a new workspace",
-            Mode::Normal => "Press a key to create a workspace",
-        };
-        let hint = Label::builder()
-            .label(hint_text)
-            .css_classes(["hint"])
-            .build();
-        container.append(&hint);
-    }
-
-    for info in &dyn_workspaces {
-        let card = build_workspace_card(info, config);
-        card.set_widget_name(&crate::config::workspace_name(
-            &config.workspace_prefix,
-            info.char_id,
-        ));
-        grid.insert(&card, -1);
-    }
-
-    // Disable focus on FlowBoxChild wrappers to suppress focus rings
-    let mut child = grid.first_child();
-    while let Some(widget) = child {
-        widget.set_focusable(false);
-        child = widget.next_sibling();
-    }
-
-    if !dyn_workspaces.is_empty() {
-        container.append(&grid);
-    }
-
-    container.append(&build_hint_footer(!dyn_workspaces.is_empty()));
-
+    // Error label + revealer (built first so ActionContext is available for keys)
     let error_label = Label::builder()
         .css_classes(["error-message"])
         .wrap(true)
@@ -565,7 +643,28 @@ fn populate_overlay(window: &ApplicationWindow, config: &Rc<ResolvedConfig>, mod
         .transition_type(RevealerTransitionType::SlideUp)
         .transition_duration(200)
         .build();
+
+    let ctx = ActionContext {
+        mode,
+        window: window.clone(),
+        error_label,
+        error_revealer: error_revealer.clone(),
+        config: config.clone(),
+    };
+
+    // Compute metrics from monitor size and apply scaled CSS
+    let metrics = KeyboardMetrics::from_monitor_width(get_monitor_width(), config.layout);
+    apply_scaled_css(&metrics.scaled_css_variables());
+
+    // Build keyboard
+    let infos = build_full_keyboard_info(config);
+    let keyboard = build_keyboard(&infos, mode, &ctx, &metrics);
+
+    // Assemble: keyboard → hint footer → error revealer → mode tabs (bottom)
+    container.append(&keyboard);
+    container.append(&build_hint_footer(&metrics));
     container.append(&error_revealer);
+    container.append(&build_mode_tabs(window, config, mode));
 
     let backdrop = GtkBox::builder()
         .css_classes(["backdrop"])
@@ -578,45 +677,37 @@ fn populate_overlay(window: &ApplicationWindow, config: &Rc<ResolvedConfig>, mod
 
     window.set_child(Some(&overlay));
 
-    let ctx = ActionContext {
-        mode,
-        window: window.clone(),
-        error_label,
-        error_revealer,
-        config: config.clone(),
-    };
-
-    attach_action_handlers(&grid, &ctx, &config.close_keybinds);
+    attach_key_handler(&ctx, &config.close_keybinds);
     attach_close_on_backdrop_click(window, &container);
 }
 
 fn dispatch_action(ch: char, ctx: &ActionContext) {
-    match ctx.mode {
-        Mode::Delete => handle_delete_workspace(ch, ctx),
-        Mode::MoveWindow => handle_move_window(ch, ctx),
-        Mode::Normal => handle_workspace_key(ch, ctx),
+    let ws_name = crate::config::workspace_name(&ctx.config.workspace_prefix, ch);
+
+    let result = match ctx.mode {
+        Mode::Normal => {
+            let programs = ctx.config.programs_for(ch);
+            niri::switch_workspace(&ws_name, programs).map(|req| {
+                if let Some(r) = req {
+                    std::thread::Builder::new()
+                        .name("reorder".into())
+                        .spawn(move || niri::reorder_workspace_columns(&r))
+                        .ok();
+                }
+            })
+        }
+        Mode::Delete => niri::delete_workspace(&ws_name),
+        Mode::MoveWindow => niri::move_window_to_workspace(&ws_name),
+    };
+
+    if let Err(e) = result {
+        show_error(ctx, &format!("Failed: {e:#}"));
+        return;
     }
+    ctx.window.close();
 }
 
-fn attach_action_handlers(
-    grid: &FlowBox,
-    ctx: &ActionContext,
-    close_keybinds: &[crate::config::Keybind],
-) {
-    // Click handler on FlowBox children
-    let click_ctx = ctx.clone();
-    grid.connect_child_activated(move |_, child| {
-        let widget = child.child().unwrap();
-        let name = widget.widget_name().to_string();
-        if let Some(ch) = name
-            .strip_prefix(&*click_ctx.config.workspace_prefix)
-            .and_then(|s| s.chars().next())
-        {
-            dispatch_action(ch, &click_ctx);
-        }
-    });
-
-    // Key handler — capture phase so it fires before child widgets
+fn attach_key_handler(ctx: &ActionContext, close_keybinds: &[crate::config::Keybind]) {
     let key_ctx = ctx.clone();
     let close_keybinds = close_keybinds.to_vec();
     let key_controller = EventControllerKey::new();
@@ -692,61 +783,6 @@ fn show_error(ctx: &ActionContext, msg: &str) {
     ctx.error_revealer.set_reveal_child(true);
 }
 
-fn handle_delete_workspace(ch: char, ctx: &ActionContext) {
-    let ws_name = crate::config::workspace_name(&ctx.config.workspace_prefix, ch);
-    if let Err(e) = niri::delete_workspace(&ws_name) {
-        show_error(ctx, &format!("Failed to delete workspace {ws_name}: {e}"));
-        return;
-    }
-    ctx.window.close();
-}
-
-fn handle_move_window(ch: char, ctx: &ActionContext) {
-    let ws_name = crate::config::workspace_name(&ctx.config.workspace_prefix, ch);
-    if let Err(e) = niri::move_window_to_workspace(&ws_name) {
-        show_error(ctx, &format!("Failed to move window to {ws_name}: {e}"));
-        return;
-    }
-    ctx.window.close();
-}
-
-fn handle_workspace_key(ch: char, ctx: &ActionContext) {
-    let ws_name = crate::config::workspace_name(&ctx.config.workspace_prefix, ch);
-    match niri::focus_or_create_workspace(&ws_name) {
-        Ok(created) => {
-            if created {
-                let programs = ctx
-                    .config
-                    .workspace_programs
-                    .get(&ch)
-                    .map_or(ctx.config.default_programs.as_slice(), Vec::as_slice);
-
-                match niri::spawn_workspace_programs(&ws_name, programs) {
-                    Ok(Some(request)) => {
-                        std::thread::Builder::new()
-                            .name("reorder".into())
-                            .spawn(move || niri::reorder_workspace_columns(&request))
-                            .ok();
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        show_error(ctx, &format!("Failed to spawn programs: {e:#}"));
-                        return;
-                    }
-                }
-            }
-        }
-        Err(e) => {
-            show_error(
-                ctx,
-                &format!("Failed to switch to workspace {ws_name}: {e}"),
-            );
-            return;
-        }
-    }
-    ctx.window.close();
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -800,6 +836,131 @@ mod tests {
         assert_eq!(Mode::MoveWindow.css_class(), "move-window");
     }
 
+    // --- display_key_char ---
+
+    #[test]
+    fn display_key_char_letters() {
+        assert_eq!(display_key_char('a'), "A");
+        assert_eq!(display_key_char('z'), "Z");
+        assert_eq!(display_key_char('m'), "M");
+    }
+
+    #[test]
+    fn display_key_char_digits() {
+        assert_eq!(display_key_char('0'), "0");
+        assert_eq!(display_key_char('9'), "9");
+    }
+
+    // --- Keyboard layout coverage ---
+
+    use crate::config::{ALL_LAYOUTS, LAYOUT_DVORAK, LAYOUT_QWERTY};
+
+    #[test]
+    fn all_layouts_have_36_keys() {
+        for layout in ALL_LAYOUTS {
+            let total: usize = layout.rows.iter().map(|r| r.len()).sum();
+            assert_eq!(total, 36, "{} has {total} keys", layout.name);
+        }
+    }
+
+    #[test]
+    fn all_layout_keys_are_valid_workspace_chars() {
+        for layout in ALL_LAYOUTS {
+            for row in layout.rows {
+                for &ch in *row {
+                    assert!(
+                        crate::config::is_workspace_char(ch),
+                        "{}: '{ch}' should be a valid workspace char",
+                        layout.name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn all_workspace_chars_present_in_all_layouts() {
+        for layout in ALL_LAYOUTS {
+            let chars: HashSet<char> = layout.rows.iter().flat_map(|r| r.iter().copied()).collect();
+            for ch in 'a'..='z' {
+                assert!(
+                    chars.contains(&ch),
+                    "{}: missing letter '{ch}'",
+                    layout.name
+                );
+            }
+            for ch in '0'..='9' {
+                assert!(chars.contains(&ch), "{}: missing digit '{ch}'", layout.name);
+            }
+        }
+    }
+
+    #[test]
+    fn all_layouts_no_duplicate_keys() {
+        for layout in ALL_LAYOUTS {
+            let all_chars: Vec<char> = layout.rows.iter().flat_map(|r| r.iter().copied()).collect();
+            let unique: HashSet<char> = all_chars.iter().copied().collect();
+            assert_eq!(
+                all_chars.len(),
+                unique.len(),
+                "{}: has duplicate keys",
+                layout.name
+            );
+        }
+    }
+
+    #[test]
+    fn all_layouts_row_offsets_match_rows() {
+        for layout in ALL_LAYOUTS {
+            assert_eq!(
+                layout.row_offsets.len(),
+                layout.rows.len(),
+                "{}: row_offsets length mismatch",
+                layout.name
+            );
+        }
+    }
+
+    #[test]
+    fn keyboard_metrics_qwerty_from_1920() {
+        let m = KeyboardMetrics::from_monitor_width(1920, &LAYOUT_QWERTY);
+        // 1920 * 0.80 / 11.6875 ≈ 131
+        assert_eq!(m.key_size, 131);
+        assert_eq!(m.key_gap, 17); // (131 + 7) / 8 = 17
+    }
+
+    #[test]
+    fn keyboard_metrics_dvorak_from_1920() {
+        let m = KeyboardMetrics::from_monitor_width(1920, &LAYOUT_DVORAK);
+        // 1920 * 0.80 / 11.96875 ≈ 128
+        assert_eq!(m.key_size, 128);
+        assert_eq!(m.key_gap, 16); // (128 + 7) / 8 = 16
+    }
+
+    #[test]
+    fn keyboard_metrics_row_margins() {
+        let m = KeyboardMetrics::from_monitor_width(1920, &LAYOUT_QWERTY);
+        assert_eq!(m.row_margin(0), 0);
+        // Row 1: 0.5 * (131 + 17) = 74
+        assert_eq!(m.row_margin(1), 74);
+        // Row 2: 0.75 * 148 = 111
+        assert_eq!(m.row_margin(2), 111);
+        // Row 3: 1.25 * 148 = 185
+        assert_eq!(m.row_margin(3), 185);
+    }
+
+    #[test]
+    fn keyboard_metrics_clamps_small() {
+        let m = KeyboardMetrics::from_monitor_width(400, &LAYOUT_QWERTY);
+        assert_eq!(m.key_size, 48); // clamped to minimum
+    }
+
+    #[test]
+    fn keyboard_metrics_clamps_large() {
+        let m = KeyboardMetrics::from_monitor_width(8000, &LAYOUT_QWERTY);
+        assert_eq!(m.key_size, 200); // clamped to maximum
+    }
+
     // --- build_dyn_workspace_infos helpers & tests ---
 
     use crate::test_helpers::{test_window, test_workspace};
@@ -807,16 +968,12 @@ mod tests {
     fn default_test_config() -> ResolvedConfig {
         ResolvedConfig {
             workspace_prefix: "dyn-".to_string(),
-            max_columns: 4,
-            min_columns: 2,
-            max_windows_per_card: 4,
-            app_name_max_chars: 12,
-            window_title_max_chars: 18,
             close_keybinds: Vec::new(),
             default_programs: Vec::new(),
             workspace_programs: HashMap::new(),
             workspace_names: HashMap::new(),
             auto_delete_empty: true,
+            layout: &LAYOUT_QWERTY,
         }
     }
 
@@ -840,8 +997,11 @@ mod tests {
         assert_eq!(infos[0].char_id, 'a');
         assert_eq!(infos[1].char_id, 'b');
         // 'a' has 2 windows, 'b' has 1
-        assert_eq!(infos[0].windows.len(), 2);
-        assert_eq!(infos[1].windows.len(), 1);
+        assert_eq!(infos[0].window_count, 2);
+        assert_eq!(infos[1].window_count, 1);
+        // app_names are cleaned and sorted
+        assert_eq!(infos[0].app_names, vec!["Firefox", "Kitty"]);
+        assert_eq!(infos[1].app_names, vec!["Slack"]);
     }
 
     #[test]
@@ -860,10 +1020,12 @@ mod tests {
         // 'a' is live, 'b' is uncreated
         assert!(!infos[0].is_uncreated);
         assert_eq!(infos[0].char_id, 'a');
+        assert!(infos[0].app_names.is_empty());
         assert!(infos[1].is_uncreated);
         assert_eq!(infos[1].char_id, 'b');
         assert_eq!(infos[1].name.as_deref(), Some("Browser"));
         assert_eq!(infos[1].configured_programs, vec!["firefox"]);
+        assert!(infos[1].app_names.is_empty());
     }
 
     #[test]
@@ -924,5 +1086,36 @@ mod tests {
         // 'c' — neither
         assert!(!infos[2].is_focused);
         assert!(!infos[2].is_active);
+    }
+
+    #[test]
+    fn build_dyn_workspace_infos_deduplicates_app_names() {
+        let workspaces = vec![test_workspace(10, Some("dyn-a"), true)];
+        let windows = vec![
+            test_window(1, 10, "firefox"),
+            test_window(2, 10, "org.mozilla.firefox"),
+            test_window(3, 10, "firefox"),
+        ];
+        let config = default_test_config();
+
+        let infos = build_dyn_workspace_infos(&workspaces, &windows, &config);
+
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].app_names, vec!["Firefox"]);
+    }
+
+    #[test]
+    fn build_dyn_workspace_infos_handles_no_app_id() {
+        let workspaces = vec![test_workspace(10, Some("dyn-a"), true)];
+        let mut window_no_app = test_window(1, 10, "");
+        window_no_app.app_id = None;
+        let windows = vec![window_no_app, test_window(2, 10, "kitty")];
+        let config = default_test_config();
+
+        let infos = build_dyn_workspace_infos(&workspaces, &windows, &config);
+
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].window_count, 2);
+        assert_eq!(infos[0].app_names, vec!["Kitty"]);
     }
 }

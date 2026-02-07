@@ -33,7 +33,6 @@ programs.niri-dynamic-workspaces = {
   daemon = true;                  # default — start daemon at login
   settings = {
     general.workspace_prefix = "dyn-";
-    layout.max_columns = 4;
   };
 };
 ```
@@ -59,21 +58,23 @@ All fields are optional with sensible defaults.
 workspace_prefix = "dyn-"          # prefix for dynamic workspace names
 default_programs = ["kitty"]       # programs launched when creating any new workspace
 auto_delete_empty = true           # daemon: auto-delete empty unfocused workspaces
+layout = "qwerty"                  # keyboard layout for the overlay (see table below)
 
-[layout]
-max_columns = 4             # max columns in the card grid
-min_columns = 2             # min columns in the card grid
-max_windows_per_card = 4    # max windows shown per card
-app_name_max_chars = 12     # truncate app names after N chars
-window_title_max_chars = 18 # truncate window titles after N chars
+# [layout] options below are no longer used (kept for backwards compatibility).
+# The overlay now displays a virtual keyboard layout instead of a card grid.
+# max_columns = 4
+# min_columns = 2
+# max_windows_per_card = 4
+# app_name_max_chars = 12
+# window_title_max_chars = 18
 
 [keybinds]
 close = ["Escape", "Ctrl+c", "Ctrl+w", "Ctrl+q"]  # keys to dismiss the overlay
 
-[workspace.a]                          # key: a-z, 0-9, or symbol like , . /
-name = "Browser"                       # optional display name shown on the card
+[workspace.a]                          # key: a-z or 0-9
+name = "Browser"                       # optional display name shown on the key
 programs = ["firefox", "slack"]        # programs launched on create (replaces defaults)
-# Configured workspaces that don't exist yet appear as muted cards with a dashed border.
+# Configured workspaces that don't exist yet appear as muted keys with a dashed border.
 
 [workspace.b]
 programs = ["kitty --title myterm"]    # arguments supported via whitespace splitting
@@ -81,11 +82,19 @@ programs = ["kitty --title myterm"]    # arguments supported via whitespace spli
 [workspace.1]                          # digit workspaces work too
 name = "Comms"
 programs = ["slack", "discord"]
-
-# Symbol keys need TOML quoting:
-# [workspace.","]
-# name = "Quick"
 ```
+
+#### Available keyboard layouts
+
+| Layout   | Value      |
+|----------|------------|
+| QWERTY   | `qwerty`   |
+| AZERTY   | `azerty`   |
+| QWERTZ   | `qwertz`   |
+| Dvorak   | `dvorak`   |
+| Colemak  | `colemak`  |
+
+All layouts contain the same 36 keys (a–z, 0–9) arranged in the physical positions of each keyboard layout. The value is case-insensitive.
 
 ### Usage
 

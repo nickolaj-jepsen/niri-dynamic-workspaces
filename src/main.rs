@@ -32,17 +32,17 @@ struct Cli {
 enum Command {
     /// Switch to or create a workspace [default]
     Switch {
-        /// Workspace key (a-z, 0-9, symbol) — act directly without overlay
+        /// Workspace key (a-z, 0-9) — act directly without overlay
         key: Option<String>,
     },
     /// Delete a workspace
     Delete {
-        /// Workspace key (a-z, 0-9, symbol) — act directly without overlay
+        /// Workspace key (a-z, 0-9) — act directly without overlay
         key: Option<String>,
     },
     /// Move the focused window to a workspace
     MoveWindow {
-        /// Workspace key (a-z, 0-9, symbol) — act directly without overlay
+        /// Workspace key (a-z, 0-9) — act directly without overlay
         key: Option<String>,
     },
     /// Start as a background daemon (for spawn-at-startup)
@@ -51,49 +51,29 @@ enum Command {
 
 fn handle_direct_action(cli: &Cli, mode: ui::Mode, key: &str) -> i32 {
     let Some(ch) = config::parse_workspace_char(key) else {
-        eprintln!("error: invalid workspace key '{key}' (must be a-z, 0-9, or symbol)");
+        eprintln!("error: invalid workspace key '{key}' (must be a-z or 0-9)");
         return 1;
     };
 
     let cfg = config::load_config(cli.config.as_deref());
     let ws_name = config::workspace_name(&cfg.workspace_prefix, ch);
 
-    match mode {
-        ui::Mode::Normal => match niri::focus_or_create_workspace(&ws_name) {
-            Ok(created) => {
-                if created {
-                    let programs = cfg
-                        .workspace_programs
-                        .get(&ch)
-                        .map_or(cfg.default_programs.as_slice(), Vec::as_slice);
-
-                    match niri::spawn_workspace_programs(&ws_name, programs) {
-                        Ok(Some(request)) => niri::reorder_workspace_columns(&request),
-                        Ok(None) => {}
-                        Err(e) => {
-                            eprintln!("error: {e:#}");
-                            return 1;
-                        }
-                    }
+    let result = match mode {
+        ui::Mode::Normal => {
+            let programs = cfg.programs_for(ch);
+            niri::switch_workspace(&ws_name, programs).map(|req| {
+                if let Some(r) = req {
+                    niri::reorder_workspace_columns(&r);
                 }
-            }
-            Err(e) => {
-                eprintln!("error: failed to switch to workspace {ws_name}: {e}");
-                return 1;
-            }
-        },
-        ui::Mode::Delete => {
-            if let Err(e) = niri::delete_workspace(&ws_name) {
-                eprintln!("error: failed to delete workspace {ws_name}: {e}");
-                return 1;
-            }
+            })
         }
-        ui::Mode::MoveWindow => {
-            if let Err(e) = niri::move_window_to_workspace(&ws_name) {
-                eprintln!("error: failed to move window to {ws_name}: {e}");
-                return 1;
-            }
-        }
+        ui::Mode::Delete => niri::delete_workspace(&ws_name),
+        ui::Mode::MoveWindow => niri::move_window_to_workspace(&ws_name),
+    };
+
+    if let Err(e) = result {
+        eprintln!("error: {e:#}");
+        return 1;
     }
 
     0
@@ -103,7 +83,7 @@ fn handle_overlay(app: &gtk4::Application, cli: &Cli, mode: ui::Mode) -> i32 {
     let cfg = Rc::new(config::load_config(cli.config.as_deref()));
 
     if let Some(window) = app.active_window() {
-        let same_mode = ui::get_window_mode(&window) == Some(mode);
+        let same_mode = ui::Mode::from_window(&window) == Some(mode);
         window.close();
         if same_mode {
             return 0;
