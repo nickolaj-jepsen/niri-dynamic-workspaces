@@ -22,7 +22,19 @@
         keybind = lib.mkOption {
           type = lib.types.str;
           default = "Mod+D";
-          description = "Keybind to spawn niri-dynamic-workspaces.";
+          description = "Keybind to open the workspace switcher overlay.";
+        };
+
+        deleteKeybind = lib.mkOption {
+          type = lib.types.str;
+          default = "Mod+Ctrl+D";
+          description = "Keybind to open the workspace delete overlay.";
+        };
+
+        moveWindowKeybind = lib.mkOption {
+          type = lib.types.str;
+          default = "Mod+Shift+D";
+          description = "Keybind to open the move-window overlay.";
         };
 
         settings = lib.mkOption {
@@ -39,7 +51,6 @@
             {
               general.workspace_prefix = "ws-";
               layout.max_columns = 3;
-              keybinds.delete_modifier = "Alt";
             }
           '';
         };
@@ -48,8 +59,14 @@
       config = lib.mkIf cfg.enable {
         home.packages = [ cfg.package ];
 
-        programs.niri.settings.binds."${cfg.keybind}".action.spawn =
-          [ "${cfg.package}/bin/niri-dynamic-workspaces" ];
+        programs.niri.settings.binds = {
+          "${cfg.keybind}".action.spawn =
+            [ "${cfg.package}/bin/niri-dynamic-workspaces" ];
+          "${cfg.deleteKeybind}".action.spawn =
+            [ "${cfg.package}/bin/niri-dynamic-workspaces" "delete" ];
+          "${cfg.moveWindowKeybind}".action.spawn =
+            [ "${cfg.package}/bin/niri-dynamic-workspaces" "move-window" ];
+        };
 
         xdg.configFile."niri-dynamic-workspaces/config.toml" =
           lib.mkIf (cfg.settings != { }) {

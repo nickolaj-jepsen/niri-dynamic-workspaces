@@ -11,6 +11,7 @@ categories = ["command-line-utilities"]
 
 [dependencies]
 anyhow = "1"
+clap = { version = "4", features = ["derive"] }
 niri-ipc = "=25.11.0"
 gtk4 = "0.9"
 gtk4-layer-shell = "0.5"

@@ -13,6 +13,14 @@ window {
     border: 1px solid @borders;
 }
 
+.popup-container.delete-mode {
+    border: 1px solid @error_color;
+}
+
+.popup-container.move-window-mode {
+    border: 1px solid @warning_color;
+}
+
 .workspace-grid {
     background: transparent;
 }
@@ -28,13 +36,18 @@ window {
     min-height: 90px;
 }
 
-.workspace-card.focused {
+.workspace-card.focused,
+.workspace-card.active {
     border: 2px solid @accent_color;
+}
+
+.workspace-card.focused {
     background-color: alpha(@card_bg_color, 0.9);
 }
 
-.workspace-card.active {
-    border: 2px solid @accent_color;
+.workspace-card.uncreated {
+    opacity: 0.5;
+    border-style: dashed;
 }
 
 /* --- Card header --- */
@@ -48,12 +61,9 @@ window {
     font-weight: bold;
 }
 
-.card-monitor {
-    font-size: 10px;
+.card-name {
+    font-size: 14px;
     opacity: 0.6;
-    background-color: alpha(@borders, 0.2);
-    border-radius: 6px;
-    padding: 1px 6px;
 }
 
 .card-window-count {
@@ -77,6 +87,12 @@ window {
 .card-empty {
     font-size: 11px;
     opacity: 0.4;
+    font-style: italic;
+}
+
+.card-program {
+    font-size: 11px;
+    opacity: 0.5;
     font-style: italic;
 }
 

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use gdk4::{Key, ModifierType};
 use serde::Deserialize;
 
@@ -9,18 +11,28 @@ struct Config {
     general: GeneralConfig,
     layout: LayoutConfig,
     keybinds: KeybindsConfig,
+    workspace: HashMap<String, WorkspaceEntry>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct WorkspaceEntry {
+    name: Option<String>,
+    programs: Vec<String>,
 }
 
 #[derive(Deserialize)]
 #[serde(default)]
 struct GeneralConfig {
     workspace_prefix: String,
+    default_programs: Vec<String>,
 }
 
 impl Default for GeneralConfig {
     fn default() -> Self {
         Self {
             workspace_prefix: "dyn-".to_string(),
+            default_programs: Vec::new(),
         }
     }
 }
@@ -51,7 +63,6 @@ impl Default for LayoutConfig {
 #[serde(default)]
 struct KeybindsConfig {
     close: Vec<String>,
-    delete_modifier: String,
 }
 
 impl Default for KeybindsConfig {
@@ -63,7 +74,6 @@ impl Default for KeybindsConfig {
                 "Ctrl+w".to_string(),
                 "Ctrl+q".to_string(),
             ],
-            delete_modifier: "Shift".to_string(),
         }
     }
 }
@@ -78,7 +88,9 @@ pub struct ResolvedConfig {
     pub app_name_max_chars: i32,
     pub window_title_max_chars: i32,
     pub close_keybinds: Vec<Keybind>,
-    pub delete_modifier: ModifierType,
+    pub default_programs: Vec<String>,
+    pub workspace_programs: HashMap<char, Vec<String>>,
+    pub workspace_names: HashMap<char, String>,
 }
 
 #[derive(Clone, Debug)]
@@ -127,17 +139,25 @@ impl Config {
             }
         }
 
-        let delete_modifier = if self.keybinds.delete_modifier.is_empty() {
-            ModifierType::empty()
-        } else if let Some(m) = parse_modifier(&self.keybinds.delete_modifier) {
-            m
-        } else {
+        let mut workspace_programs = HashMap::new();
+        let mut workspace_names = HashMap::new();
+        for (key, entry) in self.workspace {
+            if let &[ch] = key.as_bytes() {
+                if ch.is_ascii_lowercase() {
+                    let ch = char::from(ch);
+                    if !entry.programs.is_empty() {
+                        workspace_programs.insert(ch, entry.programs);
+                    }
+                    if let Some(name) = entry.name {
+                        workspace_names.insert(ch, name);
+                    }
+                    continue;
+                }
+            }
             warnings.push(format!(
-                "invalid delete_modifier '{}', using Shift",
-                self.keybinds.delete_modifier
+                "ignoring [workspace] key '{key}': must be a single lowercase letter a-z"
             ));
-            ModifierType::SHIFT_MASK
-        };
+        }
 
         let resolved = ResolvedConfig {
             workspace_prefix: self.general.workspace_prefix,
@@ -147,7 +167,9 @@ impl Config {
             app_name_max_chars: self.layout.app_name_max_chars,
             window_title_max_chars: self.layout.window_title_max_chars,
             close_keybinds,
-            delete_modifier,
+            default_programs: self.general.default_programs,
+            workspace_programs,
+            workspace_names,
         };
 
         (resolved, warnings)
@@ -156,25 +178,31 @@ impl Config {
 
 // --- Public API ---
 
-pub fn load_config() -> ResolvedConfig {
-    let config_path = if let Some(dir) = dirs::config_dir() {
+fn default_config() -> ResolvedConfig {
+    Config::default().resolve().0
+}
+
+pub fn load_config(path_override: Option<&std::path::Path>) -> ResolvedConfig {
+    let config_path = if let Some(p) = path_override {
+        p.to_path_buf()
+    } else if let Some(dir) = dirs::config_dir() {
         dir.join("niri-dynamic-workspaces").join("config.toml")
     } else {
         eprintln!("warning: could not determine config directory, using defaults");
-        return Config::default().resolve().0;
+        return default_config();
     };
 
     let contents = match std::fs::read_to_string(&config_path) {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Config::default().resolve().0;
+            return default_config();
         }
         Err(e) => {
             eprintln!(
                 "warning: could not read {}: {e}, using defaults",
                 config_path.display()
             );
-            return Config::default().resolve().0;
+            return default_config();
         }
     };
 
@@ -185,7 +213,7 @@ pub fn load_config() -> ResolvedConfig {
                 "warning: could not parse {}: {e}, using defaults",
                 config_path.display()
             );
-            return Config::default().resolve().0;
+            return default_config();
         }
     };
 
@@ -267,8 +295,10 @@ mod tests {
         let (resolved, warnings) = config.resolve();
         assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
         assert_eq!(resolved.workspace_prefix, "dyn-");
-        assert_eq!(resolved.delete_modifier, ModifierType::SHIFT_MASK);
         assert!(!resolved.close_keybinds.is_empty());
+        assert!(resolved.default_programs.is_empty());
+        assert!(resolved.workspace_programs.is_empty());
+        assert!(resolved.workspace_names.is_empty());
     }
 
     #[test]
@@ -283,36 +313,105 @@ mod tests {
         let (resolved, warnings) = config.resolve();
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("Bogus+x"));
-        // The valid keybind should still be present
         assert_eq!(resolved.close_keybinds.len(), 1);
     }
 
     #[test]
-    fn resolve_invalid_delete_modifier_falls_back_to_shift() {
-        let config = Config {
-            keybinds: KeybindsConfig {
-                delete_modifier: "BadMod".to_string(),
-                ..KeybindsConfig::default()
+    fn resolve_invalid_workspace_keys_produce_warnings() {
+        let mut workspace = HashMap::new();
+        workspace.insert(
+            "ab".to_string(),
+            WorkspaceEntry {
+                programs: vec!["firefox".to_string()],
+                ..WorkspaceEntry::default()
             },
+        );
+        workspace.insert(
+            "A".to_string(),
+            WorkspaceEntry {
+                programs: vec!["slack".to_string()],
+                ..WorkspaceEntry::default()
+            },
+        );
+        workspace.insert(
+            "1".to_string(),
+            WorkspaceEntry {
+                programs: vec!["kitty".to_string()],
+                ..WorkspaceEntry::default()
+            },
+        );
+        workspace.insert("".to_string(), WorkspaceEntry::default());
+        let config = Config {
+            workspace,
+            ..Config::default()
+        };
+        let (resolved, warnings) = config.resolve();
+        assert_eq!(warnings.len(), 4);
+        assert!(resolved.workspace_programs.is_empty());
+        for w in &warnings {
+            assert!(w.contains("[workspace] key"));
+        }
+    }
+
+    #[test]
+    fn resolve_workspace_with_name_and_programs() {
+        let mut workspace = HashMap::new();
+        workspace.insert(
+            "a".to_string(),
+            WorkspaceEntry {
+                name: Some("Browser".to_string()),
+                programs: vec!["firefox".to_string()],
+            },
+        );
+        workspace.insert(
+            "b".to_string(),
+            WorkspaceEntry {
+                name: Some("Terminal".to_string()),
+                programs: Vec::new(),
+            },
+        );
+        workspace.insert(
+            "bad".to_string(),
+            WorkspaceEntry {
+                programs: vec!["slack".to_string()],
+                ..WorkspaceEntry::default()
+            },
+        );
+        let config = Config {
+            workspace,
             ..Config::default()
         };
         let (resolved, warnings) = config.resolve();
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("BadMod"));
-        assert_eq!(resolved.delete_modifier, ModifierType::SHIFT_MASK);
+        assert!(warnings[0].contains("bad"));
+        assert_eq!(resolved.workspace_programs[&'a'], vec!["firefox"]);
+        assert!(!resolved.workspace_programs.contains_key(&'b'));
+        assert_eq!(resolved.workspace_names[&'a'], "Browser");
+        assert_eq!(resolved.workspace_names[&'b'], "Terminal");
     }
 
+    // --- TOML deserialization ---
+
     #[test]
-    fn resolve_empty_delete_modifier_means_no_modifier() {
-        let config = Config {
-            keybinds: KeybindsConfig {
-                delete_modifier: String::new(),
-                ..KeybindsConfig::default()
-            },
-            ..Config::default()
-        };
+    fn toml_full_config() {
+        let toml_str = r#"
+[general]
+default_programs = ["kitty"]
+
+[workspace.a]
+name = "Browser"
+programs = ["firefox", "slack"]
+
+[workspace.b]
+name = "Test"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
         let (resolved, warnings) = config.resolve();
         assert!(warnings.is_empty());
-        assert!(resolved.delete_modifier.is_empty());
+        assert_eq!(resolved.default_programs, vec!["kitty"]);
+        assert_eq!(resolved.workspace_programs[&'a'], vec!["firefox", "slack"]);
+        assert!(!resolved.workspace_programs.contains_key(&'b'));
+        assert_eq!(resolved.workspace_names[&'a'], "Browser");
+        assert_eq!(resolved.workspace_names[&'b'], "Test");
     }
 }

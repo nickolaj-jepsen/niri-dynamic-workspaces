@@ -27,7 +27,9 @@ imports = [ inputs.niri-dynamic-workspaces.homeModules.default ];
 # Enable
 programs.niri-dynamic-workspaces = {
   enable = true;
-  keybind = "Mod+D";  # default
+  keybind = "Mod+D";              # default — open switcher
+  deleteKeybind = "Mod+Ctrl+D";  # default — open delete overlay
+  moveWindowKeybind = "Mod+Shift+D"; # default — open move-window overlay
   settings = {
     general.workspace_prefix = "dyn-";
     layout.max_columns = 4;
@@ -53,7 +55,8 @@ All fields are optional with sensible defaults.
 
 ```toml
 [general]
-workspace_prefix = "dyn-"  # prefix for dynamic workspace names
+workspace_prefix = "dyn-"          # prefix for dynamic workspace names
+default_programs = ["kitty"]       # programs launched when creating any new workspace
 
 [layout]
 max_columns = 4             # max columns in the card grid
@@ -64,10 +67,23 @@ window_title_max_chars = 18 # truncate window titles after N chars
 
 [keybinds]
 close = ["Escape", "Ctrl+c", "Ctrl+w", "Ctrl+q"]  # keys to dismiss the overlay
-delete_modifier = "Shift"   # modifier + a-z to delete a workspace
+
+[workspace.a]                          # per-workspace config (key must be a single a-z letter)
+name = "Browser"                       # optional display name shown on the card
+programs = ["firefox", "slack"]        # programs launched on create (replaces defaults)
+# Configured workspaces that don't exist yet appear as muted cards with a dashed border.
+
+[workspace.b]
+programs = ["kitty --title myterm"]    # arguments supported via whitespace splitting
 ```
 
-Valid modifiers: `Ctrl`/`Control`, `Shift`, `Alt`/`Mod1`, `Super`/`Mod4`.
+### Usage
+
+- **`niri-dynamic-workspaces`** or **`niri-dynamic-workspaces switch`** — opens the switcher overlay (a–z to switch/create)
+- **`niri-dynamic-workspaces delete`** — opens the delete overlay (a–z to delete)
+- **`niri-dynamic-workspaces move-window`** — opens the move-window overlay (a–z to move the focused window to a workspace)
+
+All modes support toggle behavior: running the same command again closes the overlay.
 
 ## Development
 
