@@ -1,0 +1,122 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.check.outputs.should_release }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check if version changed
+        id: check
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          latest_tag=$(git tag -l 'v*' --sort=-v:refname | head -n1 || true)
+          if [ -z "$latest_tag" ] || [ "$latest_tag" != "v$version" ]; then
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+            echo "New release needed: v$version (latest tag: ${latest_tag:-none})"
+          else
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            echo "No release needed: v$version already tagged"
+          fi
+
+  build-binaries:
+    needs: check-version
+    if: needs.check-version.outputs.should_release == 'true'
+    strategy:
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-latest
+          - system: aarch64-linux
+            runner: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@main
+        with:
+          extra-conf: |
+            ${{ matrix.system == 'aarch64-linux' && 'extra-platforms = aarch64-linux' || '' }}
+
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Install QEMU for aarch64
+        if: matrix.system == 'aarch64-linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static
+
+      - name: Build binary
+        run: nix build .#packages.${{ matrix.system }}.default
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: niri-dynamic-workspaces-${{ matrix.system }}
+          path: result/bin/niri-dynamic-workspaces
+
+  create-release:
+    needs: [check-version, build-binaries]
+    if: needs.check-version.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release
+          for dir in artifacts/niri-dynamic-workspaces-*/; do
+            name=$(basename "$dir")
+            cp "$dir/niri-dynamic-workspaces" "release/$name"
+            chmod +x "release/$name"
+          done
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.check-version.outputs.version }}
+        run: |
+          tag="v$VERSION"
+          if gh release view "$tag" > /dev/null 2>&1; then
+            echo "Release $tag already exists, skipping"
+          else
+            gh release create "$tag" \
+              --title "$tag" \
+              --generate-notes \
+              release/*
+          fi
+
+  publish-crate:
+    needs: [check-version, build-binaries]
+    if: needs.check-version.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@main
+
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_TOKEN }}
+        run: nix develop --command cargo publish

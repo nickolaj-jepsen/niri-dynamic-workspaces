@@ -1,0 +1,28 @@
+[package]
+name = "niri-dynamic-workspaces"
+version = "0.1.0"
+edition = "2021"
+description = "A dynamic workspace switcher for the niri Wayland compositor"
+license = "GPL-3.0-only"
+repository = "https://github.com/nickolaj-jepsen/niri-dynamic-workspaces"
+readme = "README.md"
+keywords = ["niri", "wayland", "workspace", "gtk4"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+anyhow = "1"
+niri-ipc = "=25.11.0"
+gtk4 = "0.9"
+gtk4-layer-shell = "0.5"
+gdk4 = "0.9"
+glib = "0.20"
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+dirs = "6"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+wildcard_imports = "allow"
+cast_possible_truncation = "allow"

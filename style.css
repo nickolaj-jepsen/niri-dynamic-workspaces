@@ -1,0 +1,122 @@
+window {
+    background-color: transparent;
+}
+
+.backdrop {
+    background-color: alpha(black, 0.3);
+}
+
+.popup-container {
+    background-color: @window_bg_color;
+    border-radius: 12px;
+    padding: 12px;
+    border: 1px solid @borders;
+}
+
+.workspace-grid {
+    background: transparent;
+}
+
+/* --- Card --- */
+
+.workspace-card {
+    background-color: @card_bg_color;
+    border: 1px solid @borders;
+    border-radius: 8px;
+    padding: 0;
+    min-width: 180px;
+    min-height: 90px;
+}
+
+.workspace-card.focused {
+    border: 2px solid @accent_color;
+    background-color: alpha(@card_bg_color, 0.9);
+}
+
+.workspace-card.active {
+    border: 2px solid @accent_color;
+}
+
+/* --- Card header --- */
+
+.card-header {
+    padding: 8px 10px 4px 10px;
+}
+
+.card-key {
+    font-size: 22px;
+    font-weight: bold;
+}
+
+.card-monitor {
+    font-size: 10px;
+    opacity: 0.6;
+    background-color: alpha(@borders, 0.2);
+    border-radius: 6px;
+    padding: 1px 6px;
+}
+
+.card-window-count {
+    font-size: 10px;
+    opacity: 0.5;
+}
+
+/* --- Card divider --- */
+
+.card-divider {
+    margin: 2px 10px;
+    opacity: 0.3;
+}
+
+/* --- Card body --- */
+
+.card-body {
+    padding: 4px 10px 8px 10px;
+}
+
+.card-empty {
+    font-size: 11px;
+    opacity: 0.4;
+    font-style: italic;
+}
+
+/* --- Window rows --- */
+
+.window-row {
+    min-height: 18px;
+}
+
+.window-app-name {
+    font-size: 11px;
+    font-weight: bold;
+}
+
+.window-title {
+    font-size: 11px;
+    opacity: 0.5;
+}
+
+.window-overflow {
+    font-size: 10px;
+    opacity: 0.4;
+    margin-top: 2px;
+}
+
+/* --- Hints & errors (unchanged) --- */
+
+.hint {
+    font-size: 15px;
+    padding: 16px 24px;
+}
+
+.hint-detail {
+    font-size: 11px;
+    opacity: 0.5;
+    margin-top: 8px;
+}
+
+.error-message {
+    color: @error_color;
+    font-size: 12px;
+    margin-top: 8px;
+}
