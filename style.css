@@ -45,6 +45,10 @@ window {
     background-color: alpha(@card_bg_color, 0.9);
 }
 
+.workspace-card.urgent {
+    border: 2px solid @warning_color;
+}
+
 .workspace-card.uncreated {
     opacity: 0.5;
     border-style: dashed;

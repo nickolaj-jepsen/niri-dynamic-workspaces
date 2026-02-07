@@ -37,11 +37,13 @@ struct WindowInfo {
     title: String,
 }
 
+#[allow(clippy::struct_excessive_bools)]
 struct DynWorkspaceInfo {
     char_id: char,
     is_focused: bool,
     is_active: bool,
     is_uncreated: bool,
+    is_urgent: bool,
     name: Option<String>,
     windows: Vec<WindowInfo>,
     configured_programs: Vec<String>,
@@ -76,8 +78,9 @@ fn gather_dyn_workspaces(config: &ResolvedConfig) -> Vec<DynWorkspaceInfo> {
         }
     };
 
-    // Group windows by workspace_id
+    // Group windows by workspace_id and track urgency
     let mut windows_by_ws: HashMap<u64, Vec<WindowInfo>> = HashMap::new();
+    let mut urgent_ws_ids: HashSet<u64> = HashSet::new();
     for w in &windows {
         if let Some(ws_id) = w.workspace_id {
             let app_name = w.app_id.as_deref().map(clean_app_id).unwrap_or_default();
@@ -86,6 +89,9 @@ fn gather_dyn_workspaces(config: &ResolvedConfig) -> Vec<DynWorkspaceInfo> {
                 .entry(ws_id)
                 .or_default()
                 .push(WindowInfo { app_name, title });
+            if w.is_urgent {
+                urgent_ws_ids.insert(ws_id);
+            }
         }
     }
 
@@ -110,12 +116,14 @@ fn gather_dyn_workspaces(config: &ResolvedConfig) -> Vec<DynWorkspaceInfo> {
 
             let ws_windows = windows_by_ws.remove(&ws.id).unwrap_or_default();
             let name = config.workspace_names.get(&ch).cloned();
+            let is_urgent = urgent_ws_ids.contains(&ws.id);
 
             Some(DynWorkspaceInfo {
                 char_id: ch,
                 is_focused,
                 is_active,
                 is_uncreated: false,
+                is_urgent,
                 name,
                 windows: ws_windows,
                 configured_programs: Vec::new(),
@@ -147,6 +155,7 @@ fn gather_dyn_workspaces(config: &ResolvedConfig) -> Vec<DynWorkspaceInfo> {
             is_focused: false,
             is_active: false,
             is_uncreated: true,
+            is_urgent: false,
             name,
             windows: Vec::new(),
             configured_programs: programs,
@@ -166,6 +175,9 @@ fn build_workspace_card(info: &DynWorkspaceInfo, config: &ResolvedConfig) -> Gtk
         card_classes.push("focused");
     } else if info.is_active {
         card_classes.push("active");
+    }
+    if info.is_urgent {
+        card_classes.push("urgent");
     }
 
     let card = GtkBox::builder()
