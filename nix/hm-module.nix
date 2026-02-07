@@ -65,10 +65,19 @@
       config = lib.mkIf cfg.enable {
         home.packages = [ cfg.package ];
 
-        programs.niri.settings.spawn-at-startup =
-          lib.mkIf cfg.daemon [
-            { command = [ "${cfg.package}/bin/niri-dynamic-workspaces" "daemon" ]; }
-          ];
+        systemd.user.services.niri-dynamic-workspaces = lib.mkIf cfg.daemon {
+          Unit = {
+            Description = "Niri dynamic workspaces daemon";
+            PartOf = [ "graphical-session.target" ];
+            After = [ "graphical-session.target" ];
+          };
+          Service = {
+            ExecStart = "${cfg.package}/bin/niri-dynamic-workspaces daemon";
+            Restart = "on-failure";
+            RestartSec = 5;
+          };
+          Install.WantedBy = [ "graphical-session.target" ];
+        };
 
         programs.niri.settings.binds = {
           "${cfg.keybind}".action.spawn =
