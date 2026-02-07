@@ -1,5 +1,7 @@
 # niri-dynamic-workspaces
 
+![niri-dynamic-workspaces](docs/readme.png)
+
 ## Install
 
 ### Nix (flake)
