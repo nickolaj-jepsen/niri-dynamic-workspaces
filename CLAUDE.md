@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-A GTK4 Wayland overlay for managing named workspaces on the Niri compositor. The user presses a keybind (default Mod+D), sees a grid of workspace cards, and presses a–z to switch/create or Shift+a–z to delete.
+A GTK4 Wayland overlay for managing named workspaces on the Niri compositor. The user presses a keybind (default Mod+D), sees a grid of workspace cards, and presses a key (a–z, 0–9, or symbol) to switch/create workspaces.
 
 ## Build Commands
 
@@ -31,14 +31,14 @@ Four source files, ~750 lines total:
 - **main.rs** — GTK4 application bootstrap: loads config, loads `style.css`, calls `ui::build_ui` on activate.
 - **config.rs** — Reads `~/.config/niri-dynamic-workspaces/config.toml` (TOML via serde), validates keybinds and modifiers, returns `ResolvedConfig`. All fields have defaults; missing/broken config is non-fatal.
 - **niri.rs** — Niri IPC layer. Talks to the compositor over a Unix socket using `niri_ipc::Socket`. Key functions: `list_workspaces`, `list_windows`, `focus_or_create_workspace`, `delete_workspace`.
-- **ui.rs** — Builds the full-screen layer-shell overlay with `gtk4-layer-shell`. Gathers workspace/window state from niri IPC, renders a `FlowBox` grid of cards, handles keyboard (a–z, Shift+key, close binds) and click events.
+- **ui.rs** — Builds the full-screen layer-shell overlay with `gtk4-layer-shell`. Gathers workspace/window state from niri IPC, renders a `FlowBox` grid of cards, handles keyboard (workspace keys, close binds) and click events.
 
 Data flow: `main` → `config::load_config()` → `ui::build_ui(app, config)` → `niri::*` IPC calls on user interaction.
 
 ## Key Conventions
 
 - **Error handling**: `anyhow` with `.context()` throughout niri.rs; UI handlers show errors in a label rather than panicking.
-- **Workspace naming**: all dynamic workspaces are prefixed (default `dyn-`) followed by a single lowercase letter. The prefix is configurable.
+- **Workspace naming**: all dynamic workspaces are prefixed (default `dyn-`) followed by a single workspace key character (a–z, 0–9, or unshifted symbol). The prefix is configurable.
 - **Nix-first**: the project is built and developed via Nix flakes. `nix/package.nix` is the build derivation, `nix/devshell.nix` provides the dev environment, `nix/hm-module.nix` is a Home Manager integration module.
 - **niri-ipc version pinned**: `niri-ipc = "=25.11.0"` in Cargo.toml — exact version match to the compositor IPC protocol.
 - **GTK4 CSS**: all visual styling lives in `style.css` at the repo root, loaded at runtime.

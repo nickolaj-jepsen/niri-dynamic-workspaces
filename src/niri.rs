@@ -1,10 +1,12 @@
 use std::collections::HashSet;
+use std::io::{BufRead, BufReader, Write as _};
+use std::os::unix::net::UnixStream;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context};
 use niri_ipc::socket::Socket;
-use niri_ipc::{Action, Request, Response, Window, Workspace, WorkspaceReferenceArg};
+use niri_ipc::{Action, Event, Request, Response, Window, Workspace, WorkspaceReferenceArg};
 
 fn send_request(request: Request) -> anyhow::Result<Response> {
     let mut socket = Socket::connect().context("failed to connect to niri")?;
@@ -31,6 +33,10 @@ pub fn list_workspaces() -> anyhow::Result<Vec<Workspace>> {
     }
 }
 
+fn find_workspace_by_name<'a>(workspaces: &'a [Workspace], name: &str) -> Option<&'a Workspace> {
+    workspaces.iter().find(|w| w.name.as_deref() == Some(name))
+}
+
 pub fn list_windows() -> anyhow::Result<Vec<Window>> {
     match send_request(Request::Windows)? {
         Response::Windows(windows) => Ok(windows),
@@ -44,7 +50,7 @@ pub fn list_windows() -> anyhow::Result<Vec<Window>> {
 pub fn focus_or_create_workspace(name: &str) -> anyhow::Result<bool> {
     let workspaces = list_workspaces()?;
 
-    if workspaces.iter().any(|w| w.name.as_deref() == Some(name)) {
+    if find_workspace_by_name(&workspaces, name).is_some() {
         send_action(Action::FocusWorkspace {
             reference: WorkspaceReferenceArg::Name(name.to_string()),
         })?;
@@ -73,6 +79,41 @@ pub fn focus_or_create_workspace(name: &str) -> anyhow::Result<bool> {
     })?;
 
     Ok(true)
+}
+
+/// Spawn programs for a newly created workspace.
+///
+/// Splits each command string on whitespace and spawns via niri IPC.
+/// If two or more programs are launched, returns a [`ReorderRequest`] that the
+/// caller should pass to [`reorder_workspace_columns`] (either synchronously
+/// or in a background thread).
+pub fn spawn_workspace_programs(
+    workspace_name: &str,
+    programs: &[String],
+) -> anyhow::Result<Option<ReorderRequest>> {
+    let existing_ids = if programs.len() >= 2 {
+        snapshot_workspace_window_ids(workspace_name)
+    } else {
+        HashSet::new()
+    };
+
+    for cmd_str in programs {
+        let parts: Vec<String> = cmd_str.split_whitespace().map(String::from).collect();
+        if parts.is_empty() {
+            continue;
+        }
+        spawn_program(&parts).with_context(|| format!("failed to spawn '{cmd_str}'"))?;
+    }
+
+    if programs.len() >= 2 {
+        Ok(Some(ReorderRequest {
+            workspace_name: workspace_name.to_string(),
+            commands: programs.to_vec(),
+            existing_window_ids: existing_ids,
+        }))
+    } else {
+        Ok(None)
+    }
 }
 
 pub fn spawn_program(command: &[String]) -> anyhow::Result<()> {
@@ -127,9 +168,7 @@ fn reorder_workspace_columns_inner(request: &ReorderRequest) -> anyhow::Result<(
 
     // Find the workspace ID
     let workspaces = list_workspaces()?;
-    let ws_id = workspaces
-        .iter()
-        .find(|w| w.name.as_deref() == Some(&request.workspace_name))
+    let ws_id = find_workspace_by_name(&workspaces, &request.workspace_name)
         .map(|w| w.id)
         .ok_or_else(|| anyhow::anyhow!("workspace '{}' not found", request.workspace_name))?;
 
@@ -235,7 +274,7 @@ fn reorder_workspace_columns_inner(request: &ReorderRequest) -> anyhow::Result<(
 /// Returns `true` if the workspace was newly created.
 pub fn move_window_to_workspace(name: &str) -> anyhow::Result<bool> {
     let workspaces = list_workspaces()?;
-    let exists = workspaces.iter().any(|w| w.name.as_deref() == Some(name));
+    let exists = find_workspace_by_name(&workspaces, name).is_some();
 
     if !exists {
         let original_ws_id = workspaces
@@ -262,11 +301,139 @@ pub fn move_window_to_workspace(name: &str) -> anyhow::Result<bool> {
     Ok(!exists)
 }
 
+/// Remove empty, unfocused dynamic workspaces matching the given prefix.
+///
+/// Best-effort: logs errors to stderr since this runs in the background daemon.
+pub fn cleanup_empty_workspaces(prefix: &str) {
+    if let Err(e) = cleanup_empty_workspaces_inner(prefix) {
+        eprintln!("warning: failed to clean up empty workspaces: {e}");
+    }
+}
+
+fn cleanup_empty_workspaces_inner(prefix: &str) -> anyhow::Result<()> {
+    let workspaces = list_workspaces()?;
+    let windows = list_windows()?;
+
+    let window_ws_ids: HashSet<u64> = windows.iter().filter_map(|w| w.workspace_id).collect();
+
+    for ws in &workspaces {
+        let name = match &ws.name {
+            Some(n) if n.starts_with(prefix) => n,
+            _ => continue,
+        };
+
+        if ws.is_focused || ws.is_active || window_ws_ids.contains(&ws.id) {
+            continue;
+        }
+
+        send_action(Action::UnsetWorkspaceName {
+            reference: Some(WorkspaceReferenceArg::Name(name.clone())),
+        })?;
+    }
+
+    Ok(())
+}
+
+/// Subscribe to niri's event stream and run cleanup when workspaces may become empty.
+///
+/// Reconnects automatically if the socket drops (e.g. niri restarts).
+pub fn run_event_cleanup(prefix: &str) {
+    loop {
+        if let Err(e) = event_cleanup_loop(prefix) {
+            eprintln!("warning: event cleanup failed: {e:#}, reconnecting in 5s\u{2026}");
+            thread::sleep(Duration::from_secs(5));
+        }
+    }
+}
+
+/// Connect to niri and subscribe to the event stream.
+///
+/// Returns a buffered reader over the socket, ready to read events line-by-line.
+fn connect_event_stream() -> anyhow::Result<BufReader<UnixStream>> {
+    let socket_path =
+        std::env::var_os(niri_ipc::socket::SOCKET_PATH_ENV).context("NIRI_SOCKET not set")?;
+    let stream = UnixStream::connect(socket_path).context("failed to connect to niri")?;
+    let mut reader = BufReader::new(stream);
+
+    let mut buf = serde_json::to_string(&Request::EventStream).unwrap();
+    buf.push('\n');
+    reader.get_mut().write_all(buf.as_bytes())?;
+
+    buf.clear();
+    reader.read_line(&mut buf)?;
+    let reply: Result<Response, String> =
+        serde_json::from_str(&buf).context("failed to parse response")?;
+    reply.map_err(|msg| anyhow::anyhow!(msg))?;
+
+    Ok(reader)
+}
+
+fn event_cleanup_loop(prefix: &str) -> anyhow::Result<()> {
+    let mut reader = connect_event_stream()?;
+
+    // Read events line-by-line (no shutdown — avoids half-close issues with newer niri)
+    let debounce = Duration::from_millis(500);
+    let mut last_cleanup = Instant::now();
+    let mut cleanup_pending = false;
+    let mut buf = String::new();
+
+    loop {
+        buf.clear();
+        let n = reader
+            .read_line(&mut buf)
+            .context("failed to read from niri socket")?;
+        if n == 0 {
+            bail!("niri event stream closed");
+        }
+
+        // Skip events that don't deserialize (e.g. new variants from a newer niri)
+        let Ok(event) = serde_json::from_str::<Event>(&buf) else {
+            continue;
+        };
+
+        match &event {
+            Event::WindowOpenedOrChanged { .. }
+            | Event::WindowClosed { .. }
+            | Event::WindowsChanged { .. }
+            | Event::WorkspaceActivated { .. }
+            | Event::WorkspacesChanged { .. } => {
+                cleanup_pending = true;
+            }
+            _ => {}
+        }
+
+        if cleanup_pending && last_cleanup.elapsed() >= debounce {
+            cleanup_empty_workspaces(prefix);
+            cleanup_pending = false;
+            last_cleanup = Instant::now();
+        }
+    }
+}
+
+/// Snapshot all window IDs currently on a named workspace.
+///
+/// Returns an empty set if the workspace doesn't exist or IPC fails.
+pub fn snapshot_workspace_window_ids(workspace_name: &str) -> HashSet<u64> {
+    let Ok(workspaces) = list_workspaces() else {
+        return HashSet::new();
+    };
+    let ws_id = match find_workspace_by_name(&workspaces, workspace_name) {
+        Some(w) => w.id,
+        None => return HashSet::new(),
+    };
+    let Ok(windows) = list_windows() else {
+        return HashSet::new();
+    };
+    windows
+        .iter()
+        .filter(|w| w.workspace_id == Some(ws_id))
+        .map(|w| w.id)
+        .collect()
+}
+
 pub fn delete_workspace(name: &str) -> anyhow::Result<()> {
     let workspaces = list_workspaces()?;
-    let ws = workspaces
-        .iter()
-        .find(|w| w.name.as_deref() == Some(name))
+    let ws = find_workspace_by_name(&workspaces, name)
         .ok_or_else(|| anyhow::anyhow!("workspace '{name}' not found"))?;
     let ws_id = ws.id;
 
@@ -285,6 +452,7 @@ pub fn delete_workspace(name: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_helpers::{test_window, test_workspace};
 
     #[test]
     fn executable_name_variants() {
@@ -304,5 +472,55 @@ mod tests {
         assert!(app_id_matches("firefox", "firefox")); // no dots
         assert!(!app_id_matches("org.mozilla.firefox", "chrome")); // no match
         assert!(!app_id_matches("org.mozilla.firefox", "fire")); // partial segment
+    }
+
+    #[test]
+    fn new_workspace_windows_filters_correctly() {
+        let windows = vec![
+            test_window(1, 10, "firefox"),
+            test_window(2, 10, "kitty"),
+            test_window(3, 20, "slack"),
+            test_window(4, 10, "code"),
+        ];
+        let existing = HashSet::from([1]);
+
+        let result: Vec<u64> = new_workspace_windows(&windows, 10, &existing)
+            .map(|w| w.id)
+            .collect();
+
+        assert_eq!(result, vec![2, 4]);
+    }
+
+    #[test]
+    fn new_workspace_windows_empty() {
+        let windows = vec![test_window(1, 20, "firefox"), test_window(2, 30, "kitty")];
+        let existing = HashSet::new();
+
+        let result: Vec<u64> = new_workspace_windows(&windows, 10, &existing)
+            .map(|w| w.id)
+            .collect();
+
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn find_workspace_by_name_variants() {
+        let workspaces = vec![
+            test_workspace(1, Some("dyn-a"), false),
+            test_workspace(2, Some("dyn-b"), true),
+            test_workspace(3, None, false),
+        ];
+
+        // Found
+        let ws = find_workspace_by_name(&workspaces, "dyn-a");
+        assert_eq!(ws.map(|w| w.id), Some(1));
+
+        // Not found
+        let ws = find_workspace_by_name(&workspaces, "dyn-z");
+        assert!(ws.is_none());
+
+        // None-named workspaces are never matched
+        let ws = find_workspace_by_name(&workspaces, "");
+        assert!(ws.is_none());
     }
 }

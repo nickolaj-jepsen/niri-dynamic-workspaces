@@ -653,6 +653,7 @@ dependencies = [
  "gtk4-layer-shell",
  "niri-ipc",
  "serde",
+ "serde_json",
  "toml",
 ]
 

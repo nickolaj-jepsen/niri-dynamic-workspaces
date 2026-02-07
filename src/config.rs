@@ -26,6 +26,7 @@ struct WorkspaceEntry {
 struct GeneralConfig {
     workspace_prefix: String,
     default_programs: Vec<String>,
+    auto_delete_empty: bool,
 }
 
 impl Default for GeneralConfig {
@@ -33,6 +34,7 @@ impl Default for GeneralConfig {
         Self {
             workspace_prefix: "dyn-".to_string(),
             default_programs: Vec::new(),
+            auto_delete_empty: true,
         }
     }
 }
@@ -91,6 +93,7 @@ pub struct ResolvedConfig {
     pub default_programs: Vec<String>,
     pub workspace_programs: HashMap<char, Vec<String>>,
     pub workspace_names: HashMap<char, String>,
+    pub auto_delete_empty: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -109,6 +112,19 @@ fn parse_modifier(name: &str) -> Option<ModifierType> {
         "Super" | "Mod4" => Some(ModifierType::SUPER_MASK),
         _ => None,
     }
+}
+
+/// Returns `true` if `ch` is a valid workspace key character.
+///
+/// Accepts lowercase letters (a–z), digits (0–9), and symbols reachable
+/// without Shift on a standard US keyboard.
+pub fn is_workspace_char(ch: char) -> bool {
+    ch.is_ascii_lowercase()
+        || ch.is_ascii_digit()
+        || matches!(
+            ch,
+            ',' | '.' | '/' | ';' | '\'' | '[' | ']' | '-' | '=' | '`' | '\\'
+        )
 }
 
 fn parse_keybind(s: &str) -> Result<Keybind, String> {
@@ -142,21 +158,18 @@ impl Config {
         let mut workspace_programs = HashMap::new();
         let mut workspace_names = HashMap::new();
         for (key, entry) in self.workspace {
-            if let &[ch] = key.as_bytes() {
-                if ch.is_ascii_lowercase() {
-                    let ch = char::from(ch);
-                    if !entry.programs.is_empty() {
-                        workspace_programs.insert(ch, entry.programs);
-                    }
-                    if let Some(name) = entry.name {
-                        workspace_names.insert(ch, name);
-                    }
-                    continue;
+            if let Some(ch) = parse_workspace_char(&key) {
+                if !entry.programs.is_empty() {
+                    workspace_programs.insert(ch, entry.programs);
                 }
+                if let Some(name) = entry.name {
+                    workspace_names.insert(ch, name);
+                }
+            } else {
+                warnings.push(format!(
+                    "ignoring [workspace] key '{key}': must be a single workspace key (a-z, 0-9, or symbol)"
+                ));
             }
-            warnings.push(format!(
-                "ignoring [workspace] key '{key}': must be a single lowercase letter a-z"
-            ));
         }
 
         let resolved = ResolvedConfig {
@@ -170,9 +183,27 @@ impl Config {
             default_programs: self.general.default_programs,
             workspace_programs,
             workspace_names,
+            auto_delete_empty: self.general.auto_delete_empty,
         };
 
         (resolved, warnings)
+    }
+}
+
+/// Format a workspace name from a prefix and a single-character key.
+pub fn workspace_name(prefix: &str, ch: char) -> String {
+    format!("{prefix}{ch}")
+}
+
+/// Parse a string as a single valid workspace-key character.
+///
+/// Returns `Some(ch)` if the string is exactly one character that satisfies
+/// [`is_workspace_char`], otherwise `None`.
+pub fn parse_workspace_char(s: &str) -> Option<char> {
+    let mut chars = s.chars();
+    match (chars.next(), chars.next()) {
+        (Some(ch), None) if is_workspace_char(ch) => Some(ch),
+        _ => None,
     }
 }
 
@@ -227,6 +258,60 @@ pub fn load_config(path_override: Option<&std::path::Path>) -> ResolvedConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- workspace_name ---
+
+    #[test]
+    fn workspace_name_formats_correctly() {
+        assert_eq!(workspace_name("dyn-", 'a'), "dyn-a");
+        assert_eq!(workspace_name("ws-", '1'), "ws-1");
+        assert_eq!(workspace_name("", 'z'), "z");
+    }
+
+    // --- parse_workspace_char ---
+
+    #[test]
+    fn parse_workspace_char_valid() {
+        assert_eq!(parse_workspace_char("a"), Some('a'));
+        assert_eq!(parse_workspace_char("0"), Some('0'));
+        assert_eq!(parse_workspace_char(","), Some(','));
+    }
+
+    #[test]
+    fn parse_workspace_char_invalid() {
+        assert_eq!(parse_workspace_char(""), None);
+        assert_eq!(parse_workspace_char("ab"), None);
+        assert_eq!(parse_workspace_char("A"), None);
+        assert_eq!(parse_workspace_char("!"), None);
+    }
+
+    // --- is_workspace_char ---
+
+    #[test]
+    fn is_workspace_char_variants() {
+        // Lowercase letters
+        assert!(is_workspace_char('a'));
+        assert!(is_workspace_char('z'));
+        // Digits
+        assert!(is_workspace_char('0'));
+        assert!(is_workspace_char('9'));
+        // Allowed symbols
+        for sym in [',', '.', '/', ';', '\'', '[', ']', '-', '=', '`', '\\'] {
+            assert!(is_workspace_char(sym), "expected '{sym}' to be valid");
+        }
+        // Uppercase — rejected
+        assert!(!is_workspace_char('A'));
+        assert!(!is_workspace_char('Z'));
+        // Space — rejected
+        assert!(!is_workspace_char(' '));
+        // Shifted symbols — rejected
+        assert!(!is_workspace_char('!'));
+        assert!(!is_workspace_char('@'));
+        assert!(!is_workspace_char('{'));
+        // Multi-byte — rejected
+        assert!(!is_workspace_char('å'));
+        assert!(!is_workspace_char('ñ'));
+    }
 
     // --- parse_modifier ---
 
@@ -346,8 +431,9 @@ mod tests {
             ..Config::default()
         };
         let (resolved, warnings) = config.resolve();
-        assert_eq!(warnings.len(), 4);
-        assert!(resolved.workspace_programs.is_empty());
+        // "ab" (multi-char), "A" (uppercase), "" (empty) are invalid; "1" is valid
+        assert_eq!(warnings.len(), 3);
+        assert_eq!(resolved.workspace_programs[&'1'], vec!["kitty"]);
         for w in &warnings {
             assert!(w.contains("[workspace] key"));
         }

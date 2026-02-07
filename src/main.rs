@@ -1,5 +1,7 @@
 mod config;
 mod niri;
+#[cfg(test)]
+mod test_helpers;
 mod ui;
 
 use std::cell::RefCell;
@@ -7,13 +9,14 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use clap::{Parser, Subcommand};
+use gtk4::gio::{ApplicationFlags, ApplicationHoldGuard};
 use gtk4::prelude::*;
 use gtk4::{gdk, CssProvider};
 
 /// A dynamic workspace switcher for the niri Wayland compositor.
 ///
 /// Opens a fullscreen overlay showing workspace cards.
-/// Press a–z to interact with workspaces, Escape to close.
+/// Press a key to interact with workspaces, Escape to close.
 #[derive(Parser)]
 #[command(version)]
 struct Cli {
@@ -28,31 +31,100 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Switch to or create a workspace [default]
-    Switch,
+    Switch {
+        /// Workspace key (a-z, 0-9, symbol) — act directly without overlay
+        key: Option<String>,
+    },
     /// Delete a workspace
-    Delete,
+    Delete {
+        /// Workspace key (a-z, 0-9, symbol) — act directly without overlay
+        key: Option<String>,
+    },
     /// Move the focused window to a workspace
-    MoveWindow,
+    MoveWindow {
+        /// Workspace key (a-z, 0-9, symbol) — act directly without overlay
+        key: Option<String>,
+    },
+    /// Start as a background daemon (for spawn-at-startup)
+    Daemon,
+}
+
+fn handle_direct_action(cli: &Cli, mode: ui::Mode, key: &str) -> i32 {
+    let Some(ch) = config::parse_workspace_char(key) else {
+        eprintln!("error: invalid workspace key '{key}' (must be a-z, 0-9, or symbol)");
+        return 1;
+    };
+
+    let cfg = config::load_config(cli.config.as_deref());
+    let ws_name = config::workspace_name(&cfg.workspace_prefix, ch);
+
+    match mode {
+        ui::Mode::Normal => match niri::focus_or_create_workspace(&ws_name) {
+            Ok(created) => {
+                if created {
+                    let programs = cfg
+                        .workspace_programs
+                        .get(&ch)
+                        .map_or(cfg.default_programs.as_slice(), Vec::as_slice);
+
+                    match niri::spawn_workspace_programs(&ws_name, programs) {
+                        Ok(Some(request)) => niri::reorder_workspace_columns(&request),
+                        Ok(None) => {}
+                        Err(e) => {
+                            eprintln!("error: {e:#}");
+                            return 1;
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("error: failed to switch to workspace {ws_name}: {e}");
+                return 1;
+            }
+        },
+        ui::Mode::Delete => {
+            if let Err(e) = niri::delete_workspace(&ws_name) {
+                eprintln!("error: failed to delete workspace {ws_name}: {e}");
+                return 1;
+            }
+        }
+        ui::Mode::MoveWindow => {
+            if let Err(e) = niri::move_window_to_workspace(&ws_name) {
+                eprintln!("error: failed to move window to {ws_name}: {e}");
+                return 1;
+            }
+        }
+    }
+
+    0
+}
+
+fn handle_overlay(app: &gtk4::Application, cli: &Cli, mode: ui::Mode) -> i32 {
+    let cfg = Rc::new(config::load_config(cli.config.as_deref()));
+
+    if let Some(window) = app.active_window() {
+        let same_mode = ui::get_window_mode(&window) == Some(mode);
+        window.close();
+        if same_mode {
+            return 0;
+        }
+    }
+
+    ui::build_ui(app, &cfg, mode);
+    0
 }
 
 fn main() {
-    let cli = Cli::parse();
+    // Pre-parse so --help / --version print to the caller's stdout and exit
+    // before GTK starts (important when a daemon is already running).
+    if let Err(e) = Cli::try_parse() {
+        e.exit();
+    }
 
-    let mode = match cli.command {
-        None | Some(Command::Switch) => ui::Mode::Normal,
-        Some(Command::Delete) => ui::Mode::Delete,
-        Some(Command::MoveWindow) => ui::Mode::MoveWindow,
-    };
-    let cfg = config::load_config(cli.config.as_deref());
-
-    // Use a separate application ID per mode so each can toggle independently
-    let app_id = match mode {
-        ui::Mode::Delete => "dev.nickolaj.niri-dynamic-workspaces.delete",
-        ui::Mode::MoveWindow => "dev.nickolaj.niri-dynamic-workspaces.move-window",
-        ui::Mode::Normal => "dev.nickolaj.niri-dynamic-workspaces",
-    };
-
-    let app = gtk4::Application::builder().application_id(app_id).build();
+    let app = gtk4::Application::builder()
+        .application_id("dev.nickolaj.niri-dynamic-workspaces")
+        .flags(ApplicationFlags::HANDLES_COMMAND_LINE)
+        .build();
 
     app.connect_startup(|_| {
         let provider = CssProvider::new();
@@ -64,21 +136,46 @@ fn main() {
         );
     });
 
-    let reorder_request: Rc<RefCell<Option<niri::ReorderRequest>>> = Rc::default();
-    let reorder_ref = Rc::clone(&reorder_request);
+    let hold_guard: RefCell<Option<ApplicationHoldGuard>> = RefCell::default();
 
-    app.connect_activate(move |app| {
-        // Toggle: if already showing, close the existing window
-        if let Some(window) = app.active_window() {
-            window.close();
-            return;
+    app.connect_command_line(move |app, cmdline| {
+        let args: Vec<std::ffi::OsString> = cmdline.arguments();
+        let cli = match Cli::try_parse_from(args) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("{e}");
+                return 1;
+            }
+        };
+
+        let (mode, key) = match cli.command {
+            Some(Command::Daemon) => {
+                if hold_guard.borrow().is_some() {
+                    return 0;
+                }
+                let cfg = config::load_config(cli.config.as_deref());
+                if cfg.auto_delete_empty {
+                    let prefix = cfg.workspace_prefix.clone();
+                    std::thread::Builder::new()
+                        .name("cleanup".into())
+                        .spawn(move || niri::run_event_cleanup(&prefix))
+                        .ok();
+                }
+                *hold_guard.borrow_mut() = Some(app.hold());
+                return 0;
+            }
+            None => (ui::Mode::Normal, None),
+            Some(Command::Switch { ref key }) => (ui::Mode::Normal, key.as_deref()),
+            Some(Command::Delete { ref key }) => (ui::Mode::Delete, key.as_deref()),
+            Some(Command::MoveWindow { ref key }) => (ui::Mode::MoveWindow, key.as_deref()),
+        };
+
+        if let Some(key) = key {
+            return handle_direct_action(&cli, mode, key);
         }
-        ui::build_ui(app, &cfg, mode, &reorder_ref);
+
+        handle_overlay(app, &cli, mode)
     });
 
-    app.run_with_args::<&str>(&[]);
-
-    if let Some(request) = reorder_request.take() {
-        niri::reorder_workspace_columns(&request);
-    }
+    app.run();
 }

@@ -37,6 +37,12 @@
           description = "Keybind to open the move-window overlay.";
         };
 
+        daemon = lib.mkOption {
+          type = lib.types.bool;
+          default = true;
+          description = "Start the daemon at login for faster overlay display.";
+        };
+
         settings = lib.mkOption {
           type = tomlFormat.type;
           default = { };
@@ -58,6 +64,11 @@
 
       config = lib.mkIf cfg.enable {
         home.packages = [ cfg.package ];
+
+        programs.niri.settings.spawn-at-startup =
+          lib.mkIf cfg.daemon [
+            { command = [ "${cfg.package}/bin/niri-dynamic-workspaces" "daemon" ]; }
+          ];
 
         programs.niri.settings.binds = {
           "${cfg.keybind}".action.spawn =
