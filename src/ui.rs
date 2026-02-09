@@ -13,6 +13,21 @@ use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use crate::config::{KeyboardLayout, ResolvedConfig, TemplateVariable};
 use crate::niri;
 
+/// Modifier mask for matching keybinds (includes Super to detect compositor keybind hold).
+const RELEVANT_MODS: gdk4::ModifierType = gdk4::ModifierType::from_bits_retain(
+    gdk4::ModifierType::CONTROL_MASK.bits()
+        | gdk4::ModifierType::SHIFT_MASK.bits()
+        | gdk4::ModifierType::ALT_MASK.bits()
+        | gdk4::ModifierType::SUPER_MASK.bits(),
+);
+
+/// Modifier mask for workspace key actions (excludes Super so holding Mod doesn't block input).
+const ACTION_MODS: gdk4::ModifierType = gdk4::ModifierType::from_bits_retain(
+    gdk4::ModifierType::CONTROL_MASK.bits()
+        | gdk4::ModifierType::SHIFT_MASK.bits()
+        | gdk4::ModifierType::ALT_MASK.bits(),
+);
+
 thread_local! {
     static DYNAMIC_PROVIDER: RefCell<Option<gtk4::CssProvider>> = const { RefCell::new(None) };
 }
@@ -101,6 +116,14 @@ fn apply_scaled_css(css: &str) {
         );
         *opt = Some(provider);
     });
+}
+
+fn format_workspace_display(ch: char, config: &ResolvedConfig) -> String {
+    let key = display_key_char(ch);
+    match config.workspace_names.get(&ch) {
+        Some(name) => format!("{key} ({name})"),
+        None => key,
+    }
 }
 
 fn display_key_char(ch: char) -> String {
@@ -232,6 +255,23 @@ struct DynWorkspaceInfo {
 }
 
 impl DynWorkspaceInfo {
+    fn status_text(&self) -> Option<String> {
+        if self.is_focused {
+            Some("focused".to_string())
+        } else if self.is_active {
+            Some("active".to_string())
+        } else if !self.is_uncreated && self.window_count == 0 {
+            Some("empty".to_string())
+        } else if self.window_count > 0 {
+            Some(match self.window_count {
+                1 => "1 win".to_string(),
+                n => format!("{n} win"),
+            })
+        } else {
+            None
+        }
+    }
+
     fn uncreated(ch: char) -> Self {
         Self {
             char_id: ch,
@@ -464,21 +504,7 @@ fn build_key_widget(
     }
 
     // Status line
-    let status = if info.is_focused {
-        Some("focused".to_string())
-    } else if info.is_active {
-        Some("active".to_string())
-    } else if !info.is_uncreated && info.window_count == 0 {
-        Some("empty".to_string())
-    } else if info.window_count > 0 {
-        Some(match info.window_count {
-            1 => "1 win".to_string(),
-            n => format!("{n} win"),
-        })
-    } else {
-        None
-    };
-    if let Some(ref text) = status {
+    if let Some(ref text) = info.status_text() {
         let status_label = Label::builder()
             .label(text.as_str())
             .css_classes(["key-status"])
@@ -604,16 +630,58 @@ fn build_mode_tabs(window: &ApplicationWindow, config: &Rc<ResolvedConfig>, mode
     mode_tabs
 }
 
-fn build_hint_footer(metrics: &KeyboardMetrics) -> GtkBox {
+fn create_error_revealer() -> (Label, Revealer) {
+    let label = Label::builder()
+        .css_classes(["error-message"])
+        .wrap(true)
+        .build();
+    let revealer = Revealer::builder()
+        .child(&label)
+        .reveal_child(false)
+        .transition_type(RevealerTransitionType::SlideUp)
+        .transition_duration(200)
+        .build();
+    (label, revealer)
+}
+
+fn matches_close_keybind(
+    key: gdk4::Key,
+    modifier: gdk4::ModifierType,
+    keybinds: &[crate::config::Keybind],
+) -> bool {
+    keybinds
+        .iter()
+        .any(|kb| key == kb.key && modifier & RELEVANT_MODS == kb.modifiers)
+}
+
+fn new_key_controller() -> EventControllerKey {
+    let ctrl = EventControllerKey::new();
+    ctrl.set_name(Some("ndw-key"));
+    ctrl.set_propagation_phase(gtk4::PropagationPhase::Capture);
+    ctrl
+}
+
+fn wrap_in_backdrop(window: &ApplicationWindow, container: &GtkBox) {
+    let backdrop = GtkBox::builder()
+        .css_classes(["backdrop"])
+        .hexpand(true)
+        .vexpand(true)
+        .build();
+    let overlay = Overlay::builder().child(&backdrop).build();
+    overlay.add_overlay(container);
+    window.set_child(Some(&overlay));
+}
+
+fn build_hint_footer(metrics: &KeyboardMetrics, hints: &[&str]) -> GtkBox {
     let footer = GtkBox::builder()
         .orientation(Orientation::Horizontal)
         .spacing(metrics.key_size / 4)
         .css_classes(["hint-footer"])
         .halign(Align::Center)
         .build();
-    for text in ["press key to select", "Tab switch mode", "Escape close"] {
+    for text in hints {
         let label = Label::builder()
-            .label(text)
+            .label(*text)
             .css_classes(["hint-footer-item"])
             .build();
         footer.append(&label);
@@ -640,16 +708,7 @@ fn populate_overlay(window: &ApplicationWindow, config: &Rc<ResolvedConfig>, mod
         .build();
 
     // Error label + revealer (built first so ActionContext is available for keys)
-    let error_label = Label::builder()
-        .css_classes(["error-message"])
-        .wrap(true)
-        .build();
-    let error_revealer = Revealer::builder()
-        .child(&error_label)
-        .reveal_child(false)
-        .transition_type(RevealerTransitionType::SlideUp)
-        .transition_duration(200)
-        .build();
+    let (error_label, error_revealer) = create_error_revealer();
 
     // Compute metrics from monitor size and apply scaled CSS
     let metrics = KeyboardMetrics::from_monitor_width(get_monitor_width(), config.layout);
@@ -671,20 +730,14 @@ fn populate_overlay(window: &ApplicationWindow, config: &Rc<ResolvedConfig>, mod
 
     // Assemble: keyboard → hint footer → error revealer → mode tabs (bottom)
     container.append(&keyboard);
-    container.append(&build_hint_footer(&metrics));
+    container.append(&build_hint_footer(
+        &metrics,
+        &["press key to select", "Tab switch mode", "Escape close"],
+    ));
     container.append(&error_revealer);
     container.append(&build_mode_tabs(window, config, mode));
 
-    let backdrop = GtkBox::builder()
-        .css_classes(["backdrop"])
-        .hexpand(true)
-        .vexpand(true)
-        .build();
-
-    let overlay = Overlay::builder().child(&backdrop).build();
-    overlay.add_overlay(&container);
-
-    window.set_child(Some(&overlay));
+    wrap_in_backdrop(window, &container);
 
     attach_key_handler(&ctx, &config.close_keybinds);
     attach_close_on_backdrop_click(window, &container);
@@ -876,7 +929,6 @@ fn select_template_option(ws_name: &str, option: &TemplateOption, ch: char, ctx:
     }
 }
 
-#[expect(clippy::too_many_lines, reason = "template picker view builder")]
 fn show_template_picker(ch: char, ctx: &ActionContext) {
     let window = &ctx.window;
     remove_app_controllers(window);
@@ -895,29 +947,17 @@ fn show_template_picker(ch: char, ctx: &ActionContext) {
         .build();
 
     // Title
-    let display_name = config.workspace_names.get(&ch);
-    let title_text = if let Some(name) = display_name {
-        format!("Create workspace {} ({})", display_key_char(ch), name)
-    } else {
-        format!("Create workspace {}", display_key_char(ch))
-    };
     let title = Label::builder()
-        .label(&title_text)
+        .label(format!(
+            "Create workspace {}",
+            format_workspace_display(ch, config)
+        ))
         .css_classes(["template-title"])
         .build();
     container.append(&title);
 
     // Error revealer
-    let error_label = Label::builder()
-        .css_classes(["error-message"])
-        .wrap(true)
-        .build();
-    let error_revealer = Revealer::builder()
-        .child(&error_label)
-        .reveal_child(false)
-        .transition_type(RevealerTransitionType::SlideUp)
-        .transition_duration(200)
-        .build();
+    let (error_label, error_revealer) = create_error_revealer();
 
     // Build template options
     let options = build_template_options(config);
@@ -977,37 +1017,17 @@ fn show_template_picker(ch: char, ctx: &ActionContext) {
 
     container.append(&error_revealer);
 
-    // Footer hints
-    let footer = GtkBox::builder()
-        .orientation(Orientation::Horizontal)
-        .spacing(metrics.key_size / 4)
-        .css_classes(["hint-footer"])
-        .halign(Align::Center)
-        .build();
-    for text in [
-        "press key to select",
-        "\u{2191}\u{2193} navigate",
-        "Enter confirm",
-        "Escape cancel",
-    ] {
-        let label = Label::builder()
-            .label(text)
-            .css_classes(["hint-footer-item"])
-            .build();
-        footer.append(&label);
-    }
-    container.append(&footer);
+    container.append(&build_hint_footer(
+        &metrics,
+        &[
+            "press key to select",
+            "\u{2191}\u{2193} navigate",
+            "Enter confirm",
+            "Escape cancel",
+        ],
+    ));
 
-    let backdrop = GtkBox::builder()
-        .css_classes(["backdrop"])
-        .hexpand(true)
-        .vexpand(true)
-        .build();
-
-    let overlay = Overlay::builder().child(&backdrop).build();
-    overlay.add_overlay(&container);
-
-    window.set_child(Some(&overlay));
+    wrap_in_backdrop(window, &container);
 
     // Key handler
     attach_template_key_handler(
@@ -1039,25 +1059,16 @@ fn attach_template_key_handler(
     let config = ctx.config.clone();
     let ws_name = ws_name.clone();
 
-    let key_controller = EventControllerKey::new();
-    key_controller.set_name(Some("ndw-key"));
-    key_controller.set_propagation_phase(gtk4::PropagationPhase::Capture);
+    let key_controller = new_key_controller();
     key_controller.connect_key_pressed(move |_, key, _, modifier| {
-        let relevant_mods = gdk4::ModifierType::CONTROL_MASK
-            | gdk4::ModifierType::SHIFT_MASK
-            | gdk4::ModifierType::ALT_MASK
-            | gdk4::ModifierType::SUPER_MASK;
-
         // Close keybinds / Escape → go back to main view
-        for kb in &close_keybinds {
-            if key == kb.key && modifier & relevant_mods == kb.modifiers {
-                let window = key_ctx.window.clone();
-                let cfg = config.clone();
-                glib::idle_add_local_once(move || {
-                    populate_overlay(&window, &cfg, Mode::Normal);
-                });
-                return Propagation::Stop;
-            }
+        if matches_close_keybind(key, modifier, &close_keybinds) {
+            let window = key_ctx.window.clone();
+            let cfg = config.clone();
+            glib::idle_add_local_once(move || {
+                populate_overlay(&window, &cfg, Mode::Normal);
+            });
+            return Propagation::Stop;
         }
 
         // Arrow Up/Down → navigate
@@ -1092,13 +1103,9 @@ fn attach_template_key_handler(
         }
 
         // Shortcut keys — match template options
-        let action_mods = modifier
-            & (gdk4::ModifierType::CONTROL_MASK
-                | gdk4::ModifierType::SHIFT_MASK
-                | gdk4::ModifierType::ALT_MASK);
         if let Some(pressed) = key.to_unicode() {
             let pressed = pressed.to_ascii_lowercase();
-            if action_mods.is_empty() {
+            if (modifier & ACTION_MODS).is_empty() {
                 for opt in options.iter() {
                     if opt.key == Some(pressed) {
                         select_template_option(&ws_name, opt, ws_char, &key_ctx);
@@ -1115,7 +1122,6 @@ fn attach_template_key_handler(
 
 // --- Variable input form ---
 
-#[expect(clippy::too_many_lines, reason = "variable input view builder")]
 fn show_variable_input(
     ws_name: &str,
     option: &TemplateOption,
@@ -1138,35 +1144,19 @@ fn show_variable_input(
         .valign(Align::Center)
         .build();
 
-    // Title — match template picker style: "Create workspace KEY (Name)"
-    let display_name = config.workspace_names.get(&ch);
-    let title_text = if let Some(name) = display_name {
-        format!(
-            "{} \u{2192} {} ({})",
-            option.name,
-            display_key_char(ch),
-            name
-        )
-    } else {
-        format!("{} \u{2192} {}", option.name, display_key_char(ch))
-    };
+    // Title — match template picker style: "Template → KEY (Name)"
     let title = Label::builder()
-        .label(&title_text)
+        .label(format!(
+            "{} \u{2192} {}",
+            option.name,
+            format_workspace_display(ch, config)
+        ))
         .css_classes(["variable-title"])
         .build();
     container.append(&title);
 
     // Error revealer
-    let error_label = Label::builder()
-        .css_classes(["error-message"])
-        .wrap(true)
-        .build();
-    let error_revealer = Revealer::builder()
-        .child(&error_label)
-        .reveal_child(false)
-        .transition_type(RevealerTransitionType::SlideUp)
-        .transition_duration(200)
-        .build();
+    let (error_label, error_revealer) = create_error_revealer();
 
     // Variable form
     let form = GtkBox::builder()
@@ -1206,32 +1196,12 @@ fn show_variable_input(
 
     container.append(&error_revealer);
 
-    // Footer hints
-    let footer = GtkBox::builder()
-        .orientation(Orientation::Horizontal)
-        .spacing(metrics.key_size / 4)
-        .css_classes(["hint-footer"])
-        .halign(Align::Center)
-        .build();
-    for text in ["Enter create", "Escape back"] {
-        let label = Label::builder()
-            .label(text)
-            .css_classes(["hint-footer-item"])
-            .build();
-        footer.append(&label);
-    }
-    container.append(&footer);
+    container.append(&build_hint_footer(
+        &metrics,
+        &["Enter create", "Escape back"],
+    ));
 
-    let backdrop = GtkBox::builder()
-        .css_classes(["backdrop"])
-        .hexpand(true)
-        .vexpand(true)
-        .build();
-
-    let overlay = Overlay::builder().child(&backdrop).build();
-    overlay.add_overlay(&container);
-
-    window.set_child(Some(&overlay));
+    wrap_in_backdrop(window, &container);
 
     // Focus the first entry
     if let Some(first) = entries.first() {
@@ -1273,42 +1243,20 @@ fn attach_variable_input_key_handler(
 ) {
     let key_ctx = ctx.clone();
     let close_keybinds = ctx.config.close_keybinds.clone();
-    let config = ctx.config.clone();
     let ws_name = ws_name.to_string();
     let entries: Vec<Entry> = entries.to_vec();
     let var_names: Vec<String> = var_names.to_vec();
     let programs: Vec<String> = programs.to_vec();
 
-    let key_controller = EventControllerKey::new();
-    key_controller.set_name(Some("ndw-key"));
-    key_controller.set_propagation_phase(gtk4::PropagationPhase::Capture);
+    let key_controller = new_key_controller();
     key_controller.connect_key_pressed(move |_, key, _, modifier| {
-        let relevant_mods = gdk4::ModifierType::CONTROL_MASK
-            | gdk4::ModifierType::SHIFT_MASK
-            | gdk4::ModifierType::ALT_MASK
-            | gdk4::ModifierType::SUPER_MASK;
-
         // Close keybinds / Escape → go back to template picker
-        for kb in &close_keybinds {
-            if key == kb.key && modifier & relevant_mods == kb.modifiers {
-                let window = key_ctx.window.clone();
-                let cfg = config.clone();
-                let ctx_clone = key_ctx.clone();
-                glib::idle_add_local_once(move || {
-                    show_template_picker(
-                        ch,
-                        &ActionContext {
-                            mode: ctx_clone.mode,
-                            window,
-                            error_label: ctx_clone.error_label.clone(),
-                            error_revealer: ctx_clone.error_revealer.clone(),
-                            config: cfg,
-                            keyboard_infos: ctx_clone.keyboard_infos.clone(),
-                        },
-                    );
-                });
-                return Propagation::Stop;
-            }
+        if matches_close_keybind(key, modifier, &close_keybinds) {
+            let ctx_clone = key_ctx.clone();
+            glib::idle_add_local_once(move || {
+                show_template_picker(ch, &ctx_clone);
+            });
+            return Propagation::Stop;
         }
 
         // Enter → collect values and create workspace
@@ -1335,20 +1283,11 @@ fn attach_variable_input_key_handler(
 fn attach_key_handler(ctx: &ActionContext, close_keybinds: &[crate::config::Keybind]) {
     let key_ctx = ctx.clone();
     let close_keybinds = close_keybinds.to_vec();
-    let key_controller = EventControllerKey::new();
-    key_controller.set_name(Some("ndw-key"));
-    key_controller.set_propagation_phase(gtk4::PropagationPhase::Capture);
+    let key_controller = new_key_controller();
     key_controller.connect_key_pressed(move |_, key, _, modifier| {
-        let relevant_mods = gdk4::ModifierType::CONTROL_MASK
-            | gdk4::ModifierType::SHIFT_MASK
-            | gdk4::ModifierType::ALT_MASK
-            | gdk4::ModifierType::SUPER_MASK;
-
-        for kb in &close_keybinds {
-            if key == kb.key && modifier & relevant_mods == kb.modifiers {
-                key_ctx.window.close();
-                return Propagation::Stop;
-            }
+        if matches_close_keybind(key, modifier, &close_keybinds) {
+            key_ctx.window.close();
+            return Propagation::Stop;
         }
 
         // Tab / Shift+Tab cycle through modes
@@ -1368,13 +1307,9 @@ fn attach_key_handler(ctx: &ActionContext, close_keybinds: &[crate::config::Keyb
 
         // Workspace key: action depends on mode
         // Ignore Super so holding Mod from the opening keybind doesn't block input
-        let action_mods = modifier
-            & (gdk4::ModifierType::CONTROL_MASK
-                | gdk4::ModifierType::SHIFT_MASK
-                | gdk4::ModifierType::ALT_MASK);
         if let Some(ch) = key.to_unicode() {
             let ch = ch.to_ascii_lowercase();
-            if crate::config::is_workspace_char(ch) && action_mods.is_empty() {
+            if crate::config::is_workspace_char(ch) && (modifier & ACTION_MODS).is_empty() {
                 dispatch_action(ch, &key_ctx);
                 return Propagation::Stop;
             }
@@ -1744,6 +1679,38 @@ mod tests {
         assert_eq!(infos.len(), 1);
         assert_eq!(infos[0].window_count, 2);
         assert_eq!(infos[0].app_names, vec!["Kitty"]);
+    }
+
+    // --- status_text ---
+
+    #[test]
+    fn status_text_variants() {
+        let mut info = DynWorkspaceInfo::uncreated('a');
+
+        // Uncreated with no windows → None
+        assert_eq!(info.status_text(), None);
+
+        // Focused
+        info.is_focused = true;
+        info.is_uncreated = false;
+        assert_eq!(info.status_text().as_deref(), Some("focused"));
+
+        // Active (not focused)
+        info.is_focused = false;
+        info.is_active = true;
+        assert_eq!(info.status_text().as_deref(), Some("active"));
+
+        // Empty (live, no windows)
+        info.is_active = false;
+        assert_eq!(info.status_text().as_deref(), Some("empty"));
+
+        // 1 window
+        info.window_count = 1;
+        assert_eq!(info.status_text().as_deref(), Some("1 win"));
+
+        // Multiple windows
+        info.window_count = 5;
+        assert_eq!(info.status_text().as_deref(), Some("5 win"));
     }
 
     // --- build_template_options ---
