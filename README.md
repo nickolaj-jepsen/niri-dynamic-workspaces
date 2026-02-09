@@ -82,8 +82,12 @@ Templates let you choose from predefined program sets when creating a new worksp
 
 ```toml
 [template.dev]
-programs = ["kitty", "code ."]
+programs = ["kitty", "code {{path}}"]
 key = "d"                        # optional hotkey shortcut
+
+[template.dev.variables.path]
+name = "Project path"            # display label shown in the input form
+type = "text"                    # optional, defaults to "text"
 
 [template.browser]
 programs = ["firefox", "slack"]
@@ -94,6 +98,10 @@ programs = ["firefox", "slack"]
 - Templates without a `key` get one auto-assigned (1-9 then a-z)
 - The picker always includes an "Empty" option that uses `default_programs`
 - Workspaces with per-key `[workspace.KEY].programs` skip the picker and create directly
+- Templates can define **variables** with `{{name}}` placeholders in program strings
+- Each variable has a required `name` (display label) and optional `type` (defaults to `"text"`)
+- Templates with variables show an input form before creating the workspace
+- Templates without variables create immediately as before
 
 #### Available keyboard layouts
 

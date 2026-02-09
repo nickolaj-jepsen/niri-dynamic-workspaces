@@ -5,12 +5,12 @@ use std::rc::Rc;
 use glib::Propagation;
 use gtk4::prelude::*;
 use gtk4::{
-    Align, ApplicationWindow, Box as GtkBox, EventControllerKey, GestureClick, Label, Orientation,
-    Overlay, PolicyType, Revealer, RevealerTransitionType, ScrolledWindow,
+    Align, ApplicationWindow, Box as GtkBox, Entry, EventControllerKey, GestureClick, Label,
+    Orientation, Overlay, PolicyType, Revealer, RevealerTransitionType, ScrolledWindow,
 };
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
-use crate::config::{KeyboardLayout, ResolvedConfig};
+use crate::config::{KeyboardLayout, ResolvedConfig, TemplateVariable};
 use crate::niri;
 
 thread_local! {
@@ -736,6 +736,7 @@ struct TemplateOption {
     key: Option<char>,
     name: String,
     programs: Vec<String>,
+    variables: Vec<TemplateVariable>,
 }
 
 fn build_template_options(config: &ResolvedConfig) -> Vec<TemplateOption> {
@@ -746,6 +747,7 @@ fn build_template_options(config: &ResolvedConfig) -> Vec<TemplateOption> {
         key: Some('1'),
         name: "Empty".to_string(),
         programs: config.default_programs.clone(),
+        variables: Vec::new(),
     });
 
     for tmpl in &config.templates {
@@ -753,6 +755,7 @@ fn build_template_options(config: &ResolvedConfig) -> Vec<TemplateOption> {
             key: tmpl.key,
             name: tmpl.name.clone(),
             programs: tmpl.programs.clone(),
+            variables: tmpl.variables.clone(),
         });
     }
 
@@ -821,6 +824,14 @@ fn update_selection(option_widgets: &[GtkBox], selected: usize) {
         } else {
             w.remove_css_class("selected");
         }
+    }
+}
+
+fn select_template_option(ws_name: &str, option: &TemplateOption, ch: char, ctx: &ActionContext) {
+    if option.variables.is_empty() {
+        switch_and_close(ws_name, &option.programs, ctx);
+    } else {
+        show_variable_input(ws_name, option, ch, ctx);
     }
 }
 
@@ -908,7 +919,7 @@ fn show_template_picker(ch: char, ctx: &ActionContext) {
         let click_ws = ws_name.clone();
         let click = GestureClick::new();
         click.connect_released(move |_, _, _, _| {
-            switch_and_close(&click_ws, &click_options[i].programs, &click_ctx);
+            select_template_option(&click_ws, &click_options[i], ch, &click_ctx);
         });
         widget.add_controller(click);
     }
@@ -965,6 +976,7 @@ fn show_template_picker(ch: char, ctx: &ActionContext) {
         &option_widgets_rc,
         &selected_idx,
         option_count,
+        ch,
     );
     attach_close_on_backdrop_click(window, &container);
 }
@@ -976,6 +988,7 @@ fn attach_template_key_handler(
     option_widgets: &Rc<Vec<GtkBox>>,
     selected_idx: &Rc<Cell<usize>>,
     option_count: usize,
+    ws_char: char,
 ) {
     let key_ctx = ctx.clone();
     let close_keybinds = ctx.config.close_keybinds.clone();
@@ -1033,7 +1046,7 @@ fn attach_template_key_handler(
         // Enter → confirm selected
         if key == gdk4::Key::Return || key == gdk4::Key::KP_Enter {
             let idx = sel.get();
-            switch_and_close(&ws_name, &options[idx].programs, &key_ctx);
+            select_template_option(&ws_name, &options[idx], ws_char, &key_ctx);
             return Propagation::Stop;
         }
 
@@ -1047,13 +1060,213 @@ fn attach_template_key_handler(
             if action_mods.is_empty() {
                 for opt in options.iter() {
                     if opt.key == Some(pressed) {
-                        switch_and_close(&ws_name, &opt.programs, &key_ctx);
+                        select_template_option(&ws_name, opt, ws_char, &key_ctx);
                         return Propagation::Stop;
                     }
                 }
             }
         }
 
+        Propagation::Proceed
+    });
+    ctx.window.add_controller(key_controller);
+}
+
+// --- Variable input form ---
+
+#[expect(clippy::too_many_lines, reason = "variable input view builder")]
+fn show_variable_input(ws_name: &str, option: &TemplateOption, ch: char, ctx: &ActionContext) {
+    let window = &ctx.window;
+    remove_app_controllers(window);
+
+    let config = &ctx.config;
+    let metrics = KeyboardMetrics::from_monitor_width(get_monitor_width(), config.layout);
+    apply_scaled_css(&metrics.scaled_css_variables());
+
+    let container = GtkBox::builder()
+        .orientation(Orientation::Vertical)
+        .spacing(0)
+        .css_classes(["popup-container", "template-picker"])
+        .halign(Align::Center)
+        .valign(Align::Center)
+        .build();
+
+    // Title — match template picker style: "Create workspace KEY (Name)"
+    let display_name = config.workspace_names.get(&ch);
+    let title_text = if let Some(name) = display_name {
+        format!(
+            "{} \u{2192} {} ({})",
+            option.name,
+            display_key_char(ch),
+            name
+        )
+    } else {
+        format!("{} \u{2192} {}", option.name, display_key_char(ch))
+    };
+    let title = Label::builder()
+        .label(&title_text)
+        .css_classes(["variable-title"])
+        .build();
+    container.append(&title);
+
+    // Error revealer
+    let error_label = Label::builder()
+        .css_classes(["error-message"])
+        .wrap(true)
+        .build();
+    let error_revealer = Revealer::builder()
+        .child(&error_label)
+        .reveal_child(false)
+        .transition_type(RevealerTransitionType::SlideUp)
+        .transition_duration(200)
+        .build();
+
+    // Variable form
+    let form = GtkBox::builder()
+        .orientation(Orientation::Vertical)
+        .spacing(metrics.key_gap / 2)
+        .css_classes(["variable-form"])
+        .build();
+
+    let entries: Vec<Entry> = option
+        .variables
+        .iter()
+        .map(|var| {
+            let row = GtkBox::builder()
+                .orientation(Orientation::Vertical)
+                .spacing(0)
+                .css_classes(["variable-row"])
+                .build();
+
+            let label = Label::builder()
+                .label(&var.label)
+                .css_classes(["variable-label"])
+                .halign(Align::Start)
+                .build();
+            row.append(&label);
+
+            let entry = Entry::builder()
+                .css_classes(["variable-entry"])
+                .placeholder_text(&var.name)
+                .build();
+            row.append(&entry);
+
+            form.append(&row);
+            entry
+        })
+        .collect();
+    container.append(&form);
+
+    container.append(&error_revealer);
+
+    // Footer hints
+    let footer = GtkBox::builder()
+        .orientation(Orientation::Horizontal)
+        .spacing(metrics.key_size / 4)
+        .css_classes(["hint-footer"])
+        .halign(Align::Center)
+        .build();
+    for text in ["Enter create", "Escape back"] {
+        let label = Label::builder()
+            .label(text)
+            .css_classes(["hint-footer-item"])
+            .build();
+        footer.append(&label);
+    }
+    container.append(&footer);
+
+    let backdrop = GtkBox::builder()
+        .css_classes(["backdrop"])
+        .hexpand(true)
+        .vexpand(true)
+        .build();
+
+    let overlay = Overlay::builder().child(&backdrop).build();
+    overlay.add_overlay(&container);
+
+    window.set_child(Some(&overlay));
+
+    // Focus the first entry
+    if let Some(first) = entries.first() {
+        first.grab_focus();
+    }
+
+    let var_ctx = ActionContext {
+        mode: ctx.mode,
+        window: ctx.window.clone(),
+        error_label,
+        error_revealer,
+        config: ctx.config.clone(),
+        keyboard_infos: ctx.keyboard_infos.clone(),
+    };
+
+    let var_names: Vec<String> = option.variables.iter().map(|v| v.name.clone()).collect();
+    let programs = option.programs.clone();
+
+    attach_variable_input_key_handler(ws_name, &var_ctx, ch, &entries, &var_names, &programs);
+    attach_close_on_backdrop_click(window, &container);
+}
+
+fn attach_variable_input_key_handler(
+    ws_name: &str,
+    ctx: &ActionContext,
+    ch: char,
+    entries: &[Entry],
+    var_names: &[String],
+    programs: &[String],
+) {
+    let key_ctx = ctx.clone();
+    let close_keybinds = ctx.config.close_keybinds.clone();
+    let config = ctx.config.clone();
+    let ws_name = ws_name.to_string();
+    let entries: Vec<Entry> = entries.to_vec();
+    let var_names: Vec<String> = var_names.to_vec();
+    let programs: Vec<String> = programs.to_vec();
+
+    let key_controller = EventControllerKey::new();
+    key_controller.set_name(Some("ndw-key"));
+    key_controller.set_propagation_phase(gtk4::PropagationPhase::Capture);
+    key_controller.connect_key_pressed(move |_, key, _, modifier| {
+        let relevant_mods = gdk4::ModifierType::CONTROL_MASK
+            | gdk4::ModifierType::SHIFT_MASK
+            | gdk4::ModifierType::ALT_MASK
+            | gdk4::ModifierType::SUPER_MASK;
+
+        // Close keybinds / Escape → go back to template picker
+        for kb in &close_keybinds {
+            if key == kb.key && modifier & relevant_mods == kb.modifiers {
+                let window = key_ctx.window.clone();
+                let cfg = config.clone();
+                let ctx_clone = key_ctx.clone();
+                glib::idle_add_local_once(move || {
+                    show_template_picker(
+                        ch,
+                        &ActionContext {
+                            mode: ctx_clone.mode,
+                            window,
+                            error_label: ctx_clone.error_label.clone(),
+                            error_revealer: ctx_clone.error_revealer.clone(),
+                            config: cfg,
+                            keyboard_infos: ctx_clone.keyboard_infos.clone(),
+                        },
+                    );
+                });
+                return Propagation::Stop;
+            }
+        }
+
+        // Enter → collect values and create workspace
+        if key == gdk4::Key::Return || key == gdk4::Key::KP_Enter {
+            let mut values = HashMap::new();
+            for (name, entry) in var_names.iter().zip(entries.iter()) {
+                values.insert(name.clone(), entry.text().to_string());
+            }
+            let substituted = crate::config::substitute_variables(&programs, &values);
+            switch_and_close(&ws_name, &substituted, &key_ctx);
+            return Propagation::Stop;
+        }
+
+        // Let GTK handle Tab, text input, etc.
         Propagation::Proceed
     });
     ctx.window.add_controller(key_controller);
@@ -1485,11 +1698,13 @@ mod tests {
                 name: "dev".to_string(),
                 programs: vec!["code".to_string()],
                 key: Some('d'),
+                variables: Vec::new(),
             },
             Template {
                 name: "browser".to_string(),
                 programs: vec!["firefox".to_string()],
                 key: Some('2'),
+                variables: Vec::new(),
             },
         ];
 
@@ -1516,6 +1731,7 @@ mod tests {
             name: "dev".to_string(),
             programs: vec!["code".to_string()],
             key: Some('2'),
+            variables: Vec::new(),
         }];
 
         let opts = build_template_options(&config);

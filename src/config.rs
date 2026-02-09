@@ -17,9 +17,22 @@ struct Config {
 
 #[derive(Default, Deserialize)]
 #[serde(default)]
+struct VariableEntry {
+    name: String,
+    #[serde(rename = "type", default = "default_variable_type")]
+    variable_type: String,
+}
+
+fn default_variable_type() -> String {
+    "text".to_string()
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
 struct TemplateEntry {
     programs: Vec<String>,
     key: Option<String>,
+    variables: HashMap<String, VariableEntry>,
 }
 
 #[derive(Default, Deserialize)]
@@ -103,11 +116,29 @@ pub struct ResolvedConfig {
     pub templates: Vec<Template>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum VariableType {
+    #[default]
+    Text,
+}
+
+#[derive(Clone, Debug)]
+pub struct TemplateVariable {
+    pub name: String,
+    pub label: String,
+    #[allow(
+        dead_code,
+        reason = "extensibility: future variable types will branch on this"
+    )]
+    pub var_type: VariableType,
+}
+
 #[derive(Clone, Debug)]
 pub struct Template {
     pub name: String,
     pub programs: Vec<String>,
     pub key: Option<char>,
+    pub variables: Vec<TemplateVariable>,
 }
 
 impl ResolvedConfig {
@@ -276,6 +307,10 @@ fn parse_keybind(s: &str) -> Result<Keybind, String> {
 }
 
 impl Config {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "config resolution with template variable validation"
+    )]
     fn resolve(self) -> (ResolvedConfig, Vec<String>) {
         let mut warnings = Vec::new();
 
@@ -354,10 +389,68 @@ impl Config {
                 None
             };
 
+            // Resolve variables
+            let mut variables: Vec<TemplateVariable> = entry
+                .variables
+                .iter()
+                .map(|(var_name, var_entry)| {
+                    let var_type = if var_entry.variable_type.eq_ignore_ascii_case("text") {
+                        VariableType::Text
+                    } else {
+                        warnings.push(format!(
+                            "template '{name}': unknown variable type '{}' for '{var_name}', \
+                                 defaulting to text",
+                            var_entry.variable_type
+                        ));
+                        VariableType::Text
+                    };
+                    let label = if var_entry.name.is_empty() {
+                        warnings.push(format!(
+                            "template '{name}': variable '{var_name}' has empty name, \
+                             using key as label"
+                        ));
+                        var_name.clone()
+                    } else {
+                        var_entry.name.clone()
+                    };
+                    TemplateVariable {
+                        name: var_name.clone(),
+                        label,
+                        var_type,
+                    }
+                })
+                .collect();
+            variables.sort_by(|a, b| a.name.cmp(&b.name));
+
+            // Warn about unreferenced variables and undefined references
+            let declared_names: HashSet<&str> = variables.iter().map(|v| v.name.as_str()).collect();
+            let mut referenced_names: HashSet<String> = HashSet::new();
+            for prog in &entry.programs {
+                for r in extract_variable_references(prog) {
+                    referenced_names.insert(r);
+                }
+            }
+            for r in &referenced_names {
+                if !declared_names.contains(r.as_str()) {
+                    warnings.push(format!(
+                        "template '{name}': program references undefined variable '{{{{{r}}}}}'"
+                    ));
+                }
+            }
+            for v in &variables {
+                if !referenced_names.contains(&v.name) {
+                    warnings.push(format!(
+                        "template '{name}': variable '{}' is never referenced in programs",
+                        v.name
+                    ));
+                }
+            }
+
             templates.push(Template {
                 name: name.clone(),
                 programs: entry.programs.clone(),
                 key,
+                variables,
             });
         }
 
@@ -384,6 +477,44 @@ impl Config {
 
         (resolved, warnings)
     }
+}
+
+/// Extract all `{{name}}` variable references from a program string.
+///
+/// Returns a deduplicated list of variable names in order of first occurrence.
+pub fn extract_variable_references(program: &str) -> Vec<String> {
+    let mut refs = Vec::new();
+    let mut seen = HashSet::new();
+    let mut rest = program;
+    while let Some(start) = rest.find("{{") {
+        let after_open = &rest[start + 2..];
+        if let Some(end) = after_open.find("}}") {
+            let name = after_open[..end].trim();
+            if !name.is_empty() && seen.insert(name.to_string()) {
+                refs.push(name.to_string());
+            }
+            rest = &after_open[end + 2..];
+        } else {
+            break;
+        }
+    }
+    refs
+}
+
+/// Substitute `{{name}}` placeholders in each program string with values.
+///
+/// Unmatched placeholders (no matching key in `values`) are left as-is.
+pub fn substitute_variables(programs: &[String], values: &HashMap<String, String>) -> Vec<String> {
+    programs
+        .iter()
+        .map(|prog| {
+            let mut result = prog.clone();
+            for (name, value) in values {
+                result = result.replace(&format!("{{{{{name}}}}}"), value);
+            }
+            result
+        })
+        .collect()
 }
 
 /// Format a workspace name from a prefix and a single-character key.
@@ -773,6 +904,7 @@ layout = "dvorak"
             TemplateEntry {
                 programs: vec!["kitty".to_string(), "code .".to_string()],
                 key: Some("d".to_string()),
+                ..TemplateEntry::default()
             },
         );
         template.insert(
@@ -780,6 +912,7 @@ layout = "dvorak"
             TemplateEntry {
                 programs: vec!["firefox".to_string()],
                 key: None,
+                ..TemplateEntry::default()
             },
         );
         let config = Config {
@@ -806,6 +939,7 @@ layout = "dvorak"
             TemplateEntry {
                 programs: Vec::new(),
                 key: None,
+                ..TemplateEntry::default()
             },
         );
         let config = Config {
@@ -827,6 +961,7 @@ layout = "dvorak"
             TemplateEntry {
                 programs: vec!["kitty".to_string()],
                 key: Some("a".to_string()),
+                ..TemplateEntry::default()
             },
         );
         template.insert(
@@ -834,6 +969,7 @@ layout = "dvorak"
             TemplateEntry {
                 programs: vec!["firefox".to_string()],
                 key: Some("AB".to_string()),
+                ..TemplateEntry::default()
             },
         );
         let config = Config {
@@ -865,6 +1001,7 @@ layout = "dvorak"
             TemplateEntry {
                 programs: vec!["kitty".to_string()],
                 key: Some("a".to_string()),
+                ..TemplateEntry::default()
             },
         );
         template.insert(
@@ -872,6 +1009,7 @@ layout = "dvorak"
             TemplateEntry {
                 programs: vec!["firefox".to_string()],
                 key: Some("a".to_string()),
+                ..TemplateEntry::default()
             },
         );
         let config = Config {
@@ -913,6 +1051,7 @@ layout = "dvorak"
                     TemplateEntry {
                         programs: vec!["kitty".to_string()],
                         key: None,
+                        ..TemplateEntry::default()
                     },
                 );
                 m
@@ -931,6 +1070,7 @@ layout = "dvorak"
                     TemplateEntry {
                         programs: vec!["kitty".to_string()],
                         key: None,
+                        ..TemplateEntry::default()
                     },
                 );
                 m
@@ -961,6 +1101,7 @@ layout = "dvorak"
             TemplateEntry {
                 programs: vec!["kitty".to_string()],
                 key: Some("3".to_string()),
+                ..TemplateEntry::default()
             },
         );
         template.insert(
@@ -968,6 +1109,7 @@ layout = "dvorak"
             TemplateEntry {
                 programs: vec!["firefox".to_string()],
                 key: None,
+                ..TemplateEntry::default()
             },
         );
         template.insert(
@@ -975,6 +1117,7 @@ layout = "dvorak"
             TemplateEntry {
                 programs: vec!["slack".to_string()],
                 key: None,
+                ..TemplateEntry::default()
             },
         );
         let config = Config {
@@ -1014,6 +1157,7 @@ layout = "dvorak"
             TemplateEntry {
                 programs: vec!["kitty".to_string()],
                 key: Some("1".to_string()),
+                ..TemplateEntry::default()
             },
         );
         let config = Config {
@@ -1063,5 +1207,293 @@ programs = ["firefox"]
                 computed
             );
         }
+    }
+
+    // --- extract_variable_references ---
+
+    #[test]
+    fn extract_variable_references_basic() {
+        assert_eq!(extract_variable_references("code {{path}}"), vec!["path"]);
+    }
+
+    #[test]
+    fn extract_variable_references_multiple() {
+        assert_eq!(
+            extract_variable_references("{{a}} and {{b}}"),
+            vec!["a", "b"]
+        );
+    }
+
+    #[test]
+    fn extract_variable_references_none() {
+        assert!(extract_variable_references("code .").is_empty());
+    }
+
+    #[test]
+    fn extract_variable_references_duplicate() {
+        assert_eq!(extract_variable_references("{{x}} {{x}}"), vec!["x"]);
+    }
+
+    #[test]
+    fn extract_variable_references_whitespace() {
+        assert_eq!(extract_variable_references("code {{ path }}"), vec!["path"]);
+    }
+
+    // --- substitute_variables ---
+
+    #[test]
+    fn substitute_variables_basic() {
+        let programs = vec!["code {{path}}".to_string()];
+        let values = HashMap::from([("path".to_string(), "/home/user".to_string())]);
+        assert_eq!(
+            substitute_variables(&programs, &values),
+            vec!["code /home/user"]
+        );
+    }
+
+    #[test]
+    fn substitute_variables_multiple() {
+        let programs = vec!["{{cmd}} {{arg}}".to_string()];
+        let values = HashMap::from([
+            ("cmd".to_string(), "code".to_string()),
+            ("arg".to_string(), "/tmp".to_string()),
+        ]);
+        assert_eq!(substitute_variables(&programs, &values), vec!["code /tmp"]);
+    }
+
+    #[test]
+    fn substitute_variables_missing_key() {
+        let programs = vec!["code {{path}}".to_string()];
+        let values = HashMap::new();
+        assert_eq!(
+            substitute_variables(&programs, &values),
+            vec!["code {{path}}"]
+        );
+    }
+
+    #[test]
+    fn substitute_variables_multiple_programs() {
+        let programs = vec![
+            "code {{path}}".to_string(),
+            "git -C {{path}} checkout {{branch}}".to_string(),
+            "kitty".to_string(),
+        ];
+        let values = HashMap::from([
+            ("path".to_string(), "/home/user/project".to_string()),
+            ("branch".to_string(), "main".to_string()),
+        ]);
+        assert_eq!(
+            substitute_variables(&programs, &values),
+            vec![
+                "code /home/user/project",
+                "git -C /home/user/project checkout main",
+                "kitty"
+            ]
+        );
+    }
+
+    // --- Template variable resolution ---
+
+    #[test]
+    fn resolve_templates_with_variables() {
+        let mut variables = HashMap::new();
+        variables.insert(
+            "path".to_string(),
+            VariableEntry {
+                name: "Project path".to_string(),
+                variable_type: "text".to_string(),
+            },
+        );
+        variables.insert(
+            "branch".to_string(),
+            VariableEntry {
+                name: "Git branch".to_string(),
+                variable_type: "text".to_string(),
+            },
+        );
+        let mut template = HashMap::new();
+        template.insert(
+            "dev".to_string(),
+            TemplateEntry {
+                programs: vec![
+                    "code {{path}}".to_string(),
+                    "git checkout {{branch}}".to_string(),
+                ],
+                key: Some("d".to_string()),
+                variables,
+            },
+        );
+        let config = Config {
+            template,
+            ..Config::default()
+        };
+        let (resolved, warnings) = config.resolve();
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        let tmpl = &resolved.templates[0];
+        assert_eq!(tmpl.variables.len(), 2);
+        // Sorted by name
+        assert_eq!(tmpl.variables[0].name, "branch");
+        assert_eq!(tmpl.variables[0].label, "Git branch");
+        assert_eq!(tmpl.variables[0].var_type, VariableType::Text);
+        assert_eq!(tmpl.variables[1].name, "path");
+        assert_eq!(tmpl.variables[1].label, "Project path");
+    }
+
+    #[test]
+    fn resolve_templates_unknown_variable_type_warns() {
+        let mut variables = HashMap::new();
+        variables.insert(
+            "path".to_string(),
+            VariableEntry {
+                name: "Path".to_string(),
+                variable_type: "select".to_string(),
+            },
+        );
+        let mut template = HashMap::new();
+        template.insert(
+            "dev".to_string(),
+            TemplateEntry {
+                programs: vec!["code {{path}}".to_string()],
+                key: Some("d".to_string()),
+                variables,
+            },
+        );
+        let config = Config {
+            template,
+            ..Config::default()
+        };
+        let (resolved, warnings) = config.resolve();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("unknown variable type"));
+        assert!(warnings[0].contains("select"));
+        assert_eq!(
+            resolved.templates[0].variables[0].var_type,
+            VariableType::Text
+        );
+    }
+
+    #[test]
+    fn resolve_templates_empty_variable_name_warns() {
+        let mut variables = HashMap::new();
+        variables.insert(
+            "path".to_string(),
+            VariableEntry {
+                name: String::new(),
+                variable_type: "text".to_string(),
+            },
+        );
+        let mut template = HashMap::new();
+        template.insert(
+            "dev".to_string(),
+            TemplateEntry {
+                programs: vec!["code {{path}}".to_string()],
+                key: Some("d".to_string()),
+                variables,
+            },
+        );
+        let config = Config {
+            template,
+            ..Config::default()
+        };
+        let (resolved, warnings) = config.resolve();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("empty name"));
+        assert_eq!(resolved.templates[0].variables[0].label, "path");
+    }
+
+    #[test]
+    fn resolve_templates_unreferenced_variable_warns() {
+        let mut variables = HashMap::new();
+        variables.insert(
+            "unused".to_string(),
+            VariableEntry {
+                name: "Unused var".to_string(),
+                variable_type: "text".to_string(),
+            },
+        );
+        let mut template = HashMap::new();
+        template.insert(
+            "dev".to_string(),
+            TemplateEntry {
+                programs: vec!["kitty".to_string()],
+                key: Some("d".to_string()),
+                variables,
+            },
+        );
+        let config = Config {
+            template,
+            ..Config::default()
+        };
+        let (_, warnings) = config.resolve();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("never referenced"));
+        assert!(warnings[0].contains("unused"));
+    }
+
+    #[test]
+    fn resolve_templates_undefined_reference_warns() {
+        let mut template = HashMap::new();
+        template.insert(
+            "dev".to_string(),
+            TemplateEntry {
+                programs: vec!["code {{path}}".to_string()],
+                key: Some("d".to_string()),
+                ..TemplateEntry::default()
+            },
+        );
+        let config = Config {
+            template,
+            ..Config::default()
+        };
+        let (_, warnings) = config.resolve();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("undefined variable"));
+        assert!(warnings[0].contains("{{path}}"));
+    }
+
+    #[test]
+    fn toml_with_template_variables() {
+        let toml_str = r#"
+[template.dev]
+programs = ["kitty", "code {{path}}"]
+key = "d"
+
+[template.dev.variables.path]
+name = "Project path"
+type = "text"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let (resolved, warnings) = config.resolve();
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        assert_eq!(resolved.templates.len(), 1);
+        let tmpl = &resolved.templates[0];
+        assert_eq!(tmpl.name, "dev");
+        assert_eq!(tmpl.variables.len(), 1);
+        assert_eq!(tmpl.variables[0].name, "path");
+        assert_eq!(tmpl.variables[0].label, "Project path");
+        assert_eq!(tmpl.variables[0].var_type, VariableType::Text);
+    }
+
+    #[test]
+    fn template_variables_field() {
+        let tmpl = Template {
+            name: "test".to_string(),
+            programs: Vec::new(),
+            key: None,
+            variables: Vec::new(),
+        };
+        assert!(tmpl.variables.is_empty());
+
+        let tmpl_with = Template {
+            name: "test".to_string(),
+            programs: Vec::new(),
+            key: None,
+            variables: vec![TemplateVariable {
+                name: "x".to_string(),
+                label: "X".to_string(),
+                var_type: VariableType::Text,
+            }],
+        };
+        assert!(!tmpl_with.variables.is_empty());
     }
 }
