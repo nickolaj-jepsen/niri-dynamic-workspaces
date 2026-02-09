@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use gdk4::{Key, ModifierType};
 use serde::Deserialize;
@@ -12,6 +12,14 @@ struct Config {
     layout: LayoutConfig,
     keybinds: KeybindsConfig,
     workspace: HashMap<String, WorkspaceEntry>,
+    template: HashMap<String, TemplateEntry>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct TemplateEntry {
+    programs: Vec<String>,
+    key: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -92,6 +100,14 @@ pub struct ResolvedConfig {
     pub workspace_names: HashMap<char, String>,
     pub auto_delete_empty: bool,
     pub layout: &'static KeyboardLayout,
+    pub templates: Vec<Template>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Template {
+    pub name: String,
+    pub programs: Vec<String>,
+    pub key: Option<char>,
 }
 
 impl ResolvedConfig {
@@ -100,6 +116,14 @@ impl ResolvedConfig {
         self.workspace_programs
             .get(&ch)
             .map_or(self.default_programs.as_slice(), Vec::as_slice)
+    }
+
+    /// Whether the template picker should be shown for a given workspace key.
+    ///
+    /// Returns `true` when templates are configured and the key has no
+    /// per-workspace programs (which would bypass the picker).
+    pub fn should_show_templates(&self, ch: char) -> bool {
+        !self.templates.is_empty() && !self.workspace_programs.contains_key(&ch)
     }
 }
 
@@ -290,6 +314,63 @@ impl Config {
             &LAYOUT_QWERTY
         };
 
+        // --- Templates ---
+        let mut templates: Vec<Template> = Vec::new();
+        // Reserve '1' for the "Empty" option in the template picker.
+        let mut used_hotkeys: HashSet<char> = HashSet::from(['1']);
+
+        // Collect and sort template names for deterministic ordering
+        let mut template_names: Vec<String> = self.template.keys().cloned().collect();
+        template_names.sort();
+
+        for name in &template_names {
+            let entry = &self.template[name];
+
+            if entry.programs.is_empty() {
+                warnings.push(format!(
+                    "ignoring template '{name}': programs list is empty"
+                ));
+                continue;
+            }
+
+            let key = if let Some(ref k) = entry.key {
+                if let Some(ch) = parse_workspace_char(k) {
+                    if used_hotkeys.contains(&ch) {
+                        warnings.push(format!(
+                            "template '{name}': duplicate hotkey '{ch}', ignoring key"
+                        ));
+                        None
+                    } else {
+                        used_hotkeys.insert(ch);
+                        Some(ch)
+                    }
+                } else {
+                    warnings.push(format!(
+                        "template '{name}': invalid key '{k}' (must be a-z or 0-9)"
+                    ));
+                    None
+                }
+            } else {
+                None
+            };
+
+            templates.push(Template {
+                name: name.clone(),
+                programs: entry.programs.clone(),
+                key,
+            });
+        }
+
+        // Auto-assign shortcut keys to templates without an explicit key.
+        // Start from '2' — '1' is reserved for the "Empty" option in the picker.
+        let auto_candidates = ('2'..='9').chain('a'..='z');
+        let mut auto_iter = auto_candidates.filter(|ch| !used_hotkeys.contains(ch));
+        for tmpl in &mut templates {
+            if tmpl.key.is_none() {
+                tmpl.key = auto_iter.next();
+            }
+        }
+
         let resolved = ResolvedConfig {
             workspace_prefix: self.general.workspace_prefix,
             close_keybinds,
@@ -298,6 +379,7 @@ impl Config {
             workspace_names,
             auto_delete_empty: self.general.auto_delete_empty,
             layout,
+            templates,
         };
 
         (resolved, warnings)
@@ -498,6 +580,7 @@ mod tests {
         assert!(resolved.workspace_programs.is_empty());
         assert!(resolved.workspace_names.is_empty());
         assert_eq!(resolved.layout.name, "qwerty");
+        assert!(resolved.templates.is_empty());
     }
 
     #[test]
@@ -678,6 +761,294 @@ layout = "dvorak"
         let (resolved, warnings) = config.resolve();
         assert!(warnings.is_empty());
         assert_eq!(resolved.layout.name, "dvorak");
+    }
+
+    // --- Templates ---
+
+    #[test]
+    fn resolve_templates_basic() {
+        let mut template = HashMap::new();
+        template.insert(
+            "dev".to_string(),
+            TemplateEntry {
+                programs: vec!["kitty".to_string(), "code .".to_string()],
+                key: Some("d".to_string()),
+            },
+        );
+        template.insert(
+            "browser".to_string(),
+            TemplateEntry {
+                programs: vec!["firefox".to_string()],
+                key: None,
+            },
+        );
+        let config = Config {
+            template,
+            ..Config::default()
+        };
+        let (resolved, warnings) = config.resolve();
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        assert_eq!(resolved.templates.len(), 2);
+        // Sorted alphabetically
+        assert_eq!(resolved.templates[0].name, "browser");
+        assert_eq!(resolved.templates[1].name, "dev");
+        // Explicit key preserved
+        assert_eq!(resolved.templates[1].key, Some('d'));
+        // Auto-assigned key (starts at '2', since '1' is reserved for Empty)
+        assert_eq!(resolved.templates[0].key, Some('2'));
+    }
+
+    #[test]
+    fn resolve_templates_empty_programs_warns() {
+        let mut template = HashMap::new();
+        template.insert(
+            "empty".to_string(),
+            TemplateEntry {
+                programs: Vec::new(),
+                key: None,
+            },
+        );
+        let config = Config {
+            template,
+            ..Config::default()
+        };
+        let (resolved, warnings) = config.resolve();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("empty"));
+        assert!(warnings[0].contains("programs list is empty"));
+        assert!(resolved.templates.is_empty());
+    }
+
+    #[test]
+    fn resolve_templates_hotkey_validation() {
+        let mut template = HashMap::new();
+        template.insert(
+            "good".to_string(),
+            TemplateEntry {
+                programs: vec!["kitty".to_string()],
+                key: Some("a".to_string()),
+            },
+        );
+        template.insert(
+            "bad".to_string(),
+            TemplateEntry {
+                programs: vec!["firefox".to_string()],
+                key: Some("AB".to_string()),
+            },
+        );
+        let config = Config {
+            template,
+            ..Config::default()
+        };
+        let (resolved, warnings) = config.resolve();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("invalid key"));
+        assert_eq!(resolved.templates.len(), 2);
+        // 'good' has explicit key 'a'
+        let good = resolved
+            .templates
+            .iter()
+            .find(|t| t.name == "good")
+            .unwrap();
+        assert_eq!(good.key, Some('a'));
+        // 'bad' got auto-assigned (invalid key dropped but template kept)
+        let bad = resolved.templates.iter().find(|t| t.name == "bad").unwrap();
+        assert!(bad.key.is_some());
+        assert_ne!(bad.key, Some('a')); // must differ from explicit key
+    }
+
+    #[test]
+    fn resolve_templates_duplicate_hotkey_warns() {
+        let mut template = HashMap::new();
+        template.insert(
+            "alpha".to_string(),
+            TemplateEntry {
+                programs: vec!["kitty".to_string()],
+                key: Some("a".to_string()),
+            },
+        );
+        template.insert(
+            "beta".to_string(),
+            TemplateEntry {
+                programs: vec!["firefox".to_string()],
+                key: Some("a".to_string()),
+            },
+        );
+        let config = Config {
+            template,
+            ..Config::default()
+        };
+        let (resolved, warnings) = config.resolve();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("duplicate hotkey"));
+        // First alphabetically keeps the key, second gets auto-assigned
+        let alpha = resolved
+            .templates
+            .iter()
+            .find(|t| t.name == "alpha")
+            .unwrap();
+        assert_eq!(alpha.key, Some('a'));
+        let beta = resolved
+            .templates
+            .iter()
+            .find(|t| t.name == "beta")
+            .unwrap();
+        assert!(beta.key.is_some());
+        assert_ne!(beta.key, Some('a'));
+    }
+
+    #[test]
+    fn should_show_templates_cases() {
+        let mut config = Config::default();
+        let (resolved, _) = config.resolve();
+        // No templates → false
+        assert!(!resolved.should_show_templates('a'));
+
+        // With templates, no per-workspace programs → true
+        config = Config {
+            template: {
+                let mut m = HashMap::new();
+                m.insert(
+                    "dev".to_string(),
+                    TemplateEntry {
+                        programs: vec!["kitty".to_string()],
+                        key: None,
+                    },
+                );
+                m
+            },
+            ..Config::default()
+        };
+        let (resolved, _) = config.resolve();
+        assert!(resolved.should_show_templates('a'));
+
+        // With per-workspace programs → false (picker skipped)
+        config = Config {
+            template: {
+                let mut m = HashMap::new();
+                m.insert(
+                    "dev".to_string(),
+                    TemplateEntry {
+                        programs: vec!["kitty".to_string()],
+                        key: None,
+                    },
+                );
+                m
+            },
+            workspace: {
+                let mut m = HashMap::new();
+                m.insert(
+                    "a".to_string(),
+                    WorkspaceEntry {
+                        programs: vec!["firefox".to_string()],
+                        ..WorkspaceEntry::default()
+                    },
+                );
+                m
+            },
+            ..Config::default()
+        };
+        let (resolved, _) = config.resolve();
+        assert!(!resolved.should_show_templates('a'));
+        assert!(resolved.should_show_templates('b'));
+    }
+
+    #[test]
+    fn resolve_templates_auto_shortcut_assignment() {
+        let mut template = HashMap::new();
+        template.insert(
+            "alpha".to_string(),
+            TemplateEntry {
+                programs: vec!["kitty".to_string()],
+                key: Some("3".to_string()),
+            },
+        );
+        template.insert(
+            "beta".to_string(),
+            TemplateEntry {
+                programs: vec!["firefox".to_string()],
+                key: None,
+            },
+        );
+        template.insert(
+            "gamma".to_string(),
+            TemplateEntry {
+                programs: vec!["slack".to_string()],
+                key: None,
+            },
+        );
+        let config = Config {
+            template,
+            ..Config::default()
+        };
+        let (resolved, warnings) = config.resolve();
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        // 'alpha' has explicit '3'
+        let alpha = resolved
+            .templates
+            .iter()
+            .find(|t| t.name == "alpha")
+            .unwrap();
+        assert_eq!(alpha.key, Some('3'));
+        // 'beta' auto-gets '2' (first auto candidate, skipping '1' reserved for Empty)
+        let beta = resolved
+            .templates
+            .iter()
+            .find(|t| t.name == "beta")
+            .unwrap();
+        assert_eq!(beta.key, Some('2'));
+        // 'gamma' auto-gets '4' (skipping '3' used by alpha)
+        let gamma = resolved
+            .templates
+            .iter()
+            .find(|t| t.name == "gamma")
+            .unwrap();
+        assert_eq!(gamma.key, Some('4'));
+    }
+
+    #[test]
+    fn resolve_templates_key_1_reserved_for_empty() {
+        let mut template = HashMap::new();
+        template.insert(
+            "mytemplate".to_string(),
+            TemplateEntry {
+                programs: vec!["kitty".to_string()],
+                key: Some("1".to_string()),
+            },
+        );
+        let config = Config {
+            template,
+            ..Config::default()
+        };
+        let (resolved, warnings) = config.resolve();
+        // key '1' is reserved for Empty — should warn as duplicate
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("duplicate hotkey '1'"));
+        // Template kept but key cleared and auto-assigned
+        assert_eq!(resolved.templates.len(), 1);
+        let tmpl = &resolved.templates[0];
+        assert_eq!(tmpl.name, "mytemplate");
+        assert_eq!(tmpl.key, Some('2'));
+    }
+
+    #[test]
+    fn toml_with_templates() {
+        let toml_str = r#"
+[template.dev]
+programs = ["kitty", "code ."]
+key = "d"
+
+[template.browser]
+programs = ["firefox"]
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let (resolved, warnings) = config.resolve();
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        assert_eq!(resolved.templates.len(), 2);
+        assert_eq!(resolved.templates[0].name, "browser");
+        assert_eq!(resolved.templates[1].name, "dev");
+        assert_eq!(resolved.templates[1].key, Some('d'));
+        assert_eq!(resolved.templates[1].programs, vec!["kitty", "code ."]);
     }
 
     #[test]

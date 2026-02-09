@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -6,7 +6,7 @@ use glib::Propagation;
 use gtk4::prelude::*;
 use gtk4::{
     Align, ApplicationWindow, Box as GtkBox, EventControllerKey, GestureClick, Label, Orientation,
-    Overlay, Revealer, RevealerTransitionType,
+    Overlay, PolicyType, Revealer, RevealerTransitionType, ScrolledWindow,
 };
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
@@ -206,6 +206,7 @@ struct ActionContext {
     error_label: Label,
     error_revealer: Revealer,
     config: Rc<ResolvedConfig>,
+    keyboard_infos: Rc<HashMap<char, DynWorkspaceInfo>>,
 }
 
 #[expect(
@@ -644,20 +645,22 @@ fn populate_overlay(window: &ApplicationWindow, config: &Rc<ResolvedConfig>, mod
         .transition_duration(200)
         .build();
 
+    // Compute metrics from monitor size and apply scaled CSS
+    let metrics = KeyboardMetrics::from_monitor_width(get_monitor_width(), config.layout);
+    apply_scaled_css(&metrics.scaled_css_variables());
+
+    // Build keyboard
+    let infos = Rc::new(build_full_keyboard_info(config));
+
     let ctx = ActionContext {
         mode,
         window: window.clone(),
         error_label,
         error_revealer: error_revealer.clone(),
         config: config.clone(),
+        keyboard_infos: infos.clone(),
     };
 
-    // Compute metrics from monitor size and apply scaled CSS
-    let metrics = KeyboardMetrics::from_monitor_width(get_monitor_width(), config.layout);
-    apply_scaled_css(&metrics.scaled_css_variables());
-
-    // Build keyboard
-    let infos = build_full_keyboard_info(config);
     let keyboard = build_keyboard(&infos, mode, &ctx, &metrics);
 
     // Assemble: keyboard → hint footer → error revealer → mode tabs (bottom)
@@ -681,20 +684,39 @@ fn populate_overlay(window: &ApplicationWindow, config: &Rc<ResolvedConfig>, mod
     attach_close_on_backdrop_click(window, &container);
 }
 
+/// Switch to (or create) a workspace and close the overlay on success.
+fn switch_and_close(ws_name: &str, programs: &[String], ctx: &ActionContext) {
+    let result = niri::switch_workspace(ws_name, programs).map(|req| {
+        if let Some(r) = req {
+            std::thread::Builder::new()
+                .name("reorder".into())
+                .spawn(move || niri::reorder_workspace_columns(&r))
+                .ok();
+        }
+    });
+    if let Err(e) = result {
+        show_error(ctx, &format!("Failed: {e:#}"));
+        return;
+    }
+    ctx.window.close();
+}
+
 fn dispatch_action(ch: char, ctx: &ActionContext) {
     let ws_name = crate::config::workspace_name(&ctx.config.workspace_prefix, ch);
 
     let result = match ctx.mode {
         Mode::Normal => {
+            let is_uncreated = ctx
+                .keyboard_infos
+                .get(&ch)
+                .is_none_or(|info| info.is_uncreated);
+            if is_uncreated && ctx.config.should_show_templates(ch) {
+                show_template_picker(ch, ctx);
+                return;
+            }
             let programs = ctx.config.programs_for(ch);
-            niri::switch_workspace(&ws_name, programs).map(|req| {
-                if let Some(r) = req {
-                    std::thread::Builder::new()
-                        .name("reorder".into())
-                        .spawn(move || niri::reorder_workspace_columns(&r))
-                        .ok();
-                }
-            })
+            switch_and_close(&ws_name, programs, ctx);
+            return;
         }
         Mode::Delete => niri::delete_workspace(&ws_name),
         Mode::MoveWindow => niri::move_window_to_workspace(&ws_name),
@@ -705,6 +727,336 @@ fn dispatch_action(ch: char, ctx: &ActionContext) {
         return;
     }
     ctx.window.close();
+}
+
+// --- Template picker ---
+
+/// An option in the template picker (either "Empty" or a named template).
+struct TemplateOption {
+    key: Option<char>,
+    name: String,
+    programs: Vec<String>,
+}
+
+fn build_template_options(config: &ResolvedConfig) -> Vec<TemplateOption> {
+    let mut options = Vec::with_capacity(config.templates.len() + 1);
+
+    // "Empty" option always gets key '1' (reserved during config resolution)
+    options.push(TemplateOption {
+        key: Some('1'),
+        name: "Empty".to_string(),
+        programs: config.default_programs.clone(),
+    });
+
+    for tmpl in &config.templates {
+        options.push(TemplateOption {
+            key: tmpl.key,
+            name: tmpl.name.clone(),
+            programs: tmpl.programs.clone(),
+        });
+    }
+
+    options
+}
+
+fn build_template_option_widget(
+    opt: &TemplateOption,
+    is_selected: bool,
+    metrics: &KeyboardMetrics,
+) -> GtkBox {
+    let mut classes = vec!["template-option"];
+    if is_selected {
+        classes.push("selected");
+    }
+
+    let row = GtkBox::builder()
+        .orientation(Orientation::Horizontal)
+        .spacing(metrics.key_gap)
+        .css_classes(classes)
+        .build();
+
+    // Key badge — styled like a small keyboard key
+    let key_text = opt.key.map_or_else(String::new, display_key_char);
+    let key_badge = Label::builder()
+        .label(&key_text)
+        .css_classes(["template-key"])
+        .build();
+    row.append(&key_badge);
+
+    // Text column: name on top, programs below
+    let text_box = GtkBox::builder()
+        .orientation(Orientation::Vertical)
+        .spacing(0)
+        .halign(Align::Start)
+        .hexpand(true)
+        .build();
+
+    let name_label = Label::builder()
+        .label(&opt.name)
+        .css_classes(["template-name"])
+        .halign(Align::Start)
+        .build();
+    text_box.append(&name_label);
+
+    if !opt.programs.is_empty() {
+        let programs_text = opt.programs.join(", ");
+        let programs_label = Label::builder()
+            .label(&programs_text)
+            .css_classes(["template-programs"])
+            .halign(Align::Start)
+            .ellipsize(gtk4::pango::EllipsizeMode::End)
+            .max_width_chars(40)
+            .build();
+        text_box.append(&programs_label);
+    }
+
+    row.append(&text_box);
+    row
+}
+
+fn update_selection(option_widgets: &[GtkBox], selected: usize) {
+    for (i, w) in option_widgets.iter().enumerate() {
+        if i == selected {
+            w.add_css_class("selected");
+        } else {
+            w.remove_css_class("selected");
+        }
+    }
+}
+
+#[expect(clippy::too_many_lines, reason = "template picker view builder")]
+fn show_template_picker(ch: char, ctx: &ActionContext) {
+    let window = &ctx.window;
+    remove_app_controllers(window);
+
+    let config = &ctx.config;
+    let ws_name = Rc::new(crate::config::workspace_name(&config.workspace_prefix, ch));
+    let metrics = KeyboardMetrics::from_monitor_width(get_monitor_width(), config.layout);
+    apply_scaled_css(&metrics.scaled_css_variables());
+
+    let container = GtkBox::builder()
+        .orientation(Orientation::Vertical)
+        .spacing(0)
+        .css_classes(["popup-container", "template-picker"])
+        .halign(Align::Center)
+        .valign(Align::Center)
+        .build();
+
+    // Title
+    let display_name = config.workspace_names.get(&ch);
+    let title_text = if let Some(name) = display_name {
+        format!("Create workspace {} ({})", display_key_char(ch), name)
+    } else {
+        format!("Create workspace {}", display_key_char(ch))
+    };
+    let title = Label::builder()
+        .label(&title_text)
+        .css_classes(["template-title"])
+        .build();
+    container.append(&title);
+
+    // Error revealer
+    let error_label = Label::builder()
+        .css_classes(["error-message"])
+        .wrap(true)
+        .build();
+    let error_revealer = Revealer::builder()
+        .child(&error_label)
+        .reveal_child(false)
+        .transition_type(RevealerTransitionType::SlideUp)
+        .transition_duration(200)
+        .build();
+
+    // Build template options
+    let options = build_template_options(config);
+    let option_count = options.len();
+
+    // Build option widgets
+    let list_box = GtkBox::builder()
+        .orientation(Orientation::Vertical)
+        .spacing(metrics.key_gap / 2)
+        .css_classes(["template-list"])
+        .build();
+
+    let selected_idx = Rc::new(Cell::new(0_usize));
+    let option_widgets: Vec<GtkBox> = options
+        .iter()
+        .enumerate()
+        .map(|(i, opt)| build_template_option_widget(opt, i == 0, &metrics))
+        .collect();
+
+    // Shared context for the template picker
+    let picker_ctx = ActionContext {
+        mode: ctx.mode,
+        window: ctx.window.clone(),
+        error_label,
+        error_revealer: error_revealer.clone(),
+        config: ctx.config.clone(),
+        keyboard_infos: ctx.keyboard_infos.clone(),
+    };
+
+    // Store options as Rc for sharing with handlers
+    let options = Rc::new(options);
+    let option_widgets_rc = Rc::new(option_widgets);
+
+    for (i, widget) in option_widgets_rc.iter().enumerate() {
+        list_box.append(widget);
+
+        // Click handler
+        let click_ctx = picker_ctx.clone();
+        let click_options = options.clone();
+        let click_ws = ws_name.clone();
+        let click = GestureClick::new();
+        click.connect_released(move |_, _, _, _| {
+            switch_and_close(&click_ws, &click_options[i].programs, &click_ctx);
+        });
+        widget.add_controller(click);
+    }
+
+    // Wrap in scrolled window for many templates
+    let scrolled = ScrolledWindow::builder()
+        .hscrollbar_policy(PolicyType::Never)
+        .vscrollbar_policy(PolicyType::Automatic)
+        .max_content_height(metrics.key_size * 5)
+        .propagate_natural_height(true)
+        .child(&list_box)
+        .build();
+    container.append(&scrolled);
+
+    container.append(&error_revealer);
+
+    // Footer hints
+    let footer = GtkBox::builder()
+        .orientation(Orientation::Horizontal)
+        .spacing(metrics.key_size / 4)
+        .css_classes(["hint-footer"])
+        .halign(Align::Center)
+        .build();
+    for text in [
+        "press key to select",
+        "\u{2191}\u{2193} navigate",
+        "Enter confirm",
+        "Escape cancel",
+    ] {
+        let label = Label::builder()
+            .label(text)
+            .css_classes(["hint-footer-item"])
+            .build();
+        footer.append(&label);
+    }
+    container.append(&footer);
+
+    let backdrop = GtkBox::builder()
+        .css_classes(["backdrop"])
+        .hexpand(true)
+        .vexpand(true)
+        .build();
+
+    let overlay = Overlay::builder().child(&backdrop).build();
+    overlay.add_overlay(&container);
+
+    window.set_child(Some(&overlay));
+
+    // Key handler
+    attach_template_key_handler(
+        &ws_name,
+        &picker_ctx,
+        &options,
+        &option_widgets_rc,
+        &selected_idx,
+        option_count,
+    );
+    attach_close_on_backdrop_click(window, &container);
+}
+
+fn attach_template_key_handler(
+    ws_name: &Rc<String>,
+    ctx: &ActionContext,
+    options: &Rc<Vec<TemplateOption>>,
+    option_widgets: &Rc<Vec<GtkBox>>,
+    selected_idx: &Rc<Cell<usize>>,
+    option_count: usize,
+) {
+    let key_ctx = ctx.clone();
+    let close_keybinds = ctx.config.close_keybinds.clone();
+    let options = options.clone();
+    let widgets = option_widgets.clone();
+    let sel = selected_idx.clone();
+    let config = ctx.config.clone();
+    let ws_name = ws_name.clone();
+
+    let key_controller = EventControllerKey::new();
+    key_controller.set_name(Some("ndw-key"));
+    key_controller.set_propagation_phase(gtk4::PropagationPhase::Capture);
+    key_controller.connect_key_pressed(move |_, key, _, modifier| {
+        let relevant_mods = gdk4::ModifierType::CONTROL_MASK
+            | gdk4::ModifierType::SHIFT_MASK
+            | gdk4::ModifierType::ALT_MASK
+            | gdk4::ModifierType::SUPER_MASK;
+
+        // Close keybinds / Escape → go back to main view
+        for kb in &close_keybinds {
+            if key == kb.key && modifier & relevant_mods == kb.modifiers {
+                let window = key_ctx.window.clone();
+                let cfg = config.clone();
+                glib::idle_add_local_once(move || {
+                    populate_overlay(&window, &cfg, Mode::Normal);
+                });
+                return Propagation::Stop;
+            }
+        }
+
+        // Arrow Up/Down → navigate
+        if key == gdk4::Key::Up || key == gdk4::Key::KP_Up {
+            let current = sel.get();
+            let new_idx = if current == 0 {
+                option_count - 1
+            } else {
+                current - 1
+            };
+            sel.set(new_idx);
+            update_selection(&widgets, new_idx);
+            return Propagation::Stop;
+        }
+        if key == gdk4::Key::Down || key == gdk4::Key::KP_Down {
+            let current = sel.get();
+            let new_idx = if current >= option_count - 1 {
+                0
+            } else {
+                current + 1
+            };
+            sel.set(new_idx);
+            update_selection(&widgets, new_idx);
+            return Propagation::Stop;
+        }
+
+        // Enter → confirm selected
+        if key == gdk4::Key::Return || key == gdk4::Key::KP_Enter {
+            let idx = sel.get();
+            switch_and_close(&ws_name, &options[idx].programs, &key_ctx);
+            return Propagation::Stop;
+        }
+
+        // Shortcut keys — match template options
+        let action_mods = modifier
+            & (gdk4::ModifierType::CONTROL_MASK
+                | gdk4::ModifierType::SHIFT_MASK
+                | gdk4::ModifierType::ALT_MASK);
+        if let Some(pressed) = key.to_unicode() {
+            let pressed = pressed.to_ascii_lowercase();
+            if action_mods.is_empty() {
+                for opt in options.iter() {
+                    if opt.key == Some(pressed) {
+                        switch_and_close(&ws_name, &opt.programs, &key_ctx);
+                        return Propagation::Stop;
+                    }
+                }
+            }
+        }
+
+        Propagation::Proceed
+    });
+    ctx.window.add_controller(key_controller);
 }
 
 fn attach_key_handler(ctx: &ActionContext, close_keybinds: &[crate::config::Keybind]) {
@@ -974,6 +1326,7 @@ mod tests {
             workspace_names: HashMap::new(),
             auto_delete_empty: true,
             layout: &LAYOUT_QWERTY,
+            templates: Vec::new(),
         }
     }
 
@@ -1117,5 +1470,58 @@ mod tests {
         assert_eq!(infos.len(), 1);
         assert_eq!(infos[0].window_count, 2);
         assert_eq!(infos[0].app_names, vec!["Kitty"]);
+    }
+
+    // --- build_template_options ---
+
+    #[test]
+    fn build_template_options_empty_first_with_key_1() {
+        use crate::config::Template;
+
+        let mut config = default_test_config();
+        config.default_programs = vec!["kitty".to_string()];
+        config.templates = vec![
+            Template {
+                name: "dev".to_string(),
+                programs: vec!["code".to_string()],
+                key: Some('d'),
+            },
+            Template {
+                name: "browser".to_string(),
+                programs: vec!["firefox".to_string()],
+                key: Some('2'),
+            },
+        ];
+
+        let opts = build_template_options(&config);
+
+        assert_eq!(opts.len(), 3);
+        // First option is always "Empty" with key '1'
+        assert_eq!(opts[0].name, "Empty");
+        assert_eq!(opts[0].key, Some('1'));
+        assert_eq!(opts[0].programs, vec!["kitty"]);
+        // Templates follow in config order
+        assert_eq!(opts[1].name, "dev");
+        assert_eq!(opts[1].key, Some('d'));
+        assert_eq!(opts[2].name, "browser");
+        assert_eq!(opts[2].key, Some('2'));
+    }
+
+    #[test]
+    fn build_template_options_no_default_programs() {
+        use crate::config::Template;
+
+        let mut config = default_test_config();
+        config.templates = vec![Template {
+            name: "dev".to_string(),
+            programs: vec!["code".to_string()],
+            key: Some('2'),
+        }];
+
+        let opts = build_template_options(&config);
+
+        assert_eq!(opts.len(), 2);
+        assert_eq!(opts[0].name, "Empty");
+        assert!(opts[0].programs.is_empty());
     }
 }

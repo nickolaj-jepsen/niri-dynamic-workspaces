@@ -60,14 +60,6 @@ default_programs = ["kitty"]       # programs launched when creating any new wor
 auto_delete_empty = true           # daemon: auto-delete empty unfocused workspaces
 layout = "qwerty"                  # keyboard layout for the overlay (see table below)
 
-# [layout] options below are no longer used (kept for backwards compatibility).
-# The overlay now displays a virtual keyboard layout instead of a card grid.
-# max_columns = 4
-# min_columns = 2
-# max_windows_per_card = 4
-# app_name_max_chars = 12
-# window_title_max_chars = 18
-
 [keybinds]
 close = ["Escape", "Ctrl+c", "Ctrl+w", "Ctrl+q"]  # keys to dismiss the overlay
 
@@ -83,6 +75,25 @@ programs = ["kitty --title myterm"]    # arguments supported via whitespace spli
 name = "Comms"
 programs = ["slack", "discord"]
 ```
+
+#### Templates
+
+Templates let you choose from predefined program sets when creating a new workspace. When templates are defined and you press a key for a non-existing workspace, a picker appears instead of creating the workspace immediately.
+
+```toml
+[template.dev]
+programs = ["kitty", "code ."]
+key = "d"                        # optional hotkey shortcut
+
+[template.browser]
+programs = ["firefox", "slack"]
+```
+
+- Each template needs a `programs` list (templates with empty programs are skipped)
+- The optional `key` field assigns a hotkey (a-z or 0-9) for quick selection in the picker
+- Templates without a `key` get one auto-assigned (1-9 then a-z)
+- The picker always includes an "Empty" option that uses `default_programs`
+- Workspaces with per-key `[workspace.KEY].programs` skip the picker and create directly
 
 #### Available keyboard layouts
 

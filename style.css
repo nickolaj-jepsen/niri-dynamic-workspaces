@@ -42,7 +42,7 @@ window {
 }
 
 .keyboard-key.disabled {
-    opacity: 0.12;
+    opacity: 0.40;
 }
 
 .key-char {
@@ -111,4 +111,64 @@ window {
     font-size: var(--font-footer);
     margin-top: var(--key-margin);
     color: @error_color;
+}
+
+/* --- Template picker --- */
+
+.template-picker {
+    padding: var(--section-gap);
+}
+
+.template-title {
+    font-size: var(--font-char);
+    font-weight: bold;
+    margin-bottom: var(--section-gap);
+}
+
+.template-list {
+    margin-bottom: var(--section-gap);
+}
+
+.template-option {
+    background-color: @card_bg_color;
+    color: @card_fg_color;
+    border: 2px solid alpha(@card_fg_color, 0.15);
+    border-radius: var(--key-radius);
+    padding: var(--key-pad-v) var(--key-pad-h);
+    min-width: 250px;
+    transition: 200ms ease;
+}
+
+.template-option:hover {
+    border-color: alpha(@card_fg_color, 0.3);
+}
+
+.template-option.selected {
+    background-color: @accent_bg_color;
+    color: @accent_fg_color;
+    border-color: @accent_color;
+}
+
+.template-key {
+    background-color: alpha(@card_fg_color, 0.1);
+    border-radius: var(--key-radius);
+    font-weight: bold;
+    font-size: var(--font-char);
+    padding: var(--key-pad-v) var(--key-pad-h);
+    min-width: var(--font-char);
+}
+
+.template-option.selected .template-key {
+    background-color: alpha(@accent_fg_color, 0.15);
+}
+
+.template-name {
+    font-weight: bold;
+    font-size: var(--font-name);
+}
+
+.template-programs {
+    font-size: var(--font-detail);
+    font-style: italic;
+    opacity: 0.5;
 }
