@@ -84,14 +84,18 @@ pub fn focus_or_create_workspace(name: &str) -> anyhow::Result<bool> {
 /// Switch to a workspace (creating it if needed) and spawn programs on creation.
 ///
 /// Combines [`focus_or_create_workspace`] with [`spawn_workspace_programs`].
-/// Returns a [`ReorderRequest`] when multiple programs were spawned, which
-/// the caller should pass to [`reorder_workspace_columns`].
-pub fn switch_workspace(name: &str, programs: &[String]) -> anyhow::Result<Option<ReorderRequest>> {
+/// Returns `(created, reorder_request)` where `created` indicates whether a new
+/// workspace was made, and `reorder_request` is present when multiple programs
+/// were spawned.
+pub fn switch_workspace(
+    name: &str,
+    programs: &[String],
+) -> anyhow::Result<(bool, Option<ReorderRequest>)> {
     let created = focus_or_create_workspace(name)?;
     if created {
-        return spawn_workspace_programs(name, programs);
+        return Ok((true, spawn_workspace_programs(name, programs)?));
     }
-    Ok(None)
+    Ok((false, None))
 }
 
 /// Spawn programs for a newly created workspace.
@@ -437,6 +441,41 @@ pub fn snapshot_workspace_window_ids(workspace_name: &str) -> HashSet<u64> {
         .filter(|w| w.workspace_id == Some(ws_id))
         .map(|w| w.id)
         .collect()
+}
+
+/// Run hook commands in a background thread via `sh -c`.
+///
+/// Each command runs sequentially with the given environment variables set.
+/// Errors are logged to stderr. No-op if `commands` is empty.
+pub fn run_hooks(commands: &[String], env: &[(String, String)]) {
+    if commands.is_empty() {
+        return;
+    }
+    let commands: Vec<String> = commands.to_vec();
+    let env: Vec<(String, String)> = env.to_vec();
+    std::thread::Builder::new()
+        .name("hooks".into())
+        .spawn(move || {
+            for cmd in &commands {
+                let result = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(cmd)
+                    .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::inherit())
+                    .spawn();
+                match result {
+                    Ok(mut child) => {
+                        if let Err(e) = child.wait() {
+                            eprintln!("warning: hook '{cmd}' failed: {e}");
+                        }
+                    }
+                    Err(e) => eprintln!("warning: failed to spawn hook '{cmd}': {e}"),
+                }
+            }
+        })
+        .ok();
 }
 
 pub fn delete_workspace(name: &str) -> anyhow::Result<()> {

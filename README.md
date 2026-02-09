@@ -103,6 +103,35 @@ programs = ["firefox", "slack"]
 - Templates with variables show an input form before creating the workspace
 - Templates without variables create immediately as before
 
+#### Hooks
+
+Shell commands that run automatically when workspaces are created or deleted:
+
+```toml
+[hooks]
+on_create = ['notify-send "Created $NDW_WORKSPACE_NAME"']
+on_delete = ["cleanup-workspace.sh"]
+```
+
+- `on_create` / `on_delete` are arrays of shell commands run via `sh -c`
+- Commands run in the background (fire-and-forget, non-blocking)
+- Variables are passed as environment variables — use shell double quotes (not single quotes) to expand them
+- Environment variables set for each hook:
+  - `NDW_WORKSPACE_NAME` — full workspace name (e.g. `dyn-a`)
+  - `NDW_WORKSPACE_KEY` — single character key (e.g. `a`)
+  - `NDW_TEMPLATE` — template name if used (empty otherwise)
+  - `NDW_VAR_<NAME>` — template variable values, uppercased (e.g. `NDW_VAR_PATH`)
+- Templates can define additional `on_create` hooks that run after the global ones:
+
+```toml
+[template.dev]
+programs = ["kitty", "code {{path}}"]
+on_create = ['git -C "$NDW_VAR_PATH" status']
+
+[template.dev.variables.path]
+name = "Project path"
+```
+
 #### Available keyboard layouts
 
 | Layout   | Value      |

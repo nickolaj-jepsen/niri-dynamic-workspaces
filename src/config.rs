@@ -11,8 +11,16 @@ struct Config {
     general: GeneralConfig,
     layout: LayoutConfig,
     keybinds: KeybindsConfig,
+    hooks: HooksConfig,
     workspace: HashMap<String, WorkspaceEntry>,
     template: HashMap<String, TemplateEntry>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct HooksConfig {
+    on_create: Vec<String>,
+    on_delete: Vec<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -33,6 +41,7 @@ struct TemplateEntry {
     programs: Vec<String>,
     key: Option<String>,
     variables: HashMap<String, VariableEntry>,
+    on_create: Vec<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -105,6 +114,12 @@ impl Default for KeybindsConfig {
 
 // --- Runtime structs ---
 
+#[derive(Clone, Debug, Default)]
+pub struct HookConfig {
+    pub on_create: Vec<String>,
+    pub on_delete: Vec<String>,
+}
+
 pub struct ResolvedConfig {
     pub workspace_prefix: String,
     pub close_keybinds: Vec<Keybind>,
@@ -114,6 +129,7 @@ pub struct ResolvedConfig {
     pub auto_delete_empty: bool,
     pub layout: &'static KeyboardLayout,
     pub templates: Vec<Template>,
+    pub hooks: HookConfig,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -139,6 +155,7 @@ pub struct Template {
     pub programs: Vec<String>,
     pub key: Option<char>,
     pub variables: Vec<TemplateVariable>,
+    pub on_create: Vec<String>,
 }
 
 impl ResolvedConfig {
@@ -451,6 +468,7 @@ impl Config {
                 programs: entry.programs.clone(),
                 key,
                 variables,
+                on_create: entry.on_create.clone(),
             });
         }
 
@@ -473,6 +491,10 @@ impl Config {
             auto_delete_empty: self.general.auto_delete_empty,
             layout,
             templates,
+            hooks: HookConfig {
+                on_create: self.hooks.on_create,
+                on_delete: self.hooks.on_delete,
+            },
         };
 
         (resolved, warnings)
@@ -515,6 +537,41 @@ pub fn substitute_variables(programs: &[String], values: &HashMap<String, String
             result
         })
         .collect()
+}
+
+/// Build the environment variable pairs for hook execution.
+pub fn build_hook_env(
+    workspace_name: &str,
+    workspace_key: char,
+    template_name: Option<&str>,
+    variables: &HashMap<String, String>,
+) -> Vec<(String, String)> {
+    let mut env = vec![
+        ("NDW_WORKSPACE_NAME".to_string(), workspace_name.to_string()),
+        ("NDW_WORKSPACE_KEY".to_string(), workspace_key.to_string()),
+        (
+            "NDW_TEMPLATE".to_string(),
+            template_name.unwrap_or("").to_string(),
+        ),
+    ];
+    for (name, value) in variables {
+        env.push((
+            format!("NDW_VAR_{}", name.to_ascii_uppercase()),
+            value.clone(),
+        ));
+    }
+    env
+}
+
+/// Collect all on-create hooks: global hooks followed by template-specific hooks.
+pub fn collect_create_hooks(config: &ResolvedConfig, template_name: Option<&str>) -> Vec<String> {
+    let mut hooks = config.hooks.on_create.clone();
+    if let Some(name) = template_name {
+        if let Some(tmpl) = config.templates.iter().find(|t| t.name == name) {
+            hooks.extend(tmpl.on_create.iter().cloned());
+        }
+    }
+    hooks
 }
 
 /// Format a workspace name from a prefix and a single-character key.
@@ -1321,6 +1378,7 @@ programs = ["firefox"]
                 ],
                 key: Some("d".to_string()),
                 variables,
+                ..TemplateEntry::default()
             },
         );
         let config = Config {
@@ -1356,6 +1414,7 @@ programs = ["firefox"]
                 programs: vec!["code {{path}}".to_string()],
                 key: Some("d".to_string()),
                 variables,
+                ..TemplateEntry::default()
             },
         );
         let config = Config {
@@ -1389,6 +1448,7 @@ programs = ["firefox"]
                 programs: vec!["code {{path}}".to_string()],
                 key: Some("d".to_string()),
                 variables,
+                ..TemplateEntry::default()
             },
         );
         let config = Config {
@@ -1418,6 +1478,7 @@ programs = ["firefox"]
                 programs: vec!["kitty".to_string()],
                 key: Some("d".to_string()),
                 variables,
+                ..TemplateEntry::default()
             },
         );
         let config = Config {
@@ -1481,6 +1542,7 @@ type = "text"
             programs: Vec::new(),
             key: None,
             variables: Vec::new(),
+            on_create: Vec::new(),
         };
         assert!(tmpl.variables.is_empty());
 
@@ -1493,7 +1555,163 @@ type = "text"
                 label: "X".to_string(),
                 var_type: VariableType::Text,
             }],
+            on_create: Vec::new(),
         };
         assert!(!tmpl_with.variables.is_empty());
+    }
+
+    // --- build_hook_env ---
+
+    #[test]
+    fn build_hook_env_basic() {
+        let env = build_hook_env("dyn-a", 'a', None, &HashMap::new());
+        assert!(env.contains(&("NDW_WORKSPACE_NAME".to_string(), "dyn-a".to_string())));
+        assert!(env.contains(&("NDW_WORKSPACE_KEY".to_string(), "a".to_string())));
+        assert!(env.contains(&("NDW_TEMPLATE".to_string(), String::new())));
+    }
+
+    #[test]
+    fn build_hook_env_with_template() {
+        let env = build_hook_env("dyn-a", 'a', Some("dev"), &HashMap::new());
+        assert!(env.contains(&("NDW_TEMPLATE".to_string(), "dev".to_string())));
+    }
+
+    #[test]
+    fn build_hook_env_with_variables() {
+        let vars = HashMap::from([
+            ("path".to_string(), "/home/user".to_string()),
+            ("branch".to_string(), "main".to_string()),
+        ]);
+        let env = build_hook_env("dyn-a", 'a', Some("dev"), &vars);
+        assert!(env.contains(&("NDW_VAR_PATH".to_string(), "/home/user".to_string())));
+        assert!(env.contains(&("NDW_VAR_BRANCH".to_string(), "main".to_string())));
+    }
+
+    // --- collect_create_hooks ---
+
+    fn hooks_test_config(global_hooks: Vec<String>, templates: Vec<Template>) -> ResolvedConfig {
+        ResolvedConfig {
+            workspace_prefix: "dyn-".to_string(),
+            close_keybinds: Vec::new(),
+            default_programs: Vec::new(),
+            workspace_programs: HashMap::new(),
+            workspace_names: HashMap::new(),
+            auto_delete_empty: true,
+            layout: &LAYOUT_QWERTY,
+            templates,
+            hooks: HookConfig {
+                on_create: global_hooks,
+                on_delete: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn collect_create_hooks_no_template() {
+        let config = hooks_test_config(vec!["notify-send 'created'".to_string()], Vec::new());
+        let hooks = collect_create_hooks(&config, None);
+        assert_eq!(hooks, vec!["notify-send 'created'"]);
+    }
+
+    #[test]
+    fn collect_create_hooks_with_template() {
+        let config = hooks_test_config(
+            vec!["global-hook".to_string()],
+            vec![Template {
+                name: "dev".to_string(),
+                programs: vec!["kitty".to_string()],
+                key: None,
+                variables: Vec::new(),
+                on_create: vec!["template-hook".to_string()],
+            }],
+        );
+        let hooks = collect_create_hooks(&config, Some("dev"));
+        assert_eq!(hooks, vec!["global-hook", "template-hook"]);
+    }
+
+    #[test]
+    fn collect_create_hooks_unknown_template() {
+        let config = hooks_test_config(
+            vec!["global-hook".to_string()],
+            vec![Template {
+                name: "dev".to_string(),
+                programs: vec!["kitty".to_string()],
+                key: None,
+                variables: Vec::new(),
+                on_create: vec!["template-hook".to_string()],
+            }],
+        );
+        let hooks = collect_create_hooks(&config, Some("unknown"));
+        assert_eq!(hooks, vec!["global-hook"]);
+    }
+
+    // --- Hook resolution ---
+
+    #[test]
+    fn resolve_hooks_default() {
+        let config = Config::default();
+        let (resolved, _) = config.resolve();
+        assert!(resolved.hooks.on_create.is_empty());
+        assert!(resolved.hooks.on_delete.is_empty());
+    }
+
+    #[test]
+    fn resolve_hooks_basic() {
+        let config = Config {
+            hooks: HooksConfig {
+                on_create: vec!["notify-send 'created'".to_string()],
+                on_delete: vec!["cleanup.sh".to_string()],
+            },
+            ..Config::default()
+        };
+        let (resolved, warnings) = config.resolve();
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        assert_eq!(resolved.hooks.on_create, vec!["notify-send 'created'"]);
+        assert_eq!(resolved.hooks.on_delete, vec!["cleanup.sh"]);
+    }
+
+    #[test]
+    fn resolve_template_on_create() {
+        let mut template = HashMap::new();
+        template.insert(
+            "dev".to_string(),
+            TemplateEntry {
+                programs: vec!["kitty".to_string()],
+                on_create: vec!["git status".to_string()],
+                ..TemplateEntry::default()
+            },
+        );
+        let config = Config {
+            template,
+            ..Config::default()
+        };
+        let (resolved, warnings) = config.resolve();
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        assert_eq!(resolved.templates[0].on_create, vec!["git status"]);
+    }
+
+    #[test]
+    fn toml_with_hooks() {
+        let toml_str = r#"
+[hooks]
+on_create = ['notify-send "Created $NDW_WORKSPACE_NAME"']
+on_delete = ["cleanup-workspace.sh"]
+
+[template.dev]
+programs = ["kitty", "code ."]
+on_create = ['git -C "$NDW_VAR_PATH" status']
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let (resolved, warnings) = config.resolve();
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        assert_eq!(
+            resolved.hooks.on_create,
+            vec![r#"notify-send "Created $NDW_WORKSPACE_NAME""#]
+        );
+        assert_eq!(resolved.hooks.on_delete, vec!["cleanup-workspace.sh"]);
+        assert_eq!(
+            resolved.templates[0].on_create,
+            vec![r#"git -C "$NDW_VAR_PATH" status"#]
+        );
     }
 }

@@ -199,6 +199,12 @@ impl Mode {
 
 // --- Data types ---
 
+#[derive(Clone, Default)]
+struct HookInfo {
+    template_name: Option<String>,
+    variables: HashMap<String, String>,
+}
+
 #[derive(Clone)]
 struct ActionContext {
     mode: Mode,
@@ -685,13 +691,32 @@ fn populate_overlay(window: &ApplicationWindow, config: &Rc<ResolvedConfig>, mod
 }
 
 /// Switch to (or create) a workspace and close the overlay on success.
-fn switch_and_close(ws_name: &str, programs: &[String], ctx: &ActionContext) {
-    let result = niri::switch_workspace(ws_name, programs).map(|req| {
+fn switch_and_close(
+    ws_name: &str,
+    ws_key: char,
+    programs: &[String],
+    ctx: &ActionContext,
+    hook_info: &HookInfo,
+) {
+    let result = niri::switch_workspace(ws_name, programs).map(|(created, req)| {
         if let Some(r) = req {
             std::thread::Builder::new()
                 .name("reorder".into())
                 .spawn(move || niri::reorder_workspace_columns(&r))
                 .ok();
+        }
+        if created {
+            let hooks = crate::config::collect_create_hooks(
+                &ctx.config,
+                hook_info.template_name.as_deref(),
+            );
+            let env = crate::config::build_hook_env(
+                ws_name,
+                ws_key,
+                hook_info.template_name.as_deref(),
+                &hook_info.variables,
+            );
+            niri::run_hooks(&hooks, &env);
         }
     });
     if let Err(e) = result {
@@ -715,10 +740,17 @@ fn dispatch_action(ch: char, ctx: &ActionContext) {
                 return;
             }
             let programs = ctx.config.programs_for(ch);
-            switch_and_close(&ws_name, programs, ctx);
+            switch_and_close(&ws_name, ch, programs, ctx, &HookInfo::default());
             return;
         }
-        Mode::Delete => niri::delete_workspace(&ws_name),
+        Mode::Delete => {
+            let result = niri::delete_workspace(&ws_name);
+            if result.is_ok() {
+                let env = crate::config::build_hook_env(&ws_name, ch, None, &HashMap::new());
+                niri::run_hooks(&ctx.config.hooks.on_delete, &env);
+            }
+            result
+        }
         Mode::MoveWindow => niri::move_window_to_workspace(&ws_name),
     };
 
@@ -828,10 +860,19 @@ fn update_selection(option_widgets: &[GtkBox], selected: usize) {
 }
 
 fn select_template_option(ws_name: &str, option: &TemplateOption, ch: char, ctx: &ActionContext) {
-    if option.variables.is_empty() {
-        switch_and_close(ws_name, &option.programs, ctx);
+    let template_name = if option.name == "Empty" {
+        None
     } else {
-        show_variable_input(ws_name, option, ch, ctx);
+        Some(option.name.clone())
+    };
+    if option.variables.is_empty() {
+        let hook_info = HookInfo {
+            template_name,
+            variables: HashMap::new(),
+        };
+        switch_and_close(ws_name, ch, &option.programs, ctx, &hook_info);
+    } else {
+        show_variable_input(ws_name, option, ch, ctx, template_name);
     }
 }
 
@@ -1075,7 +1116,13 @@ fn attach_template_key_handler(
 // --- Variable input form ---
 
 #[expect(clippy::too_many_lines, reason = "variable input view builder")]
-fn show_variable_input(ws_name: &str, option: &TemplateOption, ch: char, ctx: &ActionContext) {
+fn show_variable_input(
+    ws_name: &str,
+    option: &TemplateOption,
+    ch: char,
+    ctx: &ActionContext,
+    template_name: Option<String>,
+) {
     let window = &ctx.window;
     remove_app_controllers(window);
 
@@ -1203,7 +1250,15 @@ fn show_variable_input(ws_name: &str, option: &TemplateOption, ch: char, ctx: &A
     let var_names: Vec<String> = option.variables.iter().map(|v| v.name.clone()).collect();
     let programs = option.programs.clone();
 
-    attach_variable_input_key_handler(ws_name, &var_ctx, ch, &entries, &var_names, &programs);
+    attach_variable_input_key_handler(
+        ws_name,
+        &var_ctx,
+        ch,
+        &entries,
+        &var_names,
+        &programs,
+        template_name,
+    );
     attach_close_on_backdrop_click(window, &container);
 }
 
@@ -1214,6 +1269,7 @@ fn attach_variable_input_key_handler(
     entries: &[Entry],
     var_names: &[String],
     programs: &[String],
+    template_name: Option<String>,
 ) {
     let key_ctx = ctx.clone();
     let close_keybinds = ctx.config.close_keybinds.clone();
@@ -1262,7 +1318,11 @@ fn attach_variable_input_key_handler(
                 values.insert(name.clone(), entry.text().to_string());
             }
             let substituted = crate::config::substitute_variables(&programs, &values);
-            switch_and_close(&ws_name, &substituted, &key_ctx);
+            let hook_info = HookInfo {
+                template_name: template_name.clone(),
+                variables: values,
+            };
+            switch_and_close(&ws_name, ch, &substituted, &key_ctx, &hook_info);
             return Propagation::Stop;
         }
 
@@ -1540,6 +1600,7 @@ mod tests {
             auto_delete_empty: true,
             layout: &LAYOUT_QWERTY,
             templates: Vec::new(),
+            hooks: crate::config::HookConfig::default(),
         }
     }
 
@@ -1699,12 +1760,14 @@ mod tests {
                 programs: vec!["code".to_string()],
                 key: Some('d'),
                 variables: Vec::new(),
+                on_create: Vec::new(),
             },
             Template {
                 name: "browser".to_string(),
                 programs: vec!["firefox".to_string()],
                 key: Some('2'),
                 variables: Vec::new(),
+                on_create: Vec::new(),
             },
         ];
 
@@ -1732,6 +1795,7 @@ mod tests {
             programs: vec!["code".to_string()],
             key: Some('2'),
             variables: Vec::new(),
+            on_create: Vec::new(),
         }];
 
         let opts = build_template_options(&config);
