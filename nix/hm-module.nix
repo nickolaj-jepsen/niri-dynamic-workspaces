@@ -80,12 +80,21 @@
         };
 
         programs.niri.settings.binds = {
-          "${cfg.keybind}".action.spawn =
-            [ "${cfg.package}/bin/niri-dynamic-workspaces" ];
-          "${cfg.deleteKeybind}".action.spawn =
-            [ "${cfg.package}/bin/niri-dynamic-workspaces" "delete" ];
-          "${cfg.moveWindowKeybind}".action.spawn =
-            [ "${cfg.package}/bin/niri-dynamic-workspaces" "move-window" ];
+          "${cfg.keybind}" = {
+            action.spawn =
+              [ "${cfg.package}/bin/niri-dynamic-workspaces" ];
+            hotkey-overlay.title = "Open Workspace Switcher";
+          };
+          "${cfg.deleteKeybind}" = {
+            action.spawn =
+              [ "${cfg.package}/bin/niri-dynamic-workspaces" "delete" ];
+            hotkey-overlay.title = "Delete Workspace";
+          };
+          "${cfg.moveWindowKeybind}" = {
+            action.spawn =
+              [ "${cfg.package}/bin/niri-dynamic-workspaces" "move-window" ];
+            hotkey-overlay.title = "Move Window to Workspace";
+          };
         };
 
         xdg.configFile."niri-dynamic-workspaces/config.toml" =
