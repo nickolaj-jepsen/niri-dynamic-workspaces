@@ -1,3 +1,4 @@
 /target
 .claude/settings.local.json
 result
+*.qcow2

@@ -4,6 +4,8 @@
     flake-parts.url = "github:hercules-ci/flake-parts";
     home-manager.url = "github:nix-community/home-manager";
     home-manager.inputs.nixpkgs.follows = "nixpkgs";
+    niri-flake.url = "github:sodiboo/niri-flake";
+    niri-flake.inputs.nixpkgs.follows = "nixpkgs";
   };
 
   outputs = inputs:
@@ -14,6 +16,7 @@
         ./nix/package.nix
         ./nix/devshell.nix
         ./nix/hm-module.nix
+        ./nix/vm.nix
       ];
     };
 }
