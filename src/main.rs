@@ -12,6 +12,7 @@ use clap::{Parser, Subcommand};
 use gtk4::gio::{ApplicationFlags, ApplicationHoldGuard};
 use gtk4::prelude::*;
 use gtk4::{gdk, CssProvider};
+use relm4::{Component, ComponentController};
 
 /// A dynamic workspace switcher for the niri Wayland compositor.
 ///
@@ -103,7 +104,16 @@ fn handle_overlay(app: &gtk4::Application, cli: &Cli, mode: ui::Mode) -> i32 {
         }
     }
 
-    ui::build_ui(app, &cfg, mode);
+    // Launch the relm4 component; detach_runtime() gives it a static lifetime
+    // so it stays alive until the window is closed.
+    let mut controller = ui::AppOverlay::builder()
+        .launch(ui::OverlayInit {
+            app: app.clone(),
+            config: cfg,
+            mode,
+        })
+        .detach();
+    controller.detach_runtime();
     0
 }
 
