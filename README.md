@@ -47,6 +47,20 @@ Requires GTK4, gtk4-layer-shell, and pkg-config development headers.
 cargo install --git https://github.com/nickolaj-jepsen/niri-dynamic-workspaces
 ```
 
+## Supported Compositors
+
+| Compositor | Status | Detection |
+|------------|--------|-----------|
+| [Niri](https://github.com/YaLTeR/niri) | Full support | `NIRI_SOCKET` env var |
+| [Hyprland](https://hyprland.org/) | Full support | `HYPRLAND_INSTANCE_SIGNATURE` env var |
+
+The compositor is auto-detected from environment variables. To override:
+
+```toml
+[general]
+compositor = "hyprland"  # or "niri"
+```
+
 ## Configuration
 
 Config file: `~/.config/niri-dynamic-workspaces/config.toml`
@@ -59,6 +73,7 @@ workspace_prefix = "dyn-"          # prefix for dynamic workspace names
 default_programs = ["kitty"]       # programs launched when creating any new workspace
 auto_delete_empty = true           # daemon: auto-delete empty unfocused workspaces
 layout = "qwerty"                  # keyboard layout for the overlay (see table below)
+compositor = "niri"                # optional: auto-detected if omitted
 
 [keybinds]
 close = ["Escape", "Ctrl+c", "Ctrl+w", "Ctrl+q"]  # keys to dismiss the overlay

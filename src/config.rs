@@ -58,6 +58,7 @@ struct GeneralConfig {
     default_programs: Vec<String>,
     auto_delete_empty: bool,
     layout: String,
+    compositor: Option<String>,
 }
 
 impl Default for GeneralConfig {
@@ -67,6 +68,7 @@ impl Default for GeneralConfig {
             default_programs: Vec::new(),
             auto_delete_empty: true,
             layout: "qwerty".to_string(),
+            compositor: None,
         }
     }
 }
@@ -130,6 +132,7 @@ pub struct ResolvedConfig {
     pub layout: &'static KeyboardLayout,
     pub templates: Vec<Template>,
     pub hooks: HookConfig,
+    pub compositor: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -495,6 +498,7 @@ impl Config {
                 on_create: self.hooks.on_create,
                 on_delete: self.hooks.on_delete,
             },
+            compositor: self.general.compositor,
         };
 
         (resolved, warnings)
@@ -1603,6 +1607,7 @@ type = "text"
                 on_create: global_hooks,
                 on_delete: Vec::new(),
             },
+            compositor: None,
         }
     }
 

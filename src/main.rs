@@ -1,5 +1,5 @@
+mod backend;
 mod config;
-mod niri;
 #[cfg(test)]
 mod test_helpers;
 mod ui;
@@ -7,6 +7,7 @@ mod ui;
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use gtk4::gio::{ApplicationFlags, ApplicationHoldGuard};
@@ -56,32 +57,34 @@ fn handle_direct_action(cli: &Cli, mode: ui::Mode, key: &str) -> i32 {
     };
 
     let cfg = config::load_config(cli.config.as_deref());
+    let b = backend::create_backend(cfg.compositor.as_deref());
     let ws_name = config::workspace_name(&cfg.workspace_prefix, ch);
     let empty_vars = std::collections::HashMap::new();
 
     let result = match mode {
         ui::Mode::Normal => {
             let programs = cfg.programs_for(ch);
-            niri::switch_workspace(&ws_name, programs).map(|(created, req)| {
+            backend::switch_workspace(&*b, &ws_name, programs).map(|(created, req)| {
                 if let Some(r) = req {
-                    niri::reorder_workspace_columns(&r);
+                    let b2 = b.clone();
+                    backend::reorder_workspace_columns(&*b2, &r);
                 }
                 if created {
                     let hooks = config::collect_create_hooks(&cfg, None);
                     let env = config::build_hook_env(&ws_name, ch, None, &empty_vars);
-                    niri::run_hooks(&hooks, &env);
+                    backend::run_hooks(&hooks, &env);
                 }
             })
         }
         ui::Mode::Delete => {
-            let result = niri::delete_workspace(&ws_name);
+            let result = backend::delete_workspace(&*b, &ws_name);
             if result.is_ok() {
                 let env = config::build_hook_env(&ws_name, ch, None, &empty_vars);
-                niri::run_hooks(&cfg.hooks.on_delete, &env);
+                backend::run_hooks(&cfg.hooks.on_delete, &env);
             }
             result
         }
-        ui::Mode::MoveWindow => niri::move_window_to_workspace(&ws_name),
+        ui::Mode::MoveWindow => b.move_window_to_workspace(&ws_name),
     };
 
     if let Err(e) = result {
@@ -92,7 +95,12 @@ fn handle_direct_action(cli: &Cli, mode: ui::Mode, key: &str) -> i32 {
     0
 }
 
-fn handle_overlay(app: &gtk4::Application, cli: &Cli, mode: ui::Mode) -> i32 {
+fn handle_overlay(
+    app: &gtk4::Application,
+    cli: &Cli,
+    mode: ui::Mode,
+    backend: &Arc<dyn backend::Backend>,
+) -> i32 {
     let cfg = Rc::new(config::load_config(cli.config.as_deref()));
 
     if let Some(window) = app.active_window() {
@@ -103,7 +111,7 @@ fn handle_overlay(app: &gtk4::Application, cli: &Cli, mode: ui::Mode) -> i32 {
         }
     }
 
-    ui::build_ui(app, &cfg, mode);
+    ui::build_ui(app, &cfg, mode, backend);
     0
 }
 
@@ -149,9 +157,10 @@ fn main() {
                 let cfg = config::load_config(cli.config.as_deref());
                 if cfg.auto_delete_empty {
                     let prefix = cfg.workspace_prefix.clone();
+                    let b = backend::create_backend(cfg.compositor.as_deref());
                     std::thread::Builder::new()
                         .name("cleanup".into())
-                        .spawn(move || niri::run_event_cleanup(&prefix))
+                        .spawn(move || b.run_event_cleanup(&prefix))
                         .ok();
                 }
                 *hold_guard.borrow_mut() = Some(app.hold());
@@ -167,7 +176,9 @@ fn main() {
             return handle_direct_action(&cli, mode, key);
         }
 
-        handle_overlay(app, &cli, mode)
+        let cfg = config::load_config(cli.config.as_deref());
+        let b = backend::create_backend(cfg.compositor.as_deref());
+        handle_overlay(app, &cli, mode, &b)
     });
 
     app.run();

@@ -1,6 +1,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use glib::Propagation;
 use gtk4::prelude::*;
@@ -10,8 +11,8 @@ use gtk4::{
 };
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
+use crate::backend::{self, Backend, WindowInfo, WorkspaceInfo};
 use crate::config::{KeyboardLayout, ResolvedConfig, TemplateVariable};
-use crate::niri;
 
 /// Modifier mask for matching keybinds (includes Super to detect compositor keybind hold).
 const RELEVANT_MODS: gdk4::ModifierType = gdk4::ModifierType::from_bits_retain(
@@ -236,6 +237,22 @@ struct ActionContext {
     error_revealer: Revealer,
     config: Rc<ResolvedConfig>,
     keyboard_infos: Rc<HashMap<char, DynWorkspaceInfo>>,
+    backend: Arc<dyn Backend>,
+}
+
+impl ActionContext {
+    /// Create a variant of this context with different error display widgets.
+    fn with_error(&self, error_label: Label, error_revealer: Revealer) -> Self {
+        Self {
+            mode: self.mode,
+            window: self.window.clone(),
+            error_label,
+            error_revealer,
+            config: self.config.clone(),
+            keyboard_infos: self.keyboard_infos.clone(),
+            backend: self.backend.clone(),
+        }
+    }
 }
 
 #[expect(
@@ -287,8 +304,8 @@ impl DynWorkspaceInfo {
     }
 }
 
-fn gather_dyn_workspaces(config: &ResolvedConfig) -> Vec<DynWorkspaceInfo> {
-    let workspaces = match niri::list_workspaces() {
+fn gather_dyn_workspaces(backend: &dyn Backend, config: &ResolvedConfig) -> Vec<DynWorkspaceInfo> {
+    let workspaces = match backend.list_workspaces() {
         Ok(ws) => ws,
         Err(e) => {
             eprintln!("Failed to list workspaces: {e}");
@@ -296,7 +313,7 @@ fn gather_dyn_workspaces(config: &ResolvedConfig) -> Vec<DynWorkspaceInfo> {
         }
     };
 
-    let windows = match niri::list_windows() {
+    let windows = match backend.list_windows() {
         Ok(w) => w,
         Err(e) => {
             eprintln!("Failed to list windows: {e}");
@@ -308,8 +325,8 @@ fn gather_dyn_workspaces(config: &ResolvedConfig) -> Vec<DynWorkspaceInfo> {
 }
 
 fn build_dyn_workspace_infos(
-    workspaces: &[niri_ipc::Workspace],
-    windows: &[niri_ipc::Window],
+    workspaces: &[WorkspaceInfo],
+    windows: &[WindowInfo],
     config: &ResolvedConfig,
 ) -> Vec<DynWorkspaceInfo> {
     let prefix = &config.workspace_prefix;
@@ -408,8 +425,11 @@ fn build_dyn_workspace_infos(
 
 /// Build a map of all keyboard keys to their workspace info.
 /// Keys without a live or configured workspace get a default empty entry.
-fn build_full_keyboard_info(config: &ResolvedConfig) -> HashMap<char, DynWorkspaceInfo> {
-    let live_infos = gather_dyn_workspaces(config);
+fn build_full_keyboard_info(
+    backend: &dyn Backend,
+    config: &ResolvedConfig,
+) -> HashMap<char, DynWorkspaceInfo> {
+    let live_infos = gather_dyn_workspaces(backend, config);
     let mut map: HashMap<char, DynWorkspaceInfo> = HashMap::new();
 
     for info in live_infos {
@@ -561,7 +581,12 @@ fn build_keyboard(
 
 // --- UI construction ---
 
-pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode) {
+pub fn build_ui(
+    app: &gtk4::Application,
+    config: &Rc<ResolvedConfig>,
+    mode: Mode,
+    backend: &Arc<dyn Backend>,
+) {
     let window = ApplicationWindow::builder().application(app).build();
     window.remove_css_class("background");
     window.init_layer_shell();
@@ -572,7 +597,7 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
     window.set_anchor(Edge::Left, true);
     window.set_anchor(Edge::Right, true);
 
-    populate_overlay(&window, config, mode);
+    populate_overlay(&window, config, mode, backend);
     window.present();
 }
 
@@ -596,7 +621,12 @@ fn remove_app_controllers(window: &ApplicationWindow) {
     }
 }
 
-fn build_mode_tabs(window: &ApplicationWindow, config: &Rc<ResolvedConfig>, mode: Mode) -> GtkBox {
+fn build_mode_tabs(
+    window: &ApplicationWindow,
+    config: &Rc<ResolvedConfig>,
+    mode: Mode,
+    backend: &Arc<dyn Backend>,
+) -> GtkBox {
     let mode_tabs = GtkBox::builder()
         .orientation(Orientation::Horizontal)
         .spacing(0)
@@ -615,12 +645,14 @@ fn build_mode_tabs(window: &ApplicationWindow, config: &Rc<ResolvedConfig>, mode
 
         let tab_window = window.clone();
         let tab_config = config.clone();
+        let tab_backend = backend.clone();
         let click = GestureClick::new();
         click.connect_released(move |_, _, _, _| {
             let w = tab_window.clone();
             let c = tab_config.clone();
+            let b = tab_backend.clone();
             glib::idle_add_local_once(move || {
-                populate_overlay(&w, &c, m);
+                populate_overlay(&w, &c, m, &b);
             });
         });
         tab_label.add_controller(click);
@@ -690,7 +722,12 @@ fn build_hint_footer(metrics: &KeyboardMetrics, hints: &[&str]) -> GtkBox {
 }
 
 /// Build (or rebuild) the overlay content for `mode` inside an existing window.
-fn populate_overlay(window: &ApplicationWindow, config: &Rc<ResolvedConfig>, mode: Mode) {
+fn populate_overlay(
+    window: &ApplicationWindow,
+    config: &Rc<ResolvedConfig>,
+    mode: Mode,
+    backend: &Arc<dyn Backend>,
+) {
     window.set_widget_name(mode.widget_name());
     remove_app_controllers(window);
 
@@ -715,7 +752,7 @@ fn populate_overlay(window: &ApplicationWindow, config: &Rc<ResolvedConfig>, mod
     apply_scaled_css(&metrics.scaled_css_variables());
 
     // Build keyboard
-    let infos = Rc::new(build_full_keyboard_info(config));
+    let infos = Rc::new(build_full_keyboard_info(&**backend, config));
 
     let ctx = ActionContext {
         mode,
@@ -724,6 +761,7 @@ fn populate_overlay(window: &ApplicationWindow, config: &Rc<ResolvedConfig>, mod
         error_revealer: error_revealer.clone(),
         config: config.clone(),
         keyboard_infos: infos.clone(),
+        backend: backend.clone(),
     };
 
     let keyboard = build_keyboard(&infos, mode, &ctx, &metrics);
@@ -735,7 +773,7 @@ fn populate_overlay(window: &ApplicationWindow, config: &Rc<ResolvedConfig>, mod
         &["press key to select", "Tab switch mode", "Escape close"],
     ));
     container.append(&error_revealer);
-    container.append(&build_mode_tabs(window, config, mode));
+    container.append(&build_mode_tabs(window, config, mode, backend));
 
     wrap_in_backdrop(window, &container);
 
@@ -751,27 +789,29 @@ fn switch_and_close(
     ctx: &ActionContext,
     hook_info: &HookInfo,
 ) {
-    let result = niri::switch_workspace(ws_name, programs).map(|(created, req)| {
-        if let Some(r) = req {
-            std::thread::Builder::new()
-                .name("reorder".into())
-                .spawn(move || niri::reorder_workspace_columns(&r))
-                .ok();
-        }
-        if created {
-            let hooks = crate::config::collect_create_hooks(
-                &ctx.config,
-                hook_info.template_name.as_deref(),
-            );
-            let env = crate::config::build_hook_env(
-                ws_name,
-                ws_key,
-                hook_info.template_name.as_deref(),
-                &hook_info.variables,
-            );
-            niri::run_hooks(&hooks, &env);
-        }
-    });
+    let result =
+        backend::switch_workspace(&*ctx.backend, ws_name, programs).map(|(created, req)| {
+            if let Some(r) = req {
+                let b = ctx.backend.clone();
+                std::thread::Builder::new()
+                    .name("reorder".into())
+                    .spawn(move || backend::reorder_workspace_columns(&*b, &r))
+                    .ok();
+            }
+            if created {
+                let hooks = crate::config::collect_create_hooks(
+                    &ctx.config,
+                    hook_info.template_name.as_deref(),
+                );
+                let env = crate::config::build_hook_env(
+                    ws_name,
+                    ws_key,
+                    hook_info.template_name.as_deref(),
+                    &hook_info.variables,
+                );
+                backend::run_hooks(&hooks, &env);
+            }
+        });
     if let Err(e) = result {
         show_error(ctx, &format!("Failed: {e:#}"));
         return;
@@ -797,14 +837,14 @@ fn dispatch_action(ch: char, ctx: &ActionContext) {
             return;
         }
         Mode::Delete => {
-            let result = niri::delete_workspace(&ws_name);
+            let result = backend::delete_workspace(&*ctx.backend, &ws_name);
             if result.is_ok() {
                 let env = crate::config::build_hook_env(&ws_name, ch, None, &HashMap::new());
-                niri::run_hooks(&ctx.config.hooks.on_delete, &env);
+                backend::run_hooks(&ctx.config.hooks.on_delete, &env);
             }
             result
         }
-        Mode::MoveWindow => niri::move_window_to_workspace(&ws_name),
+        Mode::MoveWindow => ctx.backend.move_window_to_workspace(&ws_name),
     };
 
     if let Err(e) = result {
@@ -977,15 +1017,7 @@ fn show_template_picker(ch: char, ctx: &ActionContext) {
         .map(|(i, opt)| build_template_option_widget(opt, i == 0, &metrics))
         .collect();
 
-    // Shared context for the template picker
-    let picker_ctx = ActionContext {
-        mode: ctx.mode,
-        window: ctx.window.clone(),
-        error_label,
-        error_revealer: error_revealer.clone(),
-        config: ctx.config.clone(),
-        keyboard_infos: ctx.keyboard_infos.clone(),
-    };
+    let picker_ctx = ctx.with_error(error_label, error_revealer.clone());
 
     // Store options as Rc for sharing with handlers
     let options = Rc::new(options);
@@ -1065,8 +1097,9 @@ fn attach_template_key_handler(
         if matches_close_keybind(key, modifier, &close_keybinds) {
             let window = key_ctx.window.clone();
             let cfg = config.clone();
+            let b = key_ctx.backend.clone();
             glib::idle_add_local_once(move || {
-                populate_overlay(&window, &cfg, Mode::Normal);
+                populate_overlay(&window, &cfg, Mode::Normal, &b);
             });
             return Propagation::Stop;
         }
@@ -1208,14 +1241,7 @@ fn show_variable_input(
         first.grab_focus();
     }
 
-    let var_ctx = ActionContext {
-        mode: ctx.mode,
-        window: ctx.window.clone(),
-        error_label,
-        error_revealer,
-        config: ctx.config.clone(),
-        keyboard_infos: ctx.keyboard_infos.clone(),
-    };
+    let var_ctx = ctx.with_error(error_label, error_revealer);
 
     let var_names: Vec<String> = option.variables.iter().map(|v| v.name.clone()).collect();
     let programs = option.programs.clone();
@@ -1299,8 +1325,9 @@ fn attach_key_handler(ctx: &ActionContext, close_keybinds: &[crate::config::Keyb
             };
             let window = key_ctx.window.clone();
             let config = key_ctx.config.clone();
+            let b = key_ctx.backend.clone();
             glib::idle_add_local_once(move || {
-                populate_overlay(&window, &config, next_mode);
+                populate_overlay(&window, &config, next_mode, &b);
             });
             return Propagation::Stop;
         }
@@ -1536,6 +1563,7 @@ mod tests {
             layout: &LAYOUT_QWERTY,
             templates: Vec::new(),
             hooks: crate::config::HookConfig::default(),
+            compositor: None,
         }
     }
 
