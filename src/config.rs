@@ -29,6 +29,8 @@ struct VariableEntry {
     name: String,
     #[serde(rename = "type", default = "default_variable_type")]
     variable_type: String,
+    options: Vec<String>,
+    command: Option<String>,
 }
 
 fn default_variable_type() -> String {
@@ -136,17 +138,15 @@ pub struct ResolvedConfig {
 pub enum VariableType {
     #[default]
     Text,
+    Enum(Vec<String>),
 }
 
 #[derive(Clone, Debug)]
 pub struct TemplateVariable {
     pub name: String,
     pub label: String,
-    #[allow(
-        dead_code,
-        reason = "extensibility: future variable types will branch on this"
-    )]
     pub var_type: VariableType,
+    pub command: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -413,6 +413,16 @@ impl Config {
                 .map(|(var_name, var_entry)| {
                     let var_type = if var_entry.variable_type.eq_ignore_ascii_case("text") {
                         VariableType::Text
+                    } else if var_entry.variable_type.eq_ignore_ascii_case("enum") {
+                        if var_entry.options.is_empty() && var_entry.command.is_none() {
+                            warnings.push(format!(
+                                "template '{name}': enum variable '{var_name}' has no options \
+                                 and no command, defaulting to text"
+                            ));
+                            VariableType::Text
+                        } else {
+                            VariableType::Enum(var_entry.options.clone())
+                        }
                     } else {
                         warnings.push(format!(
                             "template '{name}': unknown variable type '{}' for '{var_name}', \
@@ -434,6 +444,7 @@ impl Config {
                         name: var_name.clone(),
                         label,
                         var_type,
+                        command: var_entry.command.clone(),
                     }
                 })
                 .collect();
@@ -1359,6 +1370,7 @@ programs = ["firefox"]
             VariableEntry {
                 name: "Project path".to_string(),
                 variable_type: "text".to_string(),
+                ..VariableEntry::default()
             },
         );
         variables.insert(
@@ -1366,6 +1378,7 @@ programs = ["firefox"]
             VariableEntry {
                 name: "Git branch".to_string(),
                 variable_type: "text".to_string(),
+                ..VariableEntry::default()
             },
         );
         let mut template = HashMap::new();
@@ -1405,6 +1418,7 @@ programs = ["firefox"]
             VariableEntry {
                 name: "Path".to_string(),
                 variable_type: "select".to_string(),
+                ..VariableEntry::default()
             },
         );
         let mut template = HashMap::new();
@@ -1432,6 +1446,112 @@ programs = ["firefox"]
     }
 
     #[test]
+    fn resolve_templates_enum_variable() {
+        let mut variables = HashMap::new();
+        variables.insert(
+            "branch".to_string(),
+            VariableEntry {
+                name: "Git branch".to_string(),
+                variable_type: "enum".to_string(),
+                options: vec![
+                    "main".to_string(),
+                    "develop".to_string(),
+                    "staging".to_string(),
+                ],
+                command: None,
+            },
+        );
+        let mut template = HashMap::new();
+        template.insert(
+            "dev".to_string(),
+            TemplateEntry {
+                programs: vec!["git checkout {{branch}}".to_string()],
+                key: Some("d".to_string()),
+                variables,
+                ..TemplateEntry::default()
+            },
+        );
+        let config = Config {
+            template,
+            ..Config::default()
+        };
+        let (resolved, warnings) = config.resolve();
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        let tmpl = &resolved.templates[0];
+        assert_eq!(tmpl.variables.len(), 1);
+        assert_eq!(tmpl.variables[0].name, "branch");
+        assert_eq!(
+            tmpl.variables[0].var_type,
+            VariableType::Enum(vec![
+                "main".to_string(),
+                "develop".to_string(),
+                "staging".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn resolve_templates_enum_empty_options_warns() {
+        let mut variables = HashMap::new();
+        variables.insert(
+            "env".to_string(),
+            VariableEntry {
+                name: "Environment".to_string(),
+                variable_type: "enum".to_string(),
+                options: Vec::new(),
+                command: None,
+            },
+        );
+        let mut template = HashMap::new();
+        template.insert(
+            "deploy".to_string(),
+            TemplateEntry {
+                programs: vec!["deploy {{env}}".to_string()],
+                key: Some("d".to_string()),
+                variables,
+                ..TemplateEntry::default()
+            },
+        );
+        let config = Config {
+            template,
+            ..Config::default()
+        };
+        let (resolved, warnings) = config.resolve();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("no options"));
+        assert_eq!(
+            resolved.templates[0].variables[0].var_type,
+            VariableType::Text
+        );
+    }
+
+    #[test]
+    fn toml_with_enum_variable() {
+        let toml_str = r#"
+[template.dev]
+programs = ["git checkout {{branch}}"]
+key = "d"
+
+[template.dev.variables.branch]
+name = "Git branch"
+type = "enum"
+options = ["main", "develop", "staging"]
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let (resolved, warnings) = config.resolve();
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        let tmpl = &resolved.templates[0];
+        assert_eq!(
+            tmpl.variables[0].var_type,
+            VariableType::Enum(vec![
+                "main".to_string(),
+                "develop".to_string(),
+                "staging".to_string(),
+            ])
+        );
+    }
+
+    #[test]
     fn resolve_templates_empty_variable_name_warns() {
         let mut variables = HashMap::new();
         variables.insert(
@@ -1439,6 +1559,7 @@ programs = ["firefox"]
             VariableEntry {
                 name: String::new(),
                 variable_type: "text".to_string(),
+                ..VariableEntry::default()
             },
         );
         let mut template = HashMap::new();
@@ -1469,6 +1590,7 @@ programs = ["firefox"]
             VariableEntry {
                 name: "Unused var".to_string(),
                 variable_type: "text".to_string(),
+                ..VariableEntry::default()
             },
         );
         let mut template = HashMap::new();
@@ -1554,6 +1676,7 @@ type = "text"
                 name: "x".to_string(),
                 label: "X".to_string(),
                 var_type: VariableType::Text,
+                command: None,
             }],
             on_create: Vec::new(),
         };
@@ -1712,6 +1835,101 @@ on_create = ['git -C "$NDW_VAR_PATH" status']
         assert_eq!(
             resolved.templates[0].on_create,
             vec![r#"git -C "$NDW_VAR_PATH" status"#]
+        );
+    }
+
+    // --- Enum command field ---
+
+    #[test]
+    fn resolve_templates_enum_with_command() {
+        let mut variables = HashMap::new();
+        variables.insert(
+            "project".to_string(),
+            VariableEntry {
+                name: "Project".to_string(),
+                variable_type: "enum".to_string(),
+                options: Vec::new(),
+                command: Some("ls ~/dev".to_string()),
+            },
+        );
+        let mut template = HashMap::new();
+        template.insert(
+            "dev".to_string(),
+            TemplateEntry {
+                programs: vec!["code {{project}}".to_string()],
+                key: Some("d".to_string()),
+                variables,
+                ..TemplateEntry::default()
+            },
+        );
+        let config = Config {
+            template,
+            ..Config::default()
+        };
+        let (resolved, warnings) = config.resolve();
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        let var = &resolved.templates[0].variables[0];
+        assert_eq!(var.var_type, VariableType::Enum(Vec::new()));
+        assert_eq!(var.command.as_deref(), Some("ls ~/dev"));
+    }
+
+    #[test]
+    fn resolve_templates_enum_with_command_and_options() {
+        let mut variables = HashMap::new();
+        variables.insert(
+            "project".to_string(),
+            VariableEntry {
+                name: "Project".to_string(),
+                variable_type: "enum".to_string(),
+                options: vec!["fallback".to_string()],
+                command: Some("ls ~/dev".to_string()),
+            },
+        );
+        let mut template = HashMap::new();
+        template.insert(
+            "dev".to_string(),
+            TemplateEntry {
+                programs: vec!["code {{project}}".to_string()],
+                key: Some("d".to_string()),
+                variables,
+                ..TemplateEntry::default()
+            },
+        );
+        let config = Config {
+            template,
+            ..Config::default()
+        };
+        let (resolved, warnings) = config.resolve();
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        let var = &resolved.templates[0].variables[0];
+        assert_eq!(
+            var.var_type,
+            VariableType::Enum(vec!["fallback".to_string()])
+        );
+        assert_eq!(var.command.as_deref(), Some("ls ~/dev"));
+    }
+
+    #[test]
+    fn toml_with_enum_command() {
+        let toml_str = r#"
+[template.dev]
+programs = ["code {{project}}"]
+key = "d"
+
+[template.dev.variables.project]
+name = "Project"
+type = "enum"
+command = "ls ~/dev"
+options = ["fallback-project"]
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let (resolved, warnings) = config.resolve();
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        let var = &resolved.templates[0].variables[0];
+        assert_eq!(var.command.as_deref(), Some("ls ~/dev"));
+        assert_eq!(
+            var.var_type,
+            VariableType::Enum(vec!["fallback-project".to_string()])
         );
     }
 }

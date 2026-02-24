@@ -89,6 +89,17 @@ key = "d"                        # optional hotkey shortcut
 name = "Project path"            # display label shown in the input form
 type = "text"                    # optional, defaults to "text"
 
+[template.dev.variables.branch]
+name = "Git branch"
+type = "enum"                    # dropdown selection from predefined options
+options = ["main", "develop", "staging"]
+
+[template.dev.variables.project]
+name = "Project"
+type = "enum"
+command = "ls ~/dev"             # shell command; each stdout line = one option
+options = ["fallback-project"]   # optional static fallback if command fails/empty
+
 [template.browser]
 programs = ["firefox", "slack"]
 ```
@@ -100,6 +111,8 @@ programs = ["firefox", "slack"]
 - Workspaces with per-key `[workspace.KEY].programs` skip the picker and create directly
 - Templates can define **variables** with `{{name}}` placeholders in program strings
 - Each variable has a required `name` (display label) and optional `type` (defaults to `"text"`)
+- Variable types: `"text"` (free-form input) or `"enum"` (dropdown with `options` list)
+- Enum variables support a `command` field — a shell command whose stdout lines become options at runtime (precedence: command output > static `options` > fall back to text input)
 - Templates with variables show an input form before creating the workspace
 - Templates without variables create immediately as before
 

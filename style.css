@@ -204,3 +204,21 @@ window {
 .variable-entry {
     font-size: var(--font-name);
 }
+
+/* --- Fuzzy select (enum variables) --- */
+
+.fuzzy-list {
+    margin-top: var(--key-pad-v);
+}
+
+.fuzzy-option {
+    font-size: var(--font-name);
+    padding: var(--key-pad-v) var(--key-pad-h);
+    border-radius: var(--key-radius);
+    transition: 150ms ease;
+}
+
+.fuzzy-option.selected {
+    background-color: alpha(@accent_color, 0.15);
+    color: @accent_color;
+}

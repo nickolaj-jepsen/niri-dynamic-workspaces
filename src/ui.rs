@@ -2,6 +2,9 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
+use nucleo_matcher::{Config as MatcherConfig, Matcher, Utf32Str};
+
 use glib::Propagation;
 use gtk4::prelude::*;
 use gtk4::{
@@ -627,8 +630,8 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
                 if let Some(monitor) = find_monitor_for_output(output) {
                     let new_width = get_monitor_width(Some(&monitor));
                     track_window.set_monitor(Some(&monitor));
-                    let mode = Mode::from_window(&track_window.clone().upcast())
-                        .unwrap_or(Mode::Normal);
+                    let mode =
+                        Mode::from_window(&track_window.clone().upcast()).unwrap_or(Mode::Normal);
                     populate_overlay(&track_window, &track_config, mode, new_width);
                 }
             }
@@ -1198,6 +1201,268 @@ fn attach_template_key_handler(
 
 // --- Variable input form ---
 
+/// Filter `options` by fuzzy-matching against `query`, returning indices sorted
+/// by match score (best first). An empty query returns all indices in order.
+fn fuzzy_filter(query: &str, options: &[String], matcher: &mut Matcher) -> Vec<usize> {
+    if query.is_empty() {
+        return (0..options.len()).collect();
+    }
+
+    let pattern = Pattern::new(
+        query,
+        CaseMatching::Ignore,
+        Normalization::Smart,
+        AtomKind::Fuzzy,
+    );
+    let mut buf = Vec::new();
+    let mut scored: Vec<(usize, u32)> = options
+        .iter()
+        .enumerate()
+        .filter_map(|(i, opt)| {
+            let haystack = Utf32Str::new(opt, &mut buf);
+            pattern.score(haystack, matcher).map(|s| (i, s))
+        })
+        .collect();
+    scored.sort_by(|a, b| b.1.cmp(&a.1));
+    scored.into_iter().map(|(i, _)| i).collect()
+}
+
+#[derive(Clone)]
+struct FuzzySelect {
+    entry: Entry,
+    selected: Rc<Cell<usize>>,
+    filtered: Rc<RefCell<Vec<usize>>>,
+    options: Vec<String>,
+}
+
+impl FuzzySelect {
+    fn value(&self) -> String {
+        let indices = self.filtered.borrow();
+        let idx = self.selected.get();
+        indices
+            .get(idx)
+            .and_then(|&i| self.options.get(i))
+            .cloned()
+            .unwrap_or_default()
+    }
+}
+
+#[derive(Clone)]
+enum VariableWidget {
+    Text(Entry),
+    Enum(FuzzySelect),
+}
+
+impl VariableWidget {
+    fn value(&self) -> String {
+        match self {
+            Self::Text(entry) => entry.text().to_string(),
+            Self::Enum(fuzzy) => fuzzy.value(),
+        }
+    }
+
+    fn grab_focus(&self) {
+        match self {
+            Self::Text(entry) => {
+                entry.grab_focus();
+            }
+            Self::Enum(fuzzy) => {
+                fuzzy.entry.grab_focus();
+            }
+        }
+    }
+}
+
+fn update_fuzzy_selection(labels: &[Label], filtered: &[usize], old_idx: usize, new_idx: usize) {
+    if let Some(&old) = filtered.get(old_idx) {
+        labels[old].remove_css_class("selected");
+    }
+    if let Some(&new) = filtered.get(new_idx) {
+        labels[new].add_css_class("selected");
+    }
+}
+
+/// Run a shell command and return each non-empty stdout line as a `String`.
+///
+/// Returns an empty `Vec` if the command fails or produces no output.
+fn run_options_command(cmd: &str) -> Vec<String> {
+    match std::process::Command::new("sh").args(["-c", cmd]).output() {
+        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(String::from)
+            .collect(),
+        Ok(output) => {
+            eprintln!(
+                "warning: enum command failed (exit {}): {cmd}",
+                output.status.code().unwrap_or(-1)
+            );
+            Vec::new()
+        }
+        Err(e) => {
+            eprintln!("warning: could not run enum command '{cmd}': {e}");
+            Vec::new()
+        }
+    }
+}
+
+/// Resolve the options for an enum variable.
+///
+/// Tries the dynamic `command` first; falls back to static `options`.
+fn resolve_enum_options(command: Option<&str>, static_options: &[String]) -> Vec<String> {
+    if let Some(cmd) = command {
+        let result = run_options_command(cmd);
+        if !result.is_empty() {
+            return result;
+        }
+    }
+    static_options.to_vec()
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "fuzzy select widget with filter and key handling setup"
+)]
+fn build_fuzzy_select(
+    row: &GtkBox,
+    options: &[String],
+    metrics: &KeyboardMetrics,
+) -> VariableWidget {
+    let search_entry = Entry::builder()
+        .css_classes(["variable-entry"])
+        .placeholder_text("Type to filter\u{2026}")
+        .build();
+    row.append(&search_entry);
+
+    let list_box = GtkBox::builder()
+        .orientation(Orientation::Vertical)
+        .spacing(0)
+        .css_classes(["fuzzy-list"])
+        .build();
+
+    let option_labels: Vec<Label> = options
+        .iter()
+        .enumerate()
+        .map(|(i, opt)| {
+            let mut classes = vec!["fuzzy-option"];
+            if i == 0 {
+                classes.push("selected");
+            }
+            let label = Label::builder()
+                .label(opt)
+                .css_classes(classes)
+                .halign(Align::Start)
+                .build();
+            list_box.append(&label);
+            label
+        })
+        .collect();
+
+    let all_indices: Vec<usize> = (0..options.len()).collect();
+    let filtered = Rc::new(RefCell::new(all_indices));
+    let selected = Rc::new(Cell::new(0_usize));
+    let labels_rc = Rc::new(option_labels);
+    let matcher = Rc::new(RefCell::new(Matcher::new(MatcherConfig::DEFAULT)));
+
+    // Filter on text change
+    {
+        let opts: Vec<String> = options.to_vec();
+        let filt = filtered.clone();
+        let sel = selected.clone();
+        let labels = labels_rc.clone();
+        let matcher = matcher.clone();
+        let list = list_box.clone();
+        search_entry.connect_changed(move |entry| {
+            let query = entry.text();
+
+            // Remove old selection highlight
+            {
+                let old_filt = filt.borrow();
+                if let Some(&old_real) = old_filt.get(sel.get()) {
+                    labels[old_real].remove_css_class("selected");
+                }
+            }
+
+            let new_indices = fuzzy_filter(&query, &opts, &mut matcher.borrow_mut());
+
+            let visible: HashSet<usize> = new_indices.iter().copied().collect();
+            for (i, label) in labels.iter().enumerate() {
+                label.set_visible(visible.contains(&i));
+            }
+
+            // Reorder labels in the list to match score order (best first)
+            for (pos, &i) in new_indices.iter().enumerate() {
+                if pos == 0 {
+                    labels[i].insert_after(&list, None::<&Label>);
+                } else {
+                    labels[i].insert_after(&list, Some(&labels[new_indices[pos - 1]]));
+                }
+            }
+
+            sel.set(0);
+            if let Some(&first_idx) = new_indices.first() {
+                labels[first_idx].add_css_class("selected");
+            }
+
+            *filt.borrow_mut() = new_indices;
+        });
+    }
+
+    // Handle Up/Down keys on the search entry
+    {
+        let filt = filtered.clone();
+        let sel = selected.clone();
+        let labels = labels_rc.clone();
+        let key_ctrl = EventControllerKey::new();
+        key_ctrl.connect_key_pressed(move |_, key, _, _| {
+            let indices = filt.borrow();
+            if indices.is_empty() {
+                return Propagation::Proceed;
+            }
+
+            let current = sel.get();
+            let new_idx = if key == gdk4::Key::Up || key == gdk4::Key::KP_Up {
+                if current == 0 {
+                    indices.len() - 1
+                } else {
+                    current - 1
+                }
+            } else if key == gdk4::Key::Down || key == gdk4::Key::KP_Down {
+                if current >= indices.len() - 1 {
+                    0
+                } else {
+                    current + 1
+                }
+            } else {
+                return Propagation::Proceed;
+            };
+
+            update_fuzzy_selection(&labels, &indices, current, new_idx);
+            sel.set(new_idx);
+
+            Propagation::Stop
+        });
+        search_entry.add_controller(key_ctrl);
+    }
+
+    let scrolled = ScrolledWindow::builder()
+        .hscrollbar_policy(PolicyType::Never)
+        .vscrollbar_policy(PolicyType::Automatic)
+        .max_content_height(metrics.key_size * 3)
+        .propagate_natural_height(true)
+        .child(&list_box)
+        .build();
+    row.append(&scrolled);
+
+    VariableWidget::Enum(FuzzySelect {
+        entry: search_entry,
+        selected,
+        filtered,
+        options: options.to_vec(),
+    })
+}
+
 fn show_variable_input(
     ws_name: &str,
     option: &TemplateOption,
@@ -1241,7 +1506,7 @@ fn show_variable_input(
         .css_classes(["variable-form"])
         .build();
 
-    let entries: Vec<Entry> = option
+    let widgets: Vec<VariableWidget> = option
         .variables
         .iter()
         .map(|var| {
@@ -1258,14 +1523,32 @@ fn show_variable_input(
                 .build();
             row.append(&label);
 
-            let entry = Entry::builder()
-                .css_classes(["variable-entry"])
-                .placeholder_text(&var.name)
-                .build();
-            row.append(&entry);
+            let widget = match &var.var_type {
+                crate::config::VariableType::Text => {
+                    let entry = Entry::builder()
+                        .css_classes(["variable-entry"])
+                        .placeholder_text(&var.name)
+                        .build();
+                    row.append(&entry);
+                    VariableWidget::Text(entry)
+                }
+                crate::config::VariableType::Enum(static_options) => {
+                    let resolved = resolve_enum_options(var.command.as_deref(), static_options);
+                    if resolved.is_empty() {
+                        let entry = Entry::builder()
+                            .css_classes(["variable-entry"])
+                            .placeholder_text(&var.name)
+                            .build();
+                        row.append(&entry);
+                        VariableWidget::Text(entry)
+                    } else {
+                        build_fuzzy_select(&row, &resolved, &metrics)
+                    }
+                }
+            };
 
             form.append(&row);
-            entry
+            widget
         })
         .collect();
     container.append(&form);
@@ -1274,13 +1557,13 @@ fn show_variable_input(
 
     container.append(&build_hint_footer(
         &metrics,
-        &["Enter create", "Escape back"],
+        &["Enter create", "\u{2191}\u{2193} navigate", "Escape back"],
     ));
 
     wrap_in_backdrop(window, &container);
 
-    // Focus the first entry
-    if let Some(first) = entries.first() {
+    // Focus the first widget
+    if let Some(first) = widgets.first() {
         first.grab_focus();
     }
 
@@ -1301,7 +1584,7 @@ fn show_variable_input(
         ws_name,
         &var_ctx,
         ch,
-        &entries,
+        &widgets,
         &var_names,
         &programs,
         template_name,
@@ -1313,7 +1596,7 @@ fn attach_variable_input_key_handler(
     ws_name: &str,
     ctx: &ActionContext,
     ch: char,
-    entries: &[Entry],
+    widgets: &[VariableWidget],
     var_names: &[String],
     programs: &[String],
     template_name: Option<String>,
@@ -1321,7 +1604,7 @@ fn attach_variable_input_key_handler(
     let key_ctx = ctx.clone();
     let close_keybinds = ctx.config.close_keybinds.clone();
     let ws_name = ws_name.to_string();
-    let entries: Vec<Entry> = entries.to_vec();
+    let widgets: Vec<VariableWidget> = widgets.to_vec();
     let var_names: Vec<String> = var_names.to_vec();
     let programs: Vec<String> = programs.to_vec();
 
@@ -1339,8 +1622,8 @@ fn attach_variable_input_key_handler(
         // Enter → collect values and create workspace
         if key == gdk4::Key::Return || key == gdk4::Key::KP_Enter {
             let mut values = HashMap::new();
-            for (name, entry) in var_names.iter().zip(entries.iter()) {
-                values.insert(name.clone(), entry.text().to_string());
+            for (name, widget) in var_names.iter().zip(widgets.iter()) {
+                values.insert(name.clone(), widget.value());
             }
             let substituted = crate::config::substitute_variables(&programs, &values);
             let hook_info = HookInfo {
@@ -1424,6 +1707,44 @@ fn show_error(ctx: &ActionContext, msg: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- fuzzy_filter ---
+
+    fn test_matcher() -> Matcher {
+        Matcher::new(MatcherConfig::DEFAULT)
+    }
+
+    #[test]
+    fn fuzzy_filter_empty_query() {
+        let opts = vec!["a".into(), "b".into(), "c".into()];
+        let result = fuzzy_filter("", &opts, &mut test_matcher());
+        assert_eq!(result, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn fuzzy_filter_exact_match_first() {
+        let opts: Vec<String> = vec!["something_main".into(), "main".into(), "xmyaziznw".into()];
+        let result = fuzzy_filter("main", &opts, &mut test_matcher());
+        // "main" (exact/short) should score highest over substring matches
+        assert_eq!(result[0], 1);
+        assert!(result.len() >= 2);
+    }
+
+    #[test]
+    fn fuzzy_filter_no_match() {
+        let opts: Vec<String> = vec!["main".into(), "develop".into()];
+        let result = fuzzy_filter("xyz", &opts, &mut test_matcher());
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn fuzzy_filter_ranks_by_relevance() {
+        let opts: Vec<String> = vec!["administrator".into(), "dev".into(), "develop".into()];
+        let result = fuzzy_filter("dev", &opts, &mut test_matcher());
+        // "dev" (exact) should rank above "develop" (prefix)
+        assert_eq!(result[0], 1);
+        assert!(result.contains(&2));
+    }
 
     #[test]
     fn clean_app_id_variants() {
@@ -1848,5 +2169,55 @@ mod tests {
         assert_eq!(opts.len(), 2);
         assert_eq!(opts[0].name, "Empty");
         assert!(opts[0].programs.is_empty());
+    }
+
+    // --- run_options_command ---
+
+    #[test]
+    fn run_options_command_basic() {
+        let result = run_options_command("printf 'a\nb\nc'");
+        assert_eq!(result, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn run_options_command_trims_and_filters() {
+        let result = run_options_command("printf '  a \n\n  b  \n\n'");
+        assert_eq!(result, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn run_options_command_failure() {
+        let result = run_options_command("nonexistent_command_12345");
+        assert!(result.is_empty());
+    }
+
+    // --- resolve_enum_options ---
+
+    #[test]
+    fn resolve_enum_options_no_command() {
+        let static_opts = vec!["a".to_string(), "b".to_string()];
+        let result = resolve_enum_options(None, &static_opts);
+        assert_eq!(result, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn resolve_enum_options_command_succeeds() {
+        let static_opts = vec!["fallback".to_string()];
+        let result = resolve_enum_options(Some("printf 'x\ny'"), &static_opts);
+        assert_eq!(result, vec!["x", "y"]);
+    }
+
+    #[test]
+    fn resolve_enum_options_command_empty_falls_back() {
+        let static_opts = vec!["fallback".to_string()];
+        let result = resolve_enum_options(Some("printf ''"), &static_opts);
+        assert_eq!(result, vec!["fallback"]);
+    }
+
+    #[test]
+    fn resolve_enum_options_command_fails_falls_back() {
+        let static_opts = vec!["fallback".to_string()];
+        let result = resolve_enum_options(Some("nonexistent_cmd_12345"), &static_opts);
+        assert_eq!(result, vec!["fallback"]);
     }
 }
