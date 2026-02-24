@@ -91,11 +91,43 @@ impl KeyboardMetrics {
     }
 }
 
-fn get_monitor_width() -> i32 {
-    gdk4::Display::default()
-        .and_then(|d| d.monitors().item(0))
-        .and_then(|obj| obj.downcast::<gdk4::Monitor>().ok())
-        .map_or(1920, |m| m.geometry().width())
+fn get_monitor_width(monitor: Option<&gdk4::Monitor>) -> i32 {
+    monitor
+        .map(|m| m.geometry().width())
+        .or_else(|| {
+            gdk4::Display::default()
+                .and_then(|d| d.monitors().item(0))
+                .and_then(|obj| obj.downcast::<gdk4::Monitor>().ok())
+                .map(|m| m.geometry().width())
+        })
+        .unwrap_or(1920)
+}
+
+/// Return the niri output name that contains the focused workspace.
+fn find_focused_output() -> Option<String> {
+    niri::list_workspaces()
+        .ok()?
+        .into_iter()
+        .find(|w| w.is_focused)?
+        .output
+}
+
+/// Look up a GDK monitor by its connector (output) name.
+fn find_monitor_for_output(output_name: &str) -> Option<gdk4::Monitor> {
+    let display = gdk4::Display::default()?;
+    let monitors = display.monitors();
+    for i in 0..monitors.n_items() {
+        let monitor = monitors.item(i)?.downcast::<gdk4::Monitor>().ok()?;
+        if monitor.connector().as_deref() == Some(output_name) {
+            return Some(monitor);
+        }
+    }
+    None
+}
+
+/// Find the GDK monitor that contains the focused niri workspace.
+fn find_focused_monitor() -> Option<gdk4::Monitor> {
+    find_monitor_for_output(&find_focused_output()?)
 }
 
 fn apply_scaled_css(css: &str) {
@@ -236,6 +268,7 @@ struct ActionContext {
     error_revealer: Revealer,
     config: Rc<ResolvedConfig>,
     keyboard_infos: Rc<HashMap<char, DynWorkspaceInfo>>,
+    monitor_width: i32,
 }
 
 #[expect(
@@ -565,6 +598,10 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
     let window = ApplicationWindow::builder().application(app).build();
     window.remove_css_class("background");
     window.init_layer_shell();
+
+    let focused_monitor = find_focused_monitor();
+    window.set_monitor(focused_monitor.as_ref());
+
     window.set_layer(Layer::Overlay);
     window.set_keyboard_mode(KeyboardMode::Exclusive);
     window.set_anchor(Edge::Top, true);
@@ -572,7 +609,28 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
     window.set_anchor(Edge::Left, true);
     window.set_anchor(Edge::Right, true);
 
-    populate_overlay(&window, config, mode);
+    let monitor_width = get_monitor_width(focused_monitor.as_ref());
+    populate_overlay(&window, config, mode, monitor_width);
+
+    // Poll for focused-output changes so the overlay follows the cursor.
+    let tracked_output = Rc::new(RefCell::new(find_focused_output()));
+    let track_window = window.clone();
+    glib::timeout_add_local(std::time::Duration::from_millis(150), move || {
+        if !track_window.is_visible() {
+            return glib::ControlFlow::Break;
+        }
+        let current = find_focused_output();
+        if current != *tracked_output.borrow() {
+            tracked_output.borrow_mut().clone_from(&current);
+            if let Some(ref output) = current {
+                if let Some(monitor) = find_monitor_for_output(output) {
+                    track_window.set_monitor(Some(&monitor));
+                }
+            }
+        }
+        glib::ControlFlow::Continue
+    });
+
     window.present();
 }
 
@@ -596,7 +654,12 @@ fn remove_app_controllers(window: &ApplicationWindow) {
     }
 }
 
-fn build_mode_tabs(window: &ApplicationWindow, config: &Rc<ResolvedConfig>, mode: Mode) -> GtkBox {
+fn build_mode_tabs(
+    window: &ApplicationWindow,
+    config: &Rc<ResolvedConfig>,
+    mode: Mode,
+    monitor_width: i32,
+) -> GtkBox {
     let mode_tabs = GtkBox::builder()
         .orientation(Orientation::Horizontal)
         .spacing(0)
@@ -620,7 +683,7 @@ fn build_mode_tabs(window: &ApplicationWindow, config: &Rc<ResolvedConfig>, mode
             let w = tab_window.clone();
             let c = tab_config.clone();
             glib::idle_add_local_once(move || {
-                populate_overlay(&w, &c, m);
+                populate_overlay(&w, &c, m, monitor_width);
             });
         });
         tab_label.add_controller(click);
@@ -690,7 +753,12 @@ fn build_hint_footer(metrics: &KeyboardMetrics, hints: &[&str]) -> GtkBox {
 }
 
 /// Build (or rebuild) the overlay content for `mode` inside an existing window.
-fn populate_overlay(window: &ApplicationWindow, config: &Rc<ResolvedConfig>, mode: Mode) {
+fn populate_overlay(
+    window: &ApplicationWindow,
+    config: &Rc<ResolvedConfig>,
+    mode: Mode,
+    monitor_width: i32,
+) {
     window.set_widget_name(mode.widget_name());
     remove_app_controllers(window);
 
@@ -711,7 +779,7 @@ fn populate_overlay(window: &ApplicationWindow, config: &Rc<ResolvedConfig>, mod
     let (error_label, error_revealer) = create_error_revealer();
 
     // Compute metrics from monitor size and apply scaled CSS
-    let metrics = KeyboardMetrics::from_monitor_width(get_monitor_width(), config.layout);
+    let metrics = KeyboardMetrics::from_monitor_width(monitor_width, config.layout);
     apply_scaled_css(&metrics.scaled_css_variables());
 
     // Build keyboard
@@ -724,6 +792,7 @@ fn populate_overlay(window: &ApplicationWindow, config: &Rc<ResolvedConfig>, mod
         error_revealer: error_revealer.clone(),
         config: config.clone(),
         keyboard_infos: infos.clone(),
+        monitor_width,
     };
 
     let keyboard = build_keyboard(&infos, mode, &ctx, &metrics);
@@ -735,7 +804,7 @@ fn populate_overlay(window: &ApplicationWindow, config: &Rc<ResolvedConfig>, mod
         &["press key to select", "Tab switch mode", "Escape close"],
     ));
     container.append(&error_revealer);
-    container.append(&build_mode_tabs(window, config, mode));
+    container.append(&build_mode_tabs(window, config, mode, monitor_width));
 
     wrap_in_backdrop(window, &container);
 
@@ -935,7 +1004,7 @@ fn show_template_picker(ch: char, ctx: &ActionContext) {
 
     let config = &ctx.config;
     let ws_name = Rc::new(crate::config::workspace_name(&config.workspace_prefix, ch));
-    let metrics = KeyboardMetrics::from_monitor_width(get_monitor_width(), config.layout);
+    let metrics = KeyboardMetrics::from_monitor_width(ctx.monitor_width, config.layout);
     apply_scaled_css(&metrics.scaled_css_variables());
 
     let container = GtkBox::builder()
@@ -985,6 +1054,7 @@ fn show_template_picker(ch: char, ctx: &ActionContext) {
         error_revealer: error_revealer.clone(),
         config: ctx.config.clone(),
         keyboard_infos: ctx.keyboard_infos.clone(),
+        monitor_width: ctx.monitor_width,
     };
 
     // Store options as Rc for sharing with handlers
@@ -1065,8 +1135,9 @@ fn attach_template_key_handler(
         if matches_close_keybind(key, modifier, &close_keybinds) {
             let window = key_ctx.window.clone();
             let cfg = config.clone();
+            let mw = key_ctx.monitor_width;
             glib::idle_add_local_once(move || {
-                populate_overlay(&window, &cfg, Mode::Normal);
+                populate_overlay(&window, &cfg, Mode::Normal, mw);
             });
             return Propagation::Stop;
         }
@@ -1133,7 +1204,7 @@ fn show_variable_input(
     remove_app_controllers(window);
 
     let config = &ctx.config;
-    let metrics = KeyboardMetrics::from_monitor_width(get_monitor_width(), config.layout);
+    let metrics = KeyboardMetrics::from_monitor_width(ctx.monitor_width, config.layout);
     apply_scaled_css(&metrics.scaled_css_variables());
 
     let container = GtkBox::builder()
@@ -1215,6 +1286,7 @@ fn show_variable_input(
         error_revealer,
         config: ctx.config.clone(),
         keyboard_infos: ctx.keyboard_infos.clone(),
+        monitor_width: ctx.monitor_width,
     };
 
     let var_names: Vec<String> = option.variables.iter().map(|v| v.name.clone()).collect();
@@ -1299,8 +1371,9 @@ fn attach_key_handler(ctx: &ActionContext, close_keybinds: &[crate::config::Keyb
             };
             let window = key_ctx.window.clone();
             let config = key_ctx.config.clone();
+            let mw = key_ctx.monitor_width;
             glib::idle_add_local_once(move || {
-                populate_overlay(&window, &config, next_mode);
+                populate_overlay(&window, &config, next_mode, mw);
             });
             return Propagation::Stop;
         }
