@@ -87,18 +87,23 @@ key = "d"                        # optional hotkey shortcut
 
 [template.dev.variables.path]
 name = "Project path"            # display label shown in the input form
-type = "text"                    # optional, defaults to "text"
+type = "text"                    # free-form input (default)
 
 [template.dev.variables.branch]
 name = "Git branch"
-type = "enum"                    # dropdown selection from predefined options
+type = "options"                 # dropdown from static list
 options = ["main", "develop", "staging"]
+
+[template.dev.variables.tool]
+name = "Build tool"
+type = "command"                 # dropdown from shell command output
+command = "ls ~/dev"             # each stdout line = one option
 
 [template.dev.variables.project]
 name = "Project"
-type = "enum"
-command = "ls ~/dev"             # shell command; each stdout line = one option
-options = ["fallback-project"]   # optional static fallback if command fails/empty
+type = "dir"                     # dropdown from directory scan
+dirs = ["~/dev", "~/work"]       # directories to scan for child dirs
+depth = 1                        # scan depth (default 1)
 
 [template.browser]
 programs = ["firefox", "slack"]
@@ -111,8 +116,12 @@ programs = ["firefox", "slack"]
 - Workspaces with per-key `[workspace.KEY].programs` skip the picker and create directly
 - Templates can define **variables** with `{{name}}` placeholders in program strings
 - Each variable has a required `name` (display label) and optional `type` (defaults to `"text"`)
-- Variable types: `"text"` (free-form input) or `"enum"` (dropdown with `options` list)
-- Enum variables support a `command` field — a shell command whose stdout lines become options at runtime (precedence: command output > static `options` > fall back to text input)
+- Variable types:
+  - `"text"` — free-form text input (default); outputs whatever the user types
+  - `"options"` — dropdown from a static list (`options` field); outputs the selected option string
+  - `"command"` — dropdown from shell command output (`command` field); outputs the selected stdout line
+  - `"dir"` — dropdown from directory scan (`dirs` field; hidden dirs excluded; `depth` controls scan depth, default 1); outputs the absolute path of the selected directory (e.g. `/home/user/dev/myproject`)
+- If the source resolves to zero options at runtime, the variable falls back to free-form text input
 - Templates with variables show an input form before creating the workspace
 - Templates without variables create immediately as before
 

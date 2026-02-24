@@ -13,7 +13,7 @@ use gtk4::{
 };
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
-use crate::config::{KeyboardLayout, ResolvedConfig, TemplateVariable};
+use crate::config::{KeyboardLayout, ResolvedConfig, Select, TemplateVariable, VariableType};
 use crate::niri;
 
 /// Modifier mask for matching keybinds (includes Super to detect compositor keybind hold).
@@ -1307,17 +1307,67 @@ fn run_options_command(cmd: &str) -> Vec<String> {
     }
 }
 
-/// Resolve the options for an enum variable.
-///
-/// Tries the dynamic `command` first; falls back to static `options`.
-fn resolve_enum_options(command: Option<&str>, static_options: &[String]) -> Vec<String> {
-    if let Some(cmd) = command {
-        let result = run_options_command(cmd);
-        if !result.is_empty() {
-            return result;
+/// Expand a leading `~/` in a path to the user's home directory.
+fn expand_tilde(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return format!("{}/{rest}", home.display());
         }
     }
-    static_options.to_vec()
+    path.to_string()
+}
+
+/// Recursively collect child directories up to `remaining` levels deep.
+///
+/// Skips hidden entries (names starting with `.`). Only directories are
+/// included. Results are pushed as absolute paths.
+fn collect_children(current: &std::path::Path, remaining: u32, results: &mut Vec<String>) {
+    if remaining == 0 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(current) else {
+        return;
+    };
+    let mut child_dirs: Vec<std::path::PathBuf> = entries
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_str().is_some_and(|n| !n.starts_with('.')))
+        .filter(|e| e.file_type().is_ok_and(|ft| ft.is_dir()))
+        .map(|e| e.path())
+        .collect();
+    child_dirs.sort();
+    for child in &child_dirs {
+        results.push(child.to_string_lossy().into_owned());
+        if remaining > 1 {
+            collect_children(child, remaining - 1, results);
+        }
+    }
+}
+
+/// Scan directories for child directories up to a given depth.
+///
+/// Expands `~/` prefixes, skips missing directories, and returns a sorted
+/// deduplicated list of absolute directory paths.
+fn scan_dir_options(dirs: &[String], depth: u32) -> Vec<String> {
+    let mut results = Vec::new();
+    for dir in dirs {
+        let expanded = expand_tilde(dir);
+        let root = std::path::Path::new(&expanded);
+        if root.is_dir() {
+            collect_children(root, depth, &mut results);
+        }
+    }
+    results.sort();
+    results.dedup();
+    results
+}
+
+/// Resolve the options for a select variable from its source.
+fn resolve_select_options(source: &Select) -> Vec<String> {
+    match source {
+        Select::Options(opts) => opts.clone(),
+        Select::Command(cmd) => run_options_command(cmd),
+        Select::Dirs { dirs, depth } => scan_dir_options(dirs, *depth),
+    }
 }
 
 #[expect(
@@ -1524,7 +1574,7 @@ fn show_variable_input(
             row.append(&label);
 
             let widget = match &var.var_type {
-                crate::config::VariableType::Text => {
+                VariableType::Text => {
                     let entry = Entry::builder()
                         .css_classes(["variable-entry"])
                         .placeholder_text(&var.name)
@@ -1532,8 +1582,8 @@ fn show_variable_input(
                     row.append(&entry);
                     VariableWidget::Text(entry)
                 }
-                crate::config::VariableType::Enum(static_options) => {
-                    let resolved = resolve_enum_options(var.command.as_deref(), static_options);
+                VariableType::Select(source) => {
+                    let resolved = resolve_select_options(source);
                     if resolved.is_empty() {
                         let entry = Entry::builder()
                             .css_classes(["variable-entry"])
@@ -2191,33 +2241,136 @@ mod tests {
         assert!(result.is_empty());
     }
 
-    // --- resolve_enum_options ---
+    // --- resolve_select_options ---
 
     #[test]
-    fn resolve_enum_options_no_command() {
-        let static_opts = vec!["a".to_string(), "b".to_string()];
-        let result = resolve_enum_options(None, &static_opts);
+    fn resolve_select_options_static() {
+        let source = Select::Options(vec!["a".to_string(), "b".to_string()]);
+        let result = resolve_select_options(&source);
         assert_eq!(result, vec!["a", "b"]);
     }
 
     #[test]
-    fn resolve_enum_options_command_succeeds() {
-        let static_opts = vec!["fallback".to_string()];
-        let result = resolve_enum_options(Some("printf 'x\ny'"), &static_opts);
+    fn resolve_select_options_command_succeeds() {
+        let source = Select::Command("printf 'x\ny'".to_string());
+        let result = resolve_select_options(&source);
         assert_eq!(result, vec!["x", "y"]);
     }
 
     #[test]
-    fn resolve_enum_options_command_empty_falls_back() {
-        let static_opts = vec!["fallback".to_string()];
-        let result = resolve_enum_options(Some("printf ''"), &static_opts);
-        assert_eq!(result, vec!["fallback"]);
+    fn resolve_select_options_command_fails() {
+        let source = Select::Command("nonexistent_cmd_12345".to_string());
+        let result = resolve_select_options(&source);
+        assert!(result.is_empty());
+    }
+
+    // --- expand_tilde ---
+
+    #[test]
+    fn expand_tilde_with_home() {
+        let result = expand_tilde("~/dev");
+        assert!(!result.starts_with('~'));
+        assert!(result.ends_with("/dev"));
     }
 
     #[test]
-    fn resolve_enum_options_command_fails_falls_back() {
-        let static_opts = vec!["fallback".to_string()];
-        let result = resolve_enum_options(Some("nonexistent_cmd_12345"), &static_opts);
-        assert_eq!(result, vec!["fallback"]);
+    fn expand_tilde_no_tilde() {
+        assert_eq!(expand_tilde("/tmp/foo"), "/tmp/foo");
+    }
+
+    #[test]
+    fn expand_tilde_only_tilde_slash() {
+        let result = expand_tilde("~/");
+        assert!(!result.starts_with('~'));
+    }
+
+    // --- scan_dir_options ---
+
+    /// RAII wrapper for a temporary directory that cleans up on drop.
+    struct TempDir(std::path::PathBuf);
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(name);
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+        fn path_str(&self) -> String {
+            self.0.to_string_lossy().into_owned()
+        }
+        fn mkdir(&self, sub: &str) {
+            std::fs::create_dir_all(self.0.join(sub)).unwrap();
+        }
+        fn touch(&self, sub: &str) {
+            std::fs::write(self.0.join(sub), "").unwrap();
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn scan_dir_options_missing_dir() {
+        let result = scan_dir_options(&["/nonexistent_dir_12345".to_string()], 1);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn scan_dir_options_basic() {
+        let tmp = TempDir::new("ndw_test_scan_basic");
+        tmp.mkdir("alpha");
+        tmp.mkdir("beta");
+        tmp.mkdir(".hidden");
+        tmp.touch("file.txt");
+
+        let result = scan_dir_options(&[tmp.path_str()], 1);
+        let base = tmp.path_str();
+        assert_eq!(
+            result,
+            vec![format!("{base}/alpha"), format!("{base}/beta")]
+        );
+    }
+
+    #[test]
+    fn scan_dir_options_depth_2() {
+        let tmp = TempDir::new("ndw_test_scan_depth2");
+        tmp.mkdir("a/child");
+        tmp.mkdir("b");
+
+        let result = scan_dir_options(&[tmp.path_str()], 2);
+        let base = tmp.path_str();
+        assert_eq!(
+            result,
+            vec![
+                format!("{base}/a"),
+                format!("{base}/a/child"),
+                format!("{base}/b"),
+            ]
+        );
+    }
+
+    #[test]
+    fn scan_dir_options_multiple_dirs() {
+        let tmp1 = TempDir::new("ndw_test_multi1");
+        let tmp2 = TempDir::new("ndw_test_multi2");
+        tmp1.mkdir("shared");
+        tmp1.mkdir("only1");
+        tmp2.mkdir("shared");
+        tmp2.mkdir("only2");
+
+        let result = scan_dir_options(&[tmp1.path_str(), tmp2.path_str()], 1);
+        let b1 = tmp1.path_str();
+        let b2 = tmp2.path_str();
+        assert_eq!(
+            result,
+            vec![
+                format!("{b1}/only1"),
+                format!("{b1}/shared"),
+                format!("{b2}/only2"),
+                format!("{b2}/shared"),
+            ]
+        );
     }
 }
