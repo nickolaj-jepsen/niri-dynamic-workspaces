@@ -615,6 +615,7 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
     // Poll for focused-output changes so the overlay follows the cursor.
     let tracked_output = Rc::new(RefCell::new(find_focused_output()));
     let track_window = window.clone();
+    let track_config = config.clone();
     glib::timeout_add_local(std::time::Duration::from_millis(150), move || {
         if !track_window.is_visible() {
             return glib::ControlFlow::Break;
@@ -624,7 +625,11 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
             tracked_output.borrow_mut().clone_from(&current);
             if let Some(ref output) = current {
                 if let Some(monitor) = find_monitor_for_output(output) {
+                    let new_width = get_monitor_width(Some(&monitor));
                     track_window.set_monitor(Some(&monitor));
+                    let mode = Mode::from_window(&track_window.clone().upcast())
+                        .unwrap_or(Mode::Normal);
+                    populate_overlay(&track_window, &track_config, mode, new_width);
                 }
             }
         }
