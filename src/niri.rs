@@ -37,6 +37,27 @@ fn find_workspace_by_name<'a>(workspaces: &'a [Workspace], name: &str) -> Option
     workspaces.iter().find(|w| w.name.as_deref() == Some(name))
 }
 
+/// Find a workspace by prefix and key character.
+///
+/// Matches workspaces whose name starts with `{prefix}{ch}` followed by end-of-string
+/// or a space (for titled workspaces like `"dyn-a My Project"`).
+fn find_workspace_by_char<'a>(
+    workspaces: &'a [Workspace],
+    prefix: &str,
+    ch: char,
+) -> Option<&'a Workspace> {
+    workspaces.iter().find(|w| {
+        w.name.as_ref().is_some_and(|n| {
+            n.strip_prefix(prefix).and_then(|rest| rest.chars().next()) == Some(ch)
+        })
+    })
+}
+
+/// Get the full name of an existing workspace matched by prefix+char.
+fn find_workspace_name(workspaces: &[Workspace], prefix: &str, ch: char) -> Option<String> {
+    find_workspace_by_char(workspaces, prefix, ch).and_then(|w| w.name.clone())
+}
+
 pub fn list_windows() -> anyhow::Result<Vec<Window>> {
     match send_request(Request::Windows)? {
         Response::Windows(windows) => Ok(windows),
@@ -46,13 +67,15 @@ pub fn list_windows() -> anyhow::Result<Vec<Window>> {
 
 /// Focus an existing workspace or create a new one.
 ///
+/// Finds existing workspaces by prefix+char (to handle titled names).
+/// When creating, uses `full_name` for the workspace name.
 /// Returns `true` if a new workspace was created, `false` if an existing one was focused.
-pub fn focus_or_create_workspace(name: &str) -> anyhow::Result<bool> {
+pub fn focus_or_create_workspace(prefix: &str, ch: char, full_name: &str) -> anyhow::Result<bool> {
     let workspaces = list_workspaces()?;
 
-    if find_workspace_by_name(&workspaces, name).is_some() {
+    if let Some(existing_name) = find_workspace_name(&workspaces, prefix, ch) {
         send_action(Action::FocusWorkspace {
-            reference: WorkspaceReferenceArg::Name(name.to_string()),
+            reference: WorkspaceReferenceArg::Name(existing_name),
         })?;
         return Ok(false);
     }
@@ -74,7 +97,7 @@ pub fn focus_or_create_workspace(name: &str) -> anyhow::Result<bool> {
     })?;
 
     send_action(Action::SetWorkspaceName {
-        name: name.to_string(),
+        name: full_name.to_string(),
         workspace: None,
     })?;
 
@@ -88,12 +111,14 @@ pub fn focus_or_create_workspace(name: &str) -> anyhow::Result<bool> {
 /// workspace was made, and `reorder_request` is present when multiple programs
 /// were spawned.
 pub fn switch_workspace(
-    name: &str,
+    prefix: &str,
+    ch: char,
+    full_name: &str,
     programs: &[String],
 ) -> anyhow::Result<(bool, Option<ReorderRequest>)> {
-    let created = focus_or_create_workspace(name)?;
+    let created = focus_or_create_workspace(prefix, ch, full_name)?;
     if created {
-        return Ok((true, spawn_workspace_programs(name, programs)?));
+        return Ok((true, spawn_workspace_programs(full_name, programs)?));
     }
     Ok((false, None))
 }
@@ -286,11 +311,13 @@ fn reorder_workspace_columns_inner(request: &ReorderRequest) -> anyhow::Result<(
     Ok(())
 }
 
-/// Move the focused window to a named workspace, creating it if it doesn't exist.
-pub fn move_window_to_workspace(name: &str) -> anyhow::Result<()> {
+/// Move the focused window to a workspace, creating it if it doesn't exist.
+pub fn move_window_to_workspace(prefix: &str, ch: char, full_name: &str) -> anyhow::Result<()> {
     let workspaces = list_workspaces()?;
 
-    if find_workspace_by_name(&workspaces, name).is_none() {
+    let ws_name = if let Some(existing) = find_workspace_name(&workspaces, prefix, ch) {
+        existing
+    } else {
         let original_ws_id = workspaces
             .iter()
             .find(|w| w.is_focused)
@@ -298,17 +325,19 @@ pub fn move_window_to_workspace(name: &str) -> anyhow::Result<()> {
             .ok_or_else(|| anyhow::anyhow!("no focused workspace found"))?;
 
         // Create the target workspace (this switches focus to it)
-        focus_or_create_workspace(name)?;
+        focus_or_create_workspace(prefix, ch, full_name)?;
 
         // Switch back so the focused window is the one the user intended to move
         send_action(Action::FocusWorkspace {
             reference: WorkspaceReferenceArg::Id(original_ws_id),
         })?;
-    }
+
+        full_name.to_string()
+    };
 
     send_action(Action::MoveWindowToWorkspace {
         window_id: None,
-        reference: WorkspaceReferenceArg::Name(name.to_string()),
+        reference: WorkspaceReferenceArg::Name(ws_name),
         focus: true,
     })
 }
@@ -478,11 +507,15 @@ pub fn run_hooks(commands: &[String], env: &[(String, String)]) {
         .ok();
 }
 
-pub fn delete_workspace(name: &str) -> anyhow::Result<()> {
+pub fn delete_workspace(prefix: &str, ch: char) -> anyhow::Result<()> {
     let workspaces = list_workspaces()?;
-    let ws = find_workspace_by_name(&workspaces, name)
-        .ok_or_else(|| anyhow::anyhow!("workspace '{name}' not found"))?;
+    let ws = find_workspace_by_char(&workspaces, prefix, ch)
+        .ok_or_else(|| anyhow::anyhow!("workspace '{prefix}{ch}' not found"))?;
     let ws_id = ws.id;
+    let ws_name = ws
+        .name
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("workspace has no name"))?;
 
     // Close all windows on this workspace
     let windows = list_windows()?;
@@ -492,7 +525,7 @@ pub fn delete_workspace(name: &str) -> anyhow::Result<()> {
 
     // Unset the workspace name so niri cleans it up
     send_action(Action::UnsetWorkspaceName {
-        reference: Some(WorkspaceReferenceArg::Name(name.to_string())),
+        reference: Some(WorkspaceReferenceArg::Name(ws_name)),
     })
 }
 
@@ -568,6 +601,31 @@ mod tests {
 
         // None-named workspaces are never matched
         let ws = find_workspace_by_name(&workspaces, "");
+        assert!(ws.is_none());
+    }
+
+    #[test]
+    fn find_workspace_by_char_basic() {
+        let workspaces = vec![
+            test_workspace(1, Some("dyn-a"), false),
+            test_workspace(2, Some("dyn-b My Project"), true),
+            test_workspace(3, None, false),
+        ];
+
+        // Bare name
+        let ws = find_workspace_by_char(&workspaces, "dyn-", 'a');
+        assert_eq!(ws.map(|w| w.id), Some(1));
+
+        // Titled name
+        let ws = find_workspace_by_char(&workspaces, "dyn-", 'b');
+        assert_eq!(ws.map(|w| w.id), Some(2));
+
+        // Not found
+        let ws = find_workspace_by_char(&workspaces, "dyn-", 'z');
+        assert!(ws.is_none());
+
+        // None-named workspaces never match
+        let ws = find_workspace_by_char(&workspaces, "dyn-", 'c');
         assert!(ws.is_none());
     }
 }

@@ -56,13 +56,14 @@ fn handle_direct_action(cli: &Cli, mode: ui::Mode, key: &str) -> i32 {
     };
 
     let cfg = config::load_config(cli.config.as_deref());
-    let ws_name = config::workspace_name(&cfg.workspace_prefix, ch);
+    let prefix = &cfg.workspace_prefix;
+    let ws_name = config::workspace_name(prefix, ch);
     let empty_vars = std::collections::HashMap::new();
 
     let result = match mode {
         ui::Mode::Normal => {
             let programs = cfg.programs_for(ch);
-            niri::switch_workspace(&ws_name, programs).map(|(created, req)| {
+            niri::switch_workspace(prefix, ch, &ws_name, programs).map(|(created, req)| {
                 if let Some(r) = req {
                     niri::reorder_workspace_columns(&r);
                 }
@@ -74,14 +75,14 @@ fn handle_direct_action(cli: &Cli, mode: ui::Mode, key: &str) -> i32 {
             })
         }
         ui::Mode::Delete => {
-            let result = niri::delete_workspace(&ws_name);
+            let result = niri::delete_workspace(prefix, ch);
             if result.is_ok() {
                 let env = config::build_hook_env(&ws_name, ch, None, &empty_vars);
                 niri::run_hooks(&cfg.hooks.on_delete, &env);
             }
             result
         }
-        ui::Mode::MoveWindow => niri::move_window_to_workspace(&ws_name),
+        ui::Mode::MoveWindow => niri::move_window_to_workspace(prefix, ch, &ws_name),
     };
 
     if let Err(e) = result {

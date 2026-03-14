@@ -169,16 +169,6 @@ fn display_key_char(ch: char) -> String {
     }
 }
 
-fn clean_app_id(app_id: &str) -> String {
-    let segment = app_id.rsplit('.').next().unwrap_or(app_id);
-    let name = segment.replace(['-', '_'], " ");
-    let mut chars = name.chars();
-    match chars.next() {
-        Some(c) => c.to_uppercase().to_string() + chars.as_str(),
-        None => String::new(),
-    }
-}
-
 // --- Modes ---
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -285,29 +275,10 @@ struct DynWorkspaceInfo {
     is_uncreated: bool,
     is_urgent: bool,
     name: Option<String>,
-    window_count: usize,
-    app_names: Vec<String>,
-    configured_programs: Vec<String>,
+    ws_name: Option<String>,
 }
 
 impl DynWorkspaceInfo {
-    fn status_text(&self) -> Option<String> {
-        if self.is_focused {
-            Some("focused".to_string())
-        } else if self.is_active {
-            Some("active".to_string())
-        } else if !self.is_uncreated && self.window_count == 0 {
-            Some("empty".to_string())
-        } else if self.window_count > 0 {
-            Some(match self.window_count {
-                1 => "1 win".to_string(),
-                n => format!("{n} win"),
-            })
-        } else {
-            None
-        }
-    }
-
     fn uncreated(ch: char) -> Self {
         Self {
             char_id: ch,
@@ -316,9 +287,7 @@ impl DynWorkspaceInfo {
             is_uncreated: true,
             is_urgent: false,
             name: None,
-            window_count: 0,
-            app_names: Vec::new(),
-            configured_programs: Vec::new(),
+            ws_name: None,
         }
     }
 }
@@ -350,30 +319,14 @@ fn build_dyn_workspace_infos(
 ) -> Vec<DynWorkspaceInfo> {
     let prefix = &config.workspace_prefix;
 
-    // Count windows per workspace, track urgency, and collect app names
-    let mut window_counts: HashMap<u64, usize> = HashMap::new();
+    // Track urgency per workspace
     let mut urgent_ws_ids: HashSet<u64> = HashSet::new();
-    let mut ws_app_names: HashMap<u64, Vec<String>> = HashMap::new();
     for w in windows {
         if let Some(ws_id) = w.workspace_id {
-            *window_counts.entry(ws_id).or_default() += 1;
             if w.is_urgent {
                 urgent_ws_ids.insert(ws_id);
             }
-            if let Some(ref app_id) = w.app_id {
-                if !app_id.is_empty() {
-                    ws_app_names
-                        .entry(ws_id)
-                        .or_default()
-                        .push(clean_app_id(app_id));
-                }
-            }
         }
-    }
-    // Sort and deduplicate app names per workspace
-    for names in ws_app_names.values_mut() {
-        names.sort();
-        names.dedup();
     }
 
     // Find the globally focused workspace
@@ -395,10 +348,12 @@ fn build_dyn_workspace_infos(
             let is_focused = Some(ws.id) == focused_ws_id;
             let is_active = !is_focused && ws.is_active;
 
-            let count = window_counts.get(&ws.id).copied().unwrap_or(0);
-            let name = config.workspace_names.get(&ch).cloned();
+            let name = config
+                .workspace_names
+                .get(&ch)
+                .cloned()
+                .or_else(|| crate::config::extract_workspace_title(ws_name, prefix));
             let is_urgent = urgent_ws_ids.contains(&ws.id);
-            let app_names = ws_app_names.remove(&ws.id).unwrap_or_default();
 
             Some(DynWorkspaceInfo {
                 char_id: ch,
@@ -407,9 +362,7 @@ fn build_dyn_workspace_infos(
                 is_uncreated: false,
                 is_urgent,
                 name,
-                window_count: count,
-                app_names,
-                configured_programs: Vec::new(),
+                ws_name: Some(ws_name.clone()),
             })
         })
         .collect();
@@ -428,11 +381,6 @@ fn build_dyn_workspace_infos(
         }
         let mut info = DynWorkspaceInfo::uncreated(ch);
         info.name = config.workspace_names.get(&ch).cloned();
-        info.configured_programs = config
-            .workspace_programs
-            .get(&ch)
-            .cloned()
-            .unwrap_or_else(|| config.default_programs.clone());
         infos.push(info);
     }
 
@@ -510,7 +458,7 @@ fn build_key_widget(
         .build();
     inner.append(&char_label);
 
-    // Workspace name (if configured)
+    // Workspace name (if configured or extracted from title)
     if let Some(ref name) = info.name {
         let name_label = Label::builder()
             .label(name)
@@ -519,33 +467,6 @@ fn build_key_widget(
             .max_width_chars(8)
             .build();
         inner.append(&name_label);
-    }
-
-    // App names (live workspaces) or configured programs (uncreated)
-    let apps_text = if !info.app_names.is_empty() {
-        info.app_names.join(", ")
-    } else if info.is_uncreated && !info.configured_programs.is_empty() {
-        info.configured_programs.join(", ")
-    } else {
-        String::new()
-    };
-    if !apps_text.is_empty() {
-        let apps_label = Label::builder()
-            .label(&apps_text)
-            .css_classes(["key-apps"])
-            .ellipsize(gtk4::pango::EllipsizeMode::End)
-            .max_width_chars(10)
-            .build();
-        inner.append(&apps_label);
-    }
-
-    // Status line
-    if let Some(ref text) = info.status_text() {
-        let status_label = Label::builder()
-            .label(text.as_str())
-            .css_classes(["key-status"])
-            .build();
-        inner.append(&status_label);
     }
 
     key_box.append(&inner);
@@ -828,27 +749,28 @@ fn switch_and_close(
     ctx: &ActionContext,
     hook_info: &HookInfo,
 ) {
-    let result = niri::switch_workspace(ws_name, programs).map(|(created, req)| {
-        if let Some(r) = req {
-            std::thread::Builder::new()
-                .name("reorder".into())
-                .spawn(move || niri::reorder_workspace_columns(&r))
-                .ok();
-        }
-        if created {
-            let hooks = crate::config::collect_create_hooks(
-                &ctx.config,
-                hook_info.template_name.as_deref(),
-            );
-            let env = crate::config::build_hook_env(
-                ws_name,
-                ws_key,
-                hook_info.template_name.as_deref(),
-                &hook_info.variables,
-            );
-            niri::run_hooks(&hooks, &env);
-        }
-    });
+    let result = niri::switch_workspace(&ctx.config.workspace_prefix, ws_key, ws_name, programs)
+        .map(|(created, req)| {
+            if let Some(r) = req {
+                std::thread::Builder::new()
+                    .name("reorder".into())
+                    .spawn(move || niri::reorder_workspace_columns(&r))
+                    .ok();
+            }
+            if created {
+                let hooks = crate::config::collect_create_hooks(
+                    &ctx.config,
+                    hook_info.template_name.as_deref(),
+                );
+                let env = crate::config::build_hook_env(
+                    ws_name,
+                    ws_key,
+                    hook_info.template_name.as_deref(),
+                    &hook_info.variables,
+                );
+                niri::run_hooks(&hooks, &env);
+            }
+        });
     if let Err(e) = result {
         show_error(ctx, &format!("Failed: {e:#}"));
         return;
@@ -857,14 +779,15 @@ fn switch_and_close(
 }
 
 fn dispatch_action(ch: char, ctx: &ActionContext) {
-    let ws_name = crate::config::workspace_name(&ctx.config.workspace_prefix, ch);
+    let prefix = &ctx.config.workspace_prefix;
+    let info = ctx.keyboard_infos.get(&ch);
+    let ws_name = info
+        .and_then(|i| i.ws_name.clone())
+        .unwrap_or_else(|| crate::config::workspace_name(prefix, ch));
 
     let result = match ctx.mode {
         Mode::Normal => {
-            let is_uncreated = ctx
-                .keyboard_infos
-                .get(&ch)
-                .is_none_or(|info| info.is_uncreated);
+            let is_uncreated = info.is_none_or(|i| i.is_uncreated);
             if is_uncreated && ctx.config.should_show_templates(ch) {
                 show_template_picker(ch, ctx);
                 return;
@@ -874,14 +797,14 @@ fn dispatch_action(ch: char, ctx: &ActionContext) {
             return;
         }
         Mode::Delete => {
-            let result = niri::delete_workspace(&ws_name);
+            let result = niri::delete_workspace(prefix, ch);
             if result.is_ok() {
                 let env = crate::config::build_hook_env(&ws_name, ch, None, &HashMap::new());
                 niri::run_hooks(&ctx.config.hooks.on_delete, &env);
             }
             result
         }
-        Mode::MoveWindow => niri::move_window_to_workspace(&ws_name),
+        Mode::MoveWindow => niri::move_window_to_workspace(prefix, ch, &ws_name),
     };
 
     if let Err(e) = result {
@@ -899,6 +822,7 @@ struct TemplateOption {
     name: String,
     programs: Vec<String>,
     variables: Vec<TemplateVariable>,
+    title: Option<String>,
 }
 
 fn build_template_options(config: &ResolvedConfig) -> Vec<TemplateOption> {
@@ -910,6 +834,7 @@ fn build_template_options(config: &ResolvedConfig) -> Vec<TemplateOption> {
         name: "Empty".to_string(),
         programs: config.default_programs.clone(),
         variables: Vec::new(),
+        title: None,
     });
 
     for tmpl in &config.templates {
@@ -918,6 +843,7 @@ fn build_template_options(config: &ResolvedConfig) -> Vec<TemplateOption> {
             name: tmpl.name.clone(),
             programs: tmpl.programs.clone(),
             variables: tmpl.variables.clone(),
+            title: tmpl.title.clone(),
         });
     }
 
@@ -989,7 +915,7 @@ fn update_selection(option_widgets: &[GtkBox], selected: usize) {
     }
 }
 
-fn select_template_option(ws_name: &str, option: &TemplateOption, ch: char, ctx: &ActionContext) {
+fn select_template_option(option: &TemplateOption, ch: char, ctx: &ActionContext) {
     let template_name = if option.name == "Empty" {
         None
     } else {
@@ -1000,9 +926,15 @@ fn select_template_option(ws_name: &str, option: &TemplateOption, ch: char, ctx:
             template_name,
             variables: HashMap::new(),
         };
-        switch_and_close(ws_name, ch, &option.programs, ctx, &hook_info);
+        // No variables, so title stays as-is (no substitution needed)
+        let full_name = crate::config::workspace_name_with_title(
+            &ctx.config.workspace_prefix,
+            ch,
+            option.title.as_deref(),
+        );
+        switch_and_close(&full_name, ch, &option.programs, ctx, &hook_info);
     } else {
-        show_variable_input(ws_name, option, ch, ctx, template_name);
+        show_variable_input(option, ch, ctx, template_name);
     }
 }
 
@@ -1011,7 +943,6 @@ fn show_template_picker(ch: char, ctx: &ActionContext) {
     remove_app_controllers(window);
 
     let config = &ctx.config;
-    let ws_name = Rc::new(crate::config::workspace_name(&config.workspace_prefix, ch));
     let metrics = KeyboardMetrics::from_monitor_width(ctx.monitor_width, config.layout);
     apply_scaled_css(&metrics.scaled_css_variables());
 
@@ -1075,10 +1006,9 @@ fn show_template_picker(ch: char, ctx: &ActionContext) {
         // Click handler
         let click_ctx = picker_ctx.clone();
         let click_options = options.clone();
-        let click_ws = ws_name.clone();
         let click = GestureClick::new();
         click.connect_released(move |_, _, _, _| {
-            select_template_option(&click_ws, &click_options[i], ch, &click_ctx);
+            select_template_option(&click_options[i], ch, &click_ctx);
         });
         widget.add_controller(click);
     }
@@ -1109,7 +1039,6 @@ fn show_template_picker(ch: char, ctx: &ActionContext) {
 
     // Key handler
     attach_template_key_handler(
-        &ws_name,
         &picker_ctx,
         &options,
         &option_widgets_rc,
@@ -1121,7 +1050,6 @@ fn show_template_picker(ch: char, ctx: &ActionContext) {
 }
 
 fn attach_template_key_handler(
-    ws_name: &Rc<String>,
     ctx: &ActionContext,
     options: &Rc<Vec<TemplateOption>>,
     option_widgets: &Rc<Vec<GtkBox>>,
@@ -1135,7 +1063,6 @@ fn attach_template_key_handler(
     let widgets = option_widgets.clone();
     let sel = selected_idx.clone();
     let config = ctx.config.clone();
-    let ws_name = ws_name.clone();
 
     let key_controller = new_key_controller();
     key_controller.connect_key_pressed(move |_, key, _, modifier| {
@@ -1177,7 +1104,7 @@ fn attach_template_key_handler(
         // Enter → confirm selected
         if key == gdk4::Key::Return || key == gdk4::Key::KP_Enter {
             let idx = sel.get();
-            select_template_option(&ws_name, &options[idx], ws_char, &key_ctx);
+            select_template_option(&options[idx], ws_char, &key_ctx);
             return Propagation::Stop;
         }
 
@@ -1187,7 +1114,7 @@ fn attach_template_key_handler(
             if (modifier & ACTION_MODS).is_empty() {
                 for opt in options.iter() {
                     if opt.key == Some(pressed) {
-                        select_template_option(&ws_name, opt, ws_char, &key_ctx);
+                        select_template_option(opt, ws_char, &key_ctx);
                         return Propagation::Stop;
                     }
                 }
@@ -1513,8 +1440,11 @@ fn build_fuzzy_select(
     })
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "variable input form with widget construction and layout"
+)]
 fn show_variable_input(
-    ws_name: &str,
     option: &TemplateOption,
     ch: char,
     ctx: &ActionContext,
@@ -1629,31 +1559,39 @@ fn show_variable_input(
 
     let var_names: Vec<String> = option.variables.iter().map(|v| v.name.clone()).collect();
     let programs = option.programs.clone();
+    let template_title = option.title.clone();
+    let template_variables = option.variables.clone();
 
     attach_variable_input_key_handler(
-        ws_name,
         &var_ctx,
         ch,
         &widgets,
         &var_names,
         &programs,
         template_name,
+        template_title,
+        template_variables,
     );
     attach_close_on_backdrop_click(window, &container);
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "template context requires passing title and variables for workspace naming"
+)]
 fn attach_variable_input_key_handler(
-    ws_name: &str,
     ctx: &ActionContext,
     ch: char,
     widgets: &[VariableWidget],
     var_names: &[String],
     programs: &[String],
     template_name: Option<String>,
+    template_title: Option<String>,
+    template_variables: Vec<TemplateVariable>,
 ) {
     let key_ctx = ctx.clone();
     let close_keybinds = ctx.config.close_keybinds.clone();
-    let ws_name = ws_name.to_string();
+    let prefix = ctx.config.workspace_prefix.clone();
     let widgets: Vec<VariableWidget> = widgets.to_vec();
     let var_names: Vec<String> = var_names.to_vec();
     let programs: Vec<String> = programs.to_vec();
@@ -1676,11 +1614,17 @@ fn attach_variable_input_key_handler(
                 values.insert(name.clone(), widget.value());
             }
             let substituted = crate::config::substitute_variables(&programs, &values);
+            let title = crate::config::resolve_workspace_title(
+                template_title.as_deref(),
+                &template_variables,
+                &values,
+            );
+            let full_name = crate::config::workspace_name_with_title(&prefix, ch, title.as_deref());
             let hook_info = HookInfo {
                 template_name: template_name.clone(),
                 variables: values,
             };
-            switch_and_close(&ws_name, ch, &substituted, &key_ctx, &hook_info);
+            switch_and_close(&full_name, ch, &substituted, &key_ctx, &hook_info);
             return Propagation::Stop;
         }
 
@@ -1794,14 +1738,6 @@ mod tests {
         // "dev" (exact) should rank above "develop" (prefix)
         assert_eq!(result[0], 1);
         assert!(result.contains(&2));
-    }
-
-    #[test]
-    fn clean_app_id_variants() {
-        assert_eq!(clean_app_id("org.gnome.Terminal"), "Terminal");
-        assert_eq!(clean_app_id("firefox"), "Firefox");
-        assert_eq!(clean_app_id("com.some.app-name"), "App name");
-        assert_eq!(clean_app_id(""), "");
     }
 
     #[test]
@@ -2007,12 +1943,40 @@ mod tests {
         // Sorted by char_id
         assert_eq!(infos[0].char_id, 'a');
         assert_eq!(infos[1].char_id, 'b');
-        // 'a' has 2 windows, 'b' has 1
-        assert_eq!(infos[0].window_count, 2);
-        assert_eq!(infos[1].window_count, 1);
-        // app_names are cleaned and sorted
-        assert_eq!(infos[0].app_names, vec!["Firefox", "Kitty"]);
-        assert_eq!(infos[1].app_names, vec!["Slack"]);
+    }
+
+    #[test]
+    fn build_dyn_workspace_infos_titled_workspace() {
+        let workspaces = vec![
+            test_workspace(10, Some("dyn-a My Project"), true),
+            test_workspace(20, Some("dyn-b"), false),
+        ];
+        let windows = vec![];
+        let config = default_test_config();
+
+        let infos = build_dyn_workspace_infos(&workspaces, &windows, &config);
+
+        assert_eq!(infos.len(), 2);
+        assert_eq!(infos[0].char_id, 'a');
+        assert_eq!(infos[0].name.as_deref(), Some("My Project"));
+        assert_eq!(infos[0].ws_name.as_deref(), Some("dyn-a My Project"));
+        // 'b' has no title, no configured name
+        assert_eq!(infos[1].char_id, 'b');
+        assert!(infos[1].name.is_none());
+    }
+
+    #[test]
+    fn build_dyn_workspace_infos_configured_name_overrides_title() {
+        let workspaces = vec![test_workspace(10, Some("dyn-a Some Title"), true)];
+        let windows = vec![];
+        let mut config = default_test_config();
+        config.workspace_names.insert('a', "Configured".to_string());
+
+        let infos = build_dyn_workspace_infos(&workspaces, &windows, &config);
+
+        assert_eq!(infos.len(), 1);
+        // Configured name takes precedence over title from ws_name
+        assert_eq!(infos[0].name.as_deref(), Some("Configured"));
     }
 
     #[test]
@@ -2031,12 +1995,9 @@ mod tests {
         // 'a' is live, 'b' is uncreated
         assert!(!infos[0].is_uncreated);
         assert_eq!(infos[0].char_id, 'a');
-        assert!(infos[0].app_names.is_empty());
         assert!(infos[1].is_uncreated);
         assert_eq!(infos[1].char_id, 'b');
         assert_eq!(infos[1].name.as_deref(), Some("Browser"));
-        assert_eq!(infos[1].configured_programs, vec!["firefox"]);
-        assert!(infos[1].app_names.is_empty());
     }
 
     #[test]
@@ -2099,69 +2060,6 @@ mod tests {
         assert!(!infos[2].is_active);
     }
 
-    #[test]
-    fn build_dyn_workspace_infos_deduplicates_app_names() {
-        let workspaces = vec![test_workspace(10, Some("dyn-a"), true)];
-        let windows = vec![
-            test_window(1, 10, "firefox"),
-            test_window(2, 10, "org.mozilla.firefox"),
-            test_window(3, 10, "firefox"),
-        ];
-        let config = default_test_config();
-
-        let infos = build_dyn_workspace_infos(&workspaces, &windows, &config);
-
-        assert_eq!(infos.len(), 1);
-        assert_eq!(infos[0].app_names, vec!["Firefox"]);
-    }
-
-    #[test]
-    fn build_dyn_workspace_infos_handles_no_app_id() {
-        let workspaces = vec![test_workspace(10, Some("dyn-a"), true)];
-        let mut window_no_app = test_window(1, 10, "");
-        window_no_app.app_id = None;
-        let windows = vec![window_no_app, test_window(2, 10, "kitty")];
-        let config = default_test_config();
-
-        let infos = build_dyn_workspace_infos(&workspaces, &windows, &config);
-
-        assert_eq!(infos.len(), 1);
-        assert_eq!(infos[0].window_count, 2);
-        assert_eq!(infos[0].app_names, vec!["Kitty"]);
-    }
-
-    // --- status_text ---
-
-    #[test]
-    fn status_text_variants() {
-        let mut info = DynWorkspaceInfo::uncreated('a');
-
-        // Uncreated with no windows → None
-        assert_eq!(info.status_text(), None);
-
-        // Focused
-        info.is_focused = true;
-        info.is_uncreated = false;
-        assert_eq!(info.status_text().as_deref(), Some("focused"));
-
-        // Active (not focused)
-        info.is_focused = false;
-        info.is_active = true;
-        assert_eq!(info.status_text().as_deref(), Some("active"));
-
-        // Empty (live, no windows)
-        info.is_active = false;
-        assert_eq!(info.status_text().as_deref(), Some("empty"));
-
-        // 1 window
-        info.window_count = 1;
-        assert_eq!(info.status_text().as_deref(), Some("1 win"));
-
-        // Multiple windows
-        info.window_count = 5;
-        assert_eq!(info.status_text().as_deref(), Some("5 win"));
-    }
-
     // --- build_template_options ---
 
     #[test]
@@ -2177,6 +2075,7 @@ mod tests {
                 key: Some('d'),
                 variables: Vec::new(),
                 on_create: Vec::new(),
+                title: None,
             },
             Template {
                 name: "browser".to_string(),
@@ -2184,6 +2083,7 @@ mod tests {
                 key: Some('2'),
                 variables: Vec::new(),
                 on_create: Vec::new(),
+                title: None,
             },
         ];
 
@@ -2212,6 +2112,7 @@ mod tests {
             key: Some('2'),
             variables: Vec::new(),
             on_create: Vec::new(),
+            title: None,
         }];
 
         let opts = build_template_options(&config);

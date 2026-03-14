@@ -84,6 +84,7 @@ Templates let you choose from predefined program sets when creating a new worksp
 [template.dev]
 programs = ["kitty", "code {{path}}"]
 key = "d"                        # optional hotkey shortcut
+title = "{{path}}"               # optional workspace title (see below)
 
 [template.dev.variables.path]
 name = "Project path"            # display label shown in the input form
@@ -124,6 +125,11 @@ programs = ["firefox", "slack"]
 - If the source resolves to zero options at runtime, the variable falls back to free-form text input
 - Templates with variables show an input form before creating the workspace
 - Templates without variables create immediately as before
+- The optional `title` field sets a display name on the workspace (shown on the key card):
+  - Supports `{{var}}` substitution from template variables
+  - If omitted and the template has variables, the first variable's value is used automatically
+  - For `dir`-type variables, the basename is extracted (e.g. `/home/user/dev/myproject` → `myproject`)
+  - The full workspace name becomes `{prefix}{key} {title}` (e.g. `dyn-a myproject`)
 
 #### Hooks
 

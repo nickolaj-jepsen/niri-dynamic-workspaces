@@ -55,6 +55,7 @@ struct TemplateEntry {
     key: Option<String>,
     variables: HashMap<String, VariableEntry>,
     on_create: Vec<String>,
+    title: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -173,6 +174,7 @@ pub struct Template {
     pub key: Option<char>,
     pub variables: Vec<TemplateVariable>,
     pub on_create: Vec<String>,
+    pub title: Option<String>,
 }
 
 impl ResolvedConfig {
@@ -546,12 +548,24 @@ impl Config {
                 }
             }
 
+            // Validate title template references
+            if let Some(ref title) = entry.title {
+                for r in extract_variable_references(title) {
+                    if !declared_names.contains(r.as_str()) {
+                        warnings.push(format!(
+                            "template '{name}': title references undefined variable '{{{{{r}}}}}'"
+                        ));
+                    }
+                }
+            }
+
             templates.push(Template {
                 name: name.clone(),
                 programs: entry.programs.clone(),
                 key,
                 variables,
                 on_create: entry.on_create.clone(),
+                title: entry.title.clone(),
             });
         }
 
@@ -660,6 +674,76 @@ pub fn collect_create_hooks(config: &ResolvedConfig, template_name: Option<&str>
 /// Format a workspace name from a prefix and a single-character key.
 pub fn workspace_name(prefix: &str, ch: char) -> String {
     format!("{prefix}{ch}")
+}
+
+/// Format a workspace name with an optional title suffix.
+pub fn workspace_name_with_title(prefix: &str, ch: char, title: Option<&str>) -> String {
+    match title {
+        Some(t) if !t.is_empty() => format!("{prefix}{ch} {t}"),
+        _ => format!("{prefix}{ch}"),
+    }
+}
+
+/// Extract the title suffix from a full workspace name.
+///
+/// Given `"dyn-a My Project"` with prefix `"dyn-"`, returns `Some("My Project")`.
+/// Returns `None` if the name doesn't match the prefix or has no title.
+pub fn extract_workspace_title(ws_name: &str, prefix: &str) -> Option<String> {
+    let rest = ws_name.strip_prefix(prefix)?;
+    let mut chars = rest.chars();
+    let ch = chars.next()?;
+    if !is_workspace_char(ch) {
+        return None;
+    }
+    let remaining = chars.as_str().strip_prefix(' ')?;
+    if remaining.is_empty() {
+        None
+    } else {
+        Some(remaining.to_string())
+    }
+}
+
+/// Resolve a workspace title from template config and variable values.
+///
+/// - If `title_template` is `Some`, substitutes `{{var}}` placeholders.
+/// - If `None` and variables are non-empty, uses the first variable's value
+///   (extracting basename for directory paths).
+/// - Returns `None` if no variables exist.
+pub fn resolve_workspace_title(
+    title_template: Option<&str>,
+    variables: &[TemplateVariable],
+    values: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+    if let Some(template) = title_template {
+        let mut result = template.to_string();
+        for (name, value) in values {
+            result = result.replace(&format!("{{{{{name}}}}}"), value);
+        }
+        if result.is_empty() {
+            None
+        } else {
+            Some(result)
+        }
+    } else if let Some(first_var) = variables.first() {
+        let value = values.get(&first_var.name)?;
+        if value.is_empty() {
+            return None;
+        }
+        // For dir-type variables, extract basename
+        if matches!(
+            first_var.var_type,
+            VariableType::Select(Select::Dirs { .. })
+        ) {
+            std::path::Path::new(value)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(String::from)
+        } else {
+            Some(value.clone())
+        }
+    } else {
+        None
+    }
 }
 
 /// Parse a string as a single valid workspace-key character.
@@ -1696,6 +1780,7 @@ type = "text"
             key: None,
             variables: Vec::new(),
             on_create: Vec::new(),
+            title: None,
         };
         assert!(tmpl.variables.is_empty());
 
@@ -1709,6 +1794,7 @@ type = "text"
                 var_type: VariableType::Text,
             }],
             on_create: Vec::new(),
+            title: None,
         };
         assert!(!tmpl_with.variables.is_empty());
     }
@@ -1776,6 +1862,7 @@ type = "text"
                 key: None,
                 variables: Vec::new(),
                 on_create: vec!["template-hook".to_string()],
+                title: None,
             }],
         );
         let hooks = collect_create_hooks(&config, Some("dev"));
@@ -1792,6 +1879,7 @@ type = "text"
                 key: None,
                 variables: Vec::new(),
                 on_create: vec!["template-hook".to_string()],
+                title: None,
             }],
         );
         let hooks = collect_create_hooks(&config, Some("unknown"));
@@ -2009,5 +2097,106 @@ depth = 2
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("no dirs provided"));
         assert_eq!(var_type, VariableType::Text);
+    }
+
+    // --- workspace_name_with_title ---
+
+    #[test]
+    fn workspace_name_with_title_no_title() {
+        assert_eq!(workspace_name_with_title("dyn-", 'a', None), "dyn-a");
+        assert_eq!(workspace_name_with_title("dyn-", 'a', Some("")), "dyn-a");
+    }
+
+    #[test]
+    fn workspace_name_with_title_with_title() {
+        assert_eq!(
+            workspace_name_with_title("dyn-", 'a', Some("My Project")),
+            "dyn-a My Project"
+        );
+    }
+
+    // --- extract_workspace_title ---
+
+    #[test]
+    fn extract_workspace_title_basic() {
+        assert_eq!(
+            extract_workspace_title("dyn-a My Project", "dyn-"),
+            Some("My Project".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_workspace_title_no_title() {
+        assert_eq!(extract_workspace_title("dyn-a", "dyn-"), None);
+    }
+
+    #[test]
+    fn extract_workspace_title_wrong_prefix() {
+        assert_eq!(extract_workspace_title("other-a Title", "dyn-"), None);
+    }
+
+    #[test]
+    fn extract_workspace_title_no_space() {
+        // "dyn-abc" — 'a' is the char, "bc" has no leading space
+        assert_eq!(extract_workspace_title("dyn-abc", "dyn-"), None);
+    }
+
+    // --- resolve_workspace_title ---
+
+    #[test]
+    fn resolve_workspace_title_explicit_template() {
+        let variables = vec![];
+        let mut values = HashMap::new();
+        values.insert("path".to_string(), "/home/user/dev/myproject".to_string());
+        let result = resolve_workspace_title(Some("Dev: {{path}}"), &variables, &values);
+        assert_eq!(result, Some("Dev: /home/user/dev/myproject".to_string()));
+    }
+
+    #[test]
+    fn resolve_workspace_title_auto_text_var() {
+        let variables = vec![TemplateVariable {
+            name: "branch".to_string(),
+            label: "Branch".to_string(),
+            var_type: VariableType::Text,
+        }];
+        let mut values = HashMap::new();
+        values.insert("branch".to_string(), "main".to_string());
+        let result = resolve_workspace_title(None, &variables, &values);
+        assert_eq!(result, Some("main".to_string()));
+    }
+
+    #[test]
+    fn resolve_workspace_title_auto_dir_basename() {
+        let variables = vec![TemplateVariable {
+            name: "path".to_string(),
+            label: "Path".to_string(),
+            var_type: VariableType::Select(Select::Dirs {
+                dirs: vec!["~/dev".to_string()],
+                depth: 1,
+            }),
+        }];
+        let mut values = HashMap::new();
+        values.insert("path".to_string(), "/home/user/dev/myproject".to_string());
+        let result = resolve_workspace_title(None, &variables, &values);
+        assert_eq!(result, Some("myproject".to_string()));
+    }
+
+    #[test]
+    fn resolve_workspace_title_no_variables() {
+        let result = resolve_workspace_title(None, &[], &HashMap::new());
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn resolve_workspace_title_empty_value() {
+        let variables = vec![TemplateVariable {
+            name: "branch".to_string(),
+            label: "Branch".to_string(),
+            var_type: VariableType::Text,
+        }];
+        let mut values = HashMap::new();
+        values.insert("branch".to_string(), String::new());
+        let result = resolve_workspace_title(None, &variables, &values);
+        assert_eq!(result, None);
     }
 }
