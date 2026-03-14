@@ -549,6 +549,7 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
     window.set_anchor(Edge::Bottom, true);
     window.set_anchor(Edge::Left, true);
     window.set_anchor(Edge::Right, true);
+    window.set_exclusive_zone(-1);
 
     // Hover preview state — captured once at overlay open, shared across repopulations.
     let original_workspace = Rc::new(RefCell::new(if config.hover_preview {
