@@ -58,6 +58,7 @@ All fields are optional with sensible defaults.
 workspace_prefix = "dyn-"          # prefix for dynamic workspace names
 default_programs = ["kitty"]       # programs launched when creating any new workspace
 auto_delete_empty = true           # daemon: auto-delete empty unfocused workspaces
+hover_preview = true               # preview workspaces by hovering over cards
 layout = "qwerty"                  # keyboard layout for the overlay (see table below)
 
 [keybinds]

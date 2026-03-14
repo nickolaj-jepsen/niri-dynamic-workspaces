@@ -72,6 +72,7 @@ struct GeneralConfig {
     default_programs: Vec<String>,
     auto_delete_empty: bool,
     layout: String,
+    hover_preview: bool,
 }
 
 impl Default for GeneralConfig {
@@ -81,6 +82,7 @@ impl Default for GeneralConfig {
             default_programs: Vec::new(),
             auto_delete_empty: true,
             layout: "qwerty".to_string(),
+            hover_preview: true,
         }
     }
 }
@@ -141,6 +143,7 @@ pub struct ResolvedConfig {
     pub workspace_programs: HashMap<char, Vec<String>>,
     pub workspace_names: HashMap<char, String>,
     pub auto_delete_empty: bool,
+    pub hover_preview: bool,
     pub layout: &'static KeyboardLayout,
     pub templates: Vec<Template>,
     pub hooks: HookConfig,
@@ -586,6 +589,7 @@ impl Config {
             workspace_programs,
             workspace_names,
             auto_delete_empty: self.general.auto_delete_empty,
+            hover_preview: self.general.hover_preview,
             layout,
             templates,
             hooks: HookConfig {
@@ -1836,6 +1840,7 @@ type = "text"
             workspace_programs: HashMap::new(),
             workspace_names: HashMap::new(),
             auto_delete_empty: true,
+            hover_preview: true,
             layout: &LAYOUT_QWERTY,
             templates,
             hooks: HookConfig {

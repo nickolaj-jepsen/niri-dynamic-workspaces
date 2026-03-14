@@ -23,6 +23,22 @@ fn send_action(action: Action) -> anyhow::Result<()> {
     }
 }
 
+/// Focus an existing workspace by name (no creation).
+pub fn focus_workspace_by_name(name: &str) -> anyhow::Result<()> {
+    send_action(Action::FocusWorkspace {
+        reference: WorkspaceReferenceArg::Name(name.to_string()),
+    })
+}
+
+/// Return the name of the currently focused workspace, if any.
+pub fn focused_workspace_name() -> Option<String> {
+    list_workspaces()
+        .ok()?
+        .into_iter()
+        .find(|w| w.is_focused)?
+        .name
+}
+
 pub fn list_workspaces() -> anyhow::Result<Vec<Workspace>> {
     match send_request(Request::Workspaces)? {
         Response::Workspaces(mut workspaces) => {

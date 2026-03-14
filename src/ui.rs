@@ -8,8 +8,9 @@ use nucleo_matcher::{Config as MatcherConfig, Matcher, Utf32Str};
 use glib::Propagation;
 use gtk4::prelude::*;
 use gtk4::{
-    Align, ApplicationWindow, Box as GtkBox, Entry, EventControllerKey, GestureClick, Label,
-    Orientation, Overlay, PolicyType, Revealer, RevealerTransitionType, ScrolledWindow,
+    Align, ApplicationWindow, Box as GtkBox, Entry, EventControllerKey, EventControllerMotion,
+    GestureClick, Label, Orientation, Overlay, PolicyType, Revealer, RevealerTransitionType,
+    ScrolledWindow,
 };
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
@@ -262,6 +263,10 @@ struct ActionContext {
     config: Rc<ResolvedConfig>,
     keyboard_infos: Rc<HashMap<char, DynWorkspaceInfo>>,
     monitor_width: i32,
+    /// Original workspace name when overlay opened (for hover-preview restore).
+    original_workspace: Rc<RefCell<Option<String>>>,
+    /// Set to true when the user makes a selection (skip restore on close).
+    selection_made: Rc<Cell<bool>>,
 }
 
 #[expect(
@@ -480,6 +485,18 @@ fn build_key_widget(
     });
     key_box.add_controller(click);
 
+    // Hover preview: focus workspace on mouse enter (Normal mode, created cards only)
+    if !is_disabled && mode == Mode::Normal && ctx.config.hover_preview {
+        if let Some(ref ws_name) = info.ws_name {
+            let hover_name = ws_name.clone();
+            let motion = EventControllerMotion::new();
+            motion.connect_enter(move |_, _, _| {
+                let _ = niri::focus_workspace_by_name(&hover_name);
+            });
+            key_box.add_controller(motion);
+        }
+    }
+
     key_box
 }
 
@@ -533,13 +550,44 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
     window.set_anchor(Edge::Left, true);
     window.set_anchor(Edge::Right, true);
 
+    // Hover preview state — captured once at overlay open, shared across repopulations.
+    let original_workspace = Rc::new(RefCell::new(if config.hover_preview {
+        niri::focused_workspace_name()
+    } else {
+        None
+    }));
+    let selection_made = Rc::new(Cell::new(false));
+
     let monitor_width = get_monitor_width(focused_monitor.as_ref());
-    populate_overlay(&window, config, mode, monitor_width);
+    populate_overlay(
+        &window,
+        config,
+        mode,
+        monitor_width,
+        &original_workspace,
+        &selection_made,
+    );
+
+    // Restore original workspace on close if no selection was made.
+    {
+        let orig = original_workspace.clone();
+        let sel = selection_made.clone();
+        window.connect_close_request(move |_| {
+            if !sel.get() {
+                if let Some(ref name) = *orig.borrow() {
+                    let _ = niri::focus_workspace_by_name(name);
+                }
+            }
+            Propagation::Proceed
+        });
+    }
 
     // Poll for focused-output changes so the overlay follows the cursor.
     let tracked_output = Rc::new(RefCell::new(find_focused_output()));
     let track_window = window.clone();
     let track_config = config.clone();
+    let track_orig = original_workspace;
+    let track_sel = selection_made;
     glib::timeout_add_local(std::time::Duration::from_millis(150), move || {
         if !track_window.is_visible() {
             return glib::ControlFlow::Break;
@@ -553,7 +601,14 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
                     track_window.set_monitor(Some(&monitor));
                     let mode =
                         Mode::from_window(&track_window.clone().upcast()).unwrap_or(Mode::Normal);
-                    populate_overlay(&track_window, &track_config, mode, new_width);
+                    populate_overlay(
+                        &track_window,
+                        &track_config,
+                        mode,
+                        new_width,
+                        &track_orig,
+                        &track_sel,
+                    );
                 }
             }
         }
@@ -583,12 +638,7 @@ fn remove_app_controllers(window: &ApplicationWindow) {
     }
 }
 
-fn build_mode_tabs(
-    window: &ApplicationWindow,
-    config: &Rc<ResolvedConfig>,
-    mode: Mode,
-    monitor_width: i32,
-) -> GtkBox {
+fn build_mode_tabs(ctx: &ActionContext, mode: Mode) -> GtkBox {
     let mode_tabs = GtkBox::builder()
         .orientation(Orientation::Horizontal)
         .spacing(0)
@@ -605,14 +655,19 @@ fn build_mode_tabs(
             .css_classes(classes)
             .build();
 
-        let tab_window = window.clone();
-        let tab_config = config.clone();
+        let tab_ctx = ctx.clone();
         let click = GestureClick::new();
         click.connect_released(move |_, _, _, _| {
-            let w = tab_window.clone();
-            let c = tab_config.clone();
+            let ctx = tab_ctx.clone();
             glib::idle_add_local_once(move || {
-                populate_overlay(&w, &c, m, monitor_width);
+                populate_overlay(
+                    &ctx.window,
+                    &ctx.config,
+                    m,
+                    ctx.monitor_width,
+                    &ctx.original_workspace,
+                    &ctx.selection_made,
+                );
             });
         });
         tab_label.add_controller(click);
@@ -687,6 +742,8 @@ fn populate_overlay(
     config: &Rc<ResolvedConfig>,
     mode: Mode,
     monitor_width: i32,
+    original_workspace: &Rc<RefCell<Option<String>>>,
+    selection_made: &Rc<Cell<bool>>,
 ) {
     window.set_widget_name(mode.widget_name());
     remove_app_controllers(window);
@@ -722,6 +779,8 @@ fn populate_overlay(
         config: config.clone(),
         keyboard_infos: infos.clone(),
         monitor_width,
+        original_workspace: original_workspace.clone(),
+        selection_made: selection_made.clone(),
     };
 
     let keyboard = build_keyboard(&infos, mode, &ctx, &metrics);
@@ -733,7 +792,7 @@ fn populate_overlay(
         &["press key to select", "Tab switch mode", "Escape close"],
     ));
     container.append(&error_revealer);
-    container.append(&build_mode_tabs(window, config, mode, monitor_width));
+    container.append(&build_mode_tabs(&ctx, mode));
 
     wrap_in_backdrop(window, &container);
 
@@ -779,6 +838,7 @@ fn switch_and_close(
 }
 
 fn dispatch_action(ch: char, ctx: &ActionContext) {
+    ctx.selection_made.set(true);
     let prefix = &ctx.config.workspace_prefix;
     let info = ctx.keyboard_infos.get(&ch);
     let ws_name = info
@@ -994,6 +1054,8 @@ fn show_template_picker(ch: char, ctx: &ActionContext) {
         config: ctx.config.clone(),
         keyboard_infos: ctx.keyboard_infos.clone(),
         monitor_width: ctx.monitor_width,
+        original_workspace: ctx.original_workspace.clone(),
+        selection_made: ctx.selection_made.clone(),
     };
 
     // Store options as Rc for sharing with handlers
@@ -1062,17 +1124,21 @@ fn attach_template_key_handler(
     let options = options.clone();
     let widgets = option_widgets.clone();
     let sel = selected_idx.clone();
-    let config = ctx.config.clone();
 
     let key_controller = new_key_controller();
     key_controller.connect_key_pressed(move |_, key, _, modifier| {
         // Close keybinds / Escape → go back to main view
         if matches_close_keybind(key, modifier, &close_keybinds) {
-            let window = key_ctx.window.clone();
-            let cfg = config.clone();
-            let mw = key_ctx.monitor_width;
+            let ctx = key_ctx.clone();
             glib::idle_add_local_once(move || {
-                populate_overlay(&window, &cfg, Mode::Normal, mw);
+                populate_overlay(
+                    &ctx.window,
+                    &ctx.config,
+                    Mode::Normal,
+                    ctx.monitor_width,
+                    &ctx.original_workspace,
+                    &ctx.selection_made,
+                );
             });
             return Propagation::Stop;
         }
@@ -1555,6 +1621,8 @@ fn show_variable_input(
         config: ctx.config.clone(),
         keyboard_infos: ctx.keyboard_infos.clone(),
         monitor_width: ctx.monitor_width,
+        original_workspace: ctx.original_workspace.clone(),
+        selection_made: ctx.selection_made.clone(),
     };
 
     let var_names: Vec<String> = option.variables.iter().map(|v| v.name.clone()).collect();
@@ -1651,11 +1719,16 @@ fn attach_key_handler(ctx: &ActionContext, close_keybinds: &[crate::config::Keyb
             } else {
                 key_ctx.mode.prev()
             };
-            let window = key_ctx.window.clone();
-            let config = key_ctx.config.clone();
-            let mw = key_ctx.monitor_width;
+            let ctx = key_ctx.clone();
             glib::idle_add_local_once(move || {
-                populate_overlay(&window, &config, next_mode, mw);
+                populate_overlay(
+                    &ctx.window,
+                    &ctx.config,
+                    next_mode,
+                    ctx.monitor_width,
+                    &ctx.original_workspace,
+                    &ctx.selection_made,
+                );
             });
             return Propagation::Stop;
         }
@@ -1918,6 +1991,7 @@ mod tests {
             workspace_programs: HashMap::new(),
             workspace_names: HashMap::new(),
             auto_delete_empty: true,
+            hover_preview: true,
             layout: &LAYOUT_QWERTY,
             templates: Vec::new(),
             hooks: crate::config::HookConfig::default(),
