@@ -10,6 +10,12 @@ window {
     background-color: transparent;
 }
 
+/* --- Static workspaces (row above keyboard) --- */
+
+.static-workspaces {
+    margin-bottom: var(--key-margin);
+}
+
 /* --- Keyboard keys --- */
 
 .keyboard {

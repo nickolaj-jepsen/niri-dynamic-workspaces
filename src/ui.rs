@@ -275,6 +275,18 @@ struct ActionContext {
     clippy::struct_excessive_bools,
     reason = "four bools represent independent workspace states"
 )]
+struct StaticWorkspaceInfo {
+    name: String,
+    is_focused: bool,
+    is_active: bool,
+    is_urgent: bool,
+    is_empty: bool,
+}
+
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "four bools represent independent workspace states"
+)]
 struct DynWorkspaceInfo {
     char_id: char,
     is_focused: bool,
@@ -301,24 +313,18 @@ impl DynWorkspaceInfo {
     }
 }
 
-fn gather_dyn_workspaces(config: &ResolvedConfig) -> Vec<DynWorkspaceInfo> {
-    let workspaces = match niri::list_workspaces() {
-        Ok(ws) => ws,
-        Err(e) => {
-            eprintln!("Failed to list workspaces: {e}");
-            return Vec::new();
-        }
-    };
+/// Collect workspace IDs that contain at least one urgent window.
+fn urgent_workspace_ids(windows: &[niri_ipc::Window]) -> HashSet<u64> {
+    windows
+        .iter()
+        .filter(|w| w.is_urgent)
+        .filter_map(|w| w.workspace_id)
+        .collect()
+}
 
-    let windows = match niri::list_windows() {
-        Ok(w) => w,
-        Err(e) => {
-            eprintln!("Failed to list windows: {e}");
-            Vec::new()
-        }
-    };
-
-    build_dyn_workspace_infos(&workspaces, &windows, config)
+/// Collect workspace IDs that contain at least one window.
+fn occupied_workspace_ids(windows: &[niri_ipc::Window]) -> HashSet<u64> {
+    windows.iter().filter_map(|w| w.workspace_id).collect()
 }
 
 fn build_dyn_workspace_infos(
@@ -327,16 +333,7 @@ fn build_dyn_workspace_infos(
     config: &ResolvedConfig,
 ) -> Vec<DynWorkspaceInfo> {
     let prefix = &config.workspace_prefix;
-
-    // Track urgency per workspace
-    let mut urgent_ws_ids: HashSet<u64> = HashSet::new();
-    for w in windows {
-        if let Some(ws_id) = w.workspace_id {
-            if w.is_urgent {
-                urgent_ws_ids.insert(ws_id);
-            }
-        }
-    }
+    let urgent_ws_ids = urgent_workspace_ids(windows);
 
     // Find the globally focused workspace
     let focused_ws_id = workspaces.iter().find(|ws| ws.is_focused).map(|ws| ws.id);
@@ -398,12 +395,49 @@ fn build_dyn_workspace_infos(
     infos
 }
 
+fn build_static_workspace_infos(
+    workspaces: &[niri_ipc::Workspace],
+    windows: &[niri_ipc::Window],
+    config: &ResolvedConfig,
+) -> Vec<StaticWorkspaceInfo> {
+    let prefix = &config.workspace_prefix;
+
+    let focused_output = workspaces
+        .iter()
+        .find(|ws| ws.is_focused)
+        .and_then(|ws| ws.output.clone());
+
+    let urgent_ws_ids = urgent_workspace_ids(windows);
+    let occupied_ws_ids = occupied_workspace_ids(windows);
+
+    workspaces
+        .iter()
+        .filter(|ws| ws.output == focused_output)
+        .filter(|ws| {
+            ws.name
+                .as_ref()
+                .is_none_or(|n| !n.starts_with(prefix.as_str()))
+        })
+        .map(|ws| StaticWorkspaceInfo {
+            name: ws.name.clone().unwrap_or_else(|| ws.idx.to_string()),
+            is_focused: ws.is_focused,
+            is_active: !ws.is_focused && ws.is_active,
+            is_urgent: urgent_ws_ids.contains(&ws.id),
+            is_empty: !occupied_ws_ids.contains(&ws.id),
+        })
+        .collect()
+}
+
 // --- Keyboard layout builders ---
 
 /// Build a map of all keyboard keys to their workspace info.
 /// Keys without a live or configured workspace get a default empty entry.
-fn build_full_keyboard_info(config: &ResolvedConfig) -> HashMap<char, DynWorkspaceInfo> {
-    let live_infos = gather_dyn_workspaces(config);
+fn build_full_keyboard_info(
+    workspaces: &[niri_ipc::Workspace],
+    windows: &[niri_ipc::Window],
+    config: &ResolvedConfig,
+) -> HashMap<char, DynWorkspaceInfo> {
+    let live_infos = build_dyn_workspace_infos(workspaces, windows, config);
     let mut map: HashMap<char, DynWorkspaceInfo> = HashMap::new();
 
     for info in live_infos {
@@ -418,6 +452,39 @@ fn build_full_keyboard_info(config: &ResolvedConfig) -> HashMap<char, DynWorkspa
     }
 
     map
+}
+
+/// Create the outer card box (with CSS classes and fixed size) and an inner centering box.
+fn build_card_shell(classes: Vec<&str>, key_size: i32) -> (GtkBox, GtkBox) {
+    let card = GtkBox::builder()
+        .orientation(Orientation::Vertical)
+        .spacing(0)
+        .css_classes(classes)
+        .halign(Align::Center)
+        .valign(Align::Center)
+        .build();
+    card.set_size_request(key_size, key_size);
+
+    let inner = GtkBox::builder()
+        .orientation(Orientation::Vertical)
+        .spacing(0)
+        .vexpand(true)
+        .valign(Align::Center)
+        .halign(Align::Center)
+        .build();
+    card.append(&inner);
+
+    (card, inner)
+}
+
+/// Attach a hover-preview controller that focuses a workspace on mouse enter.
+fn attach_hover_preview(widget: &GtkBox, ws_name: &str) {
+    let hover_name = ws_name.to_owned();
+    let motion = EventControllerMotion::new();
+    motion.connect_enter(move |_, _, _| {
+        let _ = niri::focus_workspace_by_name(&hover_name);
+    });
+    widget.add_controller(motion);
 }
 
 fn build_key_widget(
@@ -443,32 +510,14 @@ fn build_key_widget(
         classes.push("disabled");
     }
 
-    let key_box = GtkBox::builder()
-        .orientation(Orientation::Vertical)
-        .spacing(0)
-        .css_classes(classes)
-        .halign(Align::Center)
-        .valign(Align::Center)
-        .build();
-    key_box.set_size_request(metrics.key_size, metrics.key_size);
+    let (key_box, inner) = build_card_shell(classes, metrics.key_size);
 
-    // Inner box centers the label group vertically within the fixed-size key
-    let inner = GtkBox::builder()
-        .orientation(Orientation::Vertical)
-        .spacing(0)
-        .vexpand(true)
-        .valign(Align::Center)
-        .halign(Align::Center)
-        .build();
-
-    // Key character label
     let char_label = Label::builder()
         .label(display_key_char(info.char_id))
         .css_classes(["key-char"])
         .build();
     inner.append(&char_label);
 
-    // Workspace name (if configured or extracted from title)
     if let Some(ref name) = info.name {
         let name_label = Label::builder()
             .label(name)
@@ -478,8 +527,6 @@ fn build_key_widget(
             .build();
         inner.append(&name_label);
     }
-
-    key_box.append(&inner);
 
     // Click handler
     let ch = info.char_id;
@@ -499,12 +546,7 @@ fn build_key_widget(
         };
         if same_output {
             if let Some(ref ws_name) = info.ws_name {
-                let hover_name = ws_name.clone();
-                let motion = EventControllerMotion::new();
-                motion.connect_enter(move |_, _, _| {
-                    let _ = niri::focus_workspace_by_name(&hover_name);
-                });
-                key_box.add_controller(motion);
+                attach_hover_preview(&key_box, ws_name);
             }
         }
     }
@@ -543,6 +585,87 @@ fn build_keyboard(
     }
 
     keyboard
+}
+
+fn build_static_card(
+    info: &StaticWorkspaceInfo,
+    mode: Mode,
+    ctx: &ActionContext,
+    metrics: &KeyboardMetrics,
+) -> GtkBox {
+    let mut classes = vec!["keyboard-key", "static-workspace"];
+
+    if info.is_focused || info.is_active {
+        classes.push("active");
+    }
+    if info.is_urgent {
+        classes.push("urgent");
+    }
+
+    let is_disabled = match mode {
+        Mode::Delete => true,
+        Mode::MoveWindow => info.is_empty || info.is_focused,
+        Mode::Normal => info.is_empty,
+    };
+    if is_disabled {
+        classes.push("disabled");
+    }
+
+    let (card, inner) = build_card_shell(classes, metrics.key_size);
+
+    let name_label = Label::builder()
+        .label(&info.name)
+        .css_classes(["key-char"])
+        .ellipsize(gtk4::pango::EllipsizeMode::End)
+        .max_width_chars(6)
+        .build();
+    inner.append(&name_label);
+
+    if !is_disabled {
+        let name = info.name.clone();
+        let click_ctx = ctx.clone();
+        let click = GestureClick::new();
+        click.connect_released(move |_, _, _, _| {
+            click_ctx.selection_made.set(true);
+            let result = match click_ctx.mode {
+                Mode::Normal => niri::focus_workspace_by_name(&name),
+                Mode::MoveWindow => niri::move_window_to_workspace_by_name(&name),
+                Mode::Delete => return,
+            };
+            if let Err(e) = result {
+                show_error(&click_ctx, &format!("Failed: {e:#}"));
+                return;
+            }
+            click_ctx.window.close();
+        });
+        card.add_controller(click);
+
+        if mode == Mode::Normal && ctx.config.hover_preview {
+            attach_hover_preview(&card, &info.name);
+        }
+    }
+
+    card
+}
+
+fn build_static_workspace_row(
+    infos: &[StaticWorkspaceInfo],
+    mode: Mode,
+    ctx: &ActionContext,
+    metrics: &KeyboardMetrics,
+) -> GtkBox {
+    let row = GtkBox::builder()
+        .orientation(Orientation::Horizontal)
+        .spacing(metrics.key_gap)
+        .css_classes(["static-workspaces"])
+        .halign(Align::Center)
+        .build();
+
+    for info in infos {
+        row.append(&build_static_card(info, mode, ctx, metrics));
+    }
+
+    row
 }
 
 // --- UI construction ---
@@ -781,8 +904,12 @@ fn populate_overlay(
     let metrics = KeyboardMetrics::from_monitor_width(monitor_width, config.layout);
     apply_scaled_css(&metrics.scaled_css_variables());
 
+    // Fetch IPC data once for both static and dynamic workspace builders
+    let workspaces = niri::list_workspaces().unwrap_or_default();
+    let windows = niri::list_windows().unwrap_or_default();
+
     // Build keyboard
-    let infos = Rc::new(build_full_keyboard_info(config));
+    let infos = Rc::new(build_full_keyboard_info(&workspaces, &windows, config));
 
     let ctx = ActionContext {
         mode,
@@ -797,9 +924,18 @@ fn populate_overlay(
         focused_output: find_focused_output(),
     };
 
-    let keyboard = build_keyboard(&infos, mode, &ctx, &metrics);
+    // Assemble: static row → keyboard → hint footer → error revealer → mode tabs
+    let static_infos = build_static_workspace_infos(&workspaces, &windows, config);
+    if !static_infos.is_empty() {
+        container.append(&build_static_workspace_row(
+            &static_infos,
+            mode,
+            &ctx,
+            &metrics,
+        ));
+    }
 
-    // Assemble: keyboard → hint footer → error revealer → mode tabs (bottom)
+    let keyboard = build_keyboard(&infos, mode, &ctx, &metrics);
     container.append(&keyboard);
     container.append(&build_hint_footer(
         &metrics,
@@ -2148,6 +2284,101 @@ mod tests {
         // 'c' — neither
         assert!(!infos[2].is_focused);
         assert!(!infos[2].is_active);
+    }
+
+    // --- build_static_workspace_infos ---
+
+    #[test]
+    fn static_infos_filters_out_dynamic() {
+        let workspaces = vec![
+            test_workspace(1, Some("dyn-a"), true),
+            test_workspace(2, Some("browser"), false),
+            test_workspace(3, Some("dyn-b"), false),
+        ];
+        let config = default_test_config();
+        let infos = build_static_workspace_infos(&workspaces, &[], &config);
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].name, "browser");
+    }
+
+    #[test]
+    fn static_infos_only_focused_output() {
+        let mut ws1 = test_workspace(1, Some("browser"), true);
+        ws1.output = Some("DP-1".to_string());
+        let mut ws2 = test_workspace(2, Some("mail"), false);
+        ws2.output = Some("HDMI-1".to_string());
+        let workspaces = vec![ws1, ws2];
+        let config = default_test_config();
+
+        let infos = build_static_workspace_infos(&workspaces, &[], &config);
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].name, "browser");
+    }
+
+    #[test]
+    fn static_infos_unnamed_falls_back_to_idx() {
+        let mut ws = test_workspace(1, None, true);
+        ws.idx = 3;
+        let workspaces = vec![ws];
+        let config = default_test_config();
+
+        let infos = build_static_workspace_infos(&workspaces, &[], &config);
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].name, "3");
+    }
+
+    #[test]
+    fn static_infos_urgency_from_windows() {
+        let workspaces = vec![test_workspace(1, Some("browser"), true)];
+        let mut win = test_window(100, 1, "firefox");
+        win.is_urgent = true;
+        let config = default_test_config();
+
+        let infos = build_static_workspace_infos(&workspaces, &[win], &config);
+        assert_eq!(infos.len(), 1);
+        assert!(infos[0].is_urgent);
+    }
+
+    #[test]
+    fn static_infos_empty_when_all_dynamic() {
+        let workspaces = vec![
+            test_workspace(1, Some("dyn-a"), true),
+            test_workspace(2, Some("dyn-b"), false),
+        ];
+        let config = default_test_config();
+        let infos = build_static_workspace_infos(&workspaces, &[], &config);
+        assert!(infos.is_empty());
+    }
+
+    #[test]
+    fn static_infos_focused_and_active() {
+        let mut ws1 = test_workspace(1, Some("browser"), true);
+        ws1.is_active = true;
+        let mut ws2 = test_workspace(2, Some("mail"), false);
+        ws2.is_active = true;
+        let workspaces = vec![ws1, ws2];
+        let config = default_test_config();
+
+        let infos = build_static_workspace_infos(&workspaces, &[], &config);
+        assert_eq!(infos.len(), 2);
+        assert!(infos[0].is_focused);
+        assert!(!infos[0].is_active); // focused trumps active
+        assert!(!infos[1].is_focused);
+        assert!(infos[1].is_active);
+    }
+
+    #[test]
+    fn static_infos_empty_without_windows() {
+        let workspaces = vec![
+            test_workspace(1, Some("browser"), true),
+            test_workspace(2, Some("mail"), false),
+        ];
+        let windows = vec![test_window(100, 1, "firefox")];
+        let config = default_test_config();
+
+        let infos = build_static_workspace_infos(&workspaces, &windows, &config);
+        assert!(!infos[0].is_empty); // has a window
+        assert!(infos[1].is_empty); // no windows
     }
 
     // --- build_template_options ---

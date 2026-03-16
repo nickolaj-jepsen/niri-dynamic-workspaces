@@ -327,6 +327,15 @@ fn reorder_workspace_columns_inner(request: &ReorderRequest) -> anyhow::Result<(
     Ok(())
 }
 
+/// Move the focused window to an existing workspace by name.
+pub fn move_window_to_workspace_by_name(name: &str) -> anyhow::Result<()> {
+    send_action(Action::MoveWindowToWorkspace {
+        window_id: None,
+        reference: WorkspaceReferenceArg::Name(name.to_string()),
+        focus: true,
+    })
+}
+
 /// Move the focused window to a workspace, creating it if it doesn't exist.
 pub fn move_window_to_workspace(prefix: &str, ch: char, full_name: &str) -> anyhow::Result<()> {
     let workspaces = list_workspaces()?;
