@@ -107,13 +107,14 @@ fn get_monitor_width(monitor: Option<&gdk4::Monitor>) -> i32 {
         .unwrap_or(1920)
 }
 
-/// Return the niri output name that contains the focused workspace.
-fn find_focused_output() -> Option<String> {
-    niri::list_workspaces()
-        .ok()?
-        .into_iter()
-        .find(|w| w.is_focused)?
-        .output
+/// Extract the output name of the focused workspace from a pre-fetched list.
+fn focused_output_from(workspaces: &[niri_ipc::Workspace]) -> Option<String> {
+    workspaces.iter().find(|w| w.is_focused)?.output.clone()
+}
+
+/// Extract the name of the focused workspace from a pre-fetched list.
+fn focused_workspace_name_from(workspaces: &[niri_ipc::Workspace]) -> Option<String> {
+    workspaces.iter().find(|w| w.is_focused)?.name.clone()
 }
 
 /// Look up a GDK monitor by its connector (output) name.
@@ -127,11 +128,6 @@ fn find_monitor_for_output(output_name: &str) -> Option<gdk4::Monitor> {
         }
     }
     None
-}
-
-/// Find the GDK monitor that contains the focused niri workspace.
-fn find_focused_monitor() -> Option<gdk4::Monitor> {
-    find_monitor_for_output(&find_focused_output()?)
 }
 
 fn apply_scaled_css(css: &str) {
@@ -675,7 +671,10 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
     window.remove_css_class("background");
     window.init_layer_shell();
 
-    let focused_monitor = find_focused_monitor();
+    // Single IPC fetch — derive focused output, monitor, and workspace name from it.
+    let workspaces = niri::list_workspaces().unwrap_or_default();
+    let focused_output = focused_output_from(&workspaces);
+    let focused_monitor = focused_output.as_deref().and_then(find_monitor_for_output);
     window.set_monitor(focused_monitor.as_ref());
 
     window.set_layer(Layer::Overlay);
@@ -688,7 +687,7 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
 
     // Hover preview state — captured once at overlay open, shared across repopulations.
     let original_workspace = Rc::new(RefCell::new(if config.hover_preview {
-        niri::focused_workspace_name()
+        focused_workspace_name_from(&workspaces)
     } else {
         None
     }));
@@ -702,6 +701,7 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
         monitor_width,
         &original_workspace,
         &selection_made,
+        Some(workspaces),
     );
 
     // Restore original workspace on close if no selection was made.
@@ -719,7 +719,7 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
     }
 
     // Poll for focused-output changes so the overlay follows the cursor.
-    let tracked_output = Rc::new(RefCell::new(find_focused_output()));
+    let tracked_output = Rc::new(RefCell::new(focused_output));
     let track_window = window.clone();
     let track_config = config.clone();
     let track_orig = original_workspace;
@@ -728,7 +728,8 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
         if !track_window.is_visible() {
             return glib::ControlFlow::Break;
         }
-        let current = find_focused_output();
+        let fresh_workspaces = niri::list_workspaces().unwrap_or_default();
+        let current = focused_output_from(&fresh_workspaces);
         if current != *tracked_output.borrow() {
             tracked_output.borrow_mut().clone_from(&current);
             if let Some(ref output) = current {
@@ -744,6 +745,7 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
                         new_width,
                         &track_orig,
                         &track_sel,
+                        Some(fresh_workspaces),
                     );
                 }
             }
@@ -803,6 +805,7 @@ fn build_mode_tabs(ctx: &ActionContext, mode: Mode) -> GtkBox {
                     ctx.monitor_width,
                     &ctx.original_workspace,
                     &ctx.selection_made,
+                    None,
                 );
             });
         });
@@ -873,6 +876,8 @@ fn build_hint_footer(metrics: &KeyboardMetrics, hints: &[&str]) -> GtkBox {
 }
 
 /// Build (or rebuild) the overlay content for `mode` inside an existing window.
+///
+/// If `prefetched_workspaces` is provided, uses them instead of making a fresh IPC call.
 fn populate_overlay(
     window: &ApplicationWindow,
     config: &Rc<ResolvedConfig>,
@@ -880,6 +885,7 @@ fn populate_overlay(
     monitor_width: i32,
     original_workspace: &Rc<RefCell<Option<String>>>,
     selection_made: &Rc<Cell<bool>>,
+    prefetched_workspaces: Option<Vec<niri_ipc::Workspace>>,
 ) {
     window.set_widget_name(mode.widget_name());
     remove_app_controllers(window);
@@ -904,8 +910,9 @@ fn populate_overlay(
     let metrics = KeyboardMetrics::from_monitor_width(monitor_width, config.layout);
     apply_scaled_css(&metrics.scaled_css_variables());
 
-    // Fetch IPC data once for both static and dynamic workspace builders
-    let workspaces = niri::list_workspaces().unwrap_or_default();
+    // Use pre-fetched workspaces or fetch fresh; always fetch windows fresh.
+    let workspaces =
+        prefetched_workspaces.unwrap_or_else(|| niri::list_workspaces().unwrap_or_default());
     let windows = niri::list_windows().unwrap_or_default();
 
     // Build keyboard
@@ -921,7 +928,7 @@ fn populate_overlay(
         monitor_width,
         original_workspace: original_workspace.clone(),
         selection_made: selection_made.clone(),
-        focused_output: find_focused_output(),
+        focused_output: focused_output_from(&workspaces),
     };
 
     // Assemble: static row → keyboard → hint footer → error revealer → mode tabs
@@ -1281,6 +1288,7 @@ fn attach_template_key_handler(
                     ctx.monitor_width,
                     &ctx.original_workspace,
                     &ctx.selection_made,
+                    None,
                 );
             });
             return Propagation::Stop;
@@ -1817,6 +1825,7 @@ fn attach_key_handler(ctx: &ActionContext, close_keybinds: &[crate::config::Keyb
                     ctx.monitor_width,
                     &ctx.original_workspace,
                     &ctx.selection_made,
+                    None,
                 );
             });
             return Propagation::Stop;
@@ -1878,6 +1887,42 @@ fn wrap_index(current: usize, len: usize, forward: bool) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_helpers::test_workspace;
+
+    // --- focused extraction helpers ---
+
+    #[test]
+    fn focused_output_from_returns_focused() {
+        let workspaces = vec![
+            test_workspace(1, Some("ws-1"), false),
+            test_workspace(2, Some("ws-2"), true),
+        ];
+        assert_eq!(focused_output_from(&workspaces), Some("DP-1".to_string()));
+    }
+
+    #[test]
+    fn focused_output_from_returns_none_when_unfocused() {
+        let workspaces = vec![test_workspace(1, Some("ws-1"), false)];
+        assert_eq!(focused_output_from(&workspaces), None);
+    }
+
+    #[test]
+    fn focused_workspace_name_from_returns_name() {
+        let workspaces = vec![
+            test_workspace(1, Some("ws-1"), false),
+            test_workspace(2, Some("ws-2"), true),
+        ];
+        assert_eq!(
+            focused_workspace_name_from(&workspaces),
+            Some("ws-2".to_string())
+        );
+    }
+
+    #[test]
+    fn focused_workspace_name_from_returns_none_when_unnamed() {
+        let workspaces = vec![test_workspace(1, None, true)];
+        assert_eq!(focused_workspace_name_from(&workspaces), None);
+    }
 
     // --- fuzzy_filter ---
 
@@ -2085,7 +2130,7 @@ mod tests {
 
     // --- build_dyn_workspace_infos helpers & tests ---
 
-    use crate::test_helpers::{test_window, test_workspace};
+    use crate::test_helpers::test_window;
 
     fn default_test_config() -> ResolvedConfig {
         ResolvedConfig {

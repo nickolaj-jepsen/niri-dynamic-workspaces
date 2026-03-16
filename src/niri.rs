@@ -30,15 +30,6 @@ pub fn focus_workspace_by_name(name: &str) -> anyhow::Result<()> {
     })
 }
 
-/// Return the name of the currently focused workspace, if any.
-pub fn focused_workspace_name() -> Option<String> {
-    list_workspaces()
-        .ok()?
-        .into_iter()
-        .find(|w| w.is_focused)?
-        .name
-}
-
 pub fn list_workspaces() -> anyhow::Result<Vec<Workspace>> {
     match send_request(Request::Workspaces)? {
         Response::Workspaces(mut workspaces) => {
