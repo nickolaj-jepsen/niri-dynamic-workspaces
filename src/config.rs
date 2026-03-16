@@ -684,7 +684,7 @@ pub fn workspace_name(prefix: &str, ch: char) -> String {
 pub fn workspace_name_with_title(prefix: &str, ch: char, title: Option<&str>) -> String {
     match title {
         Some(t) if !t.is_empty() => format!("{prefix}{ch} {t}"),
-        _ => format!("{prefix}{ch}"),
+        _ => workspace_name(prefix, ch),
     }
 }
 
@@ -719,10 +719,10 @@ pub fn resolve_workspace_title(
     values: &std::collections::HashMap<String, String>,
 ) -> Option<String> {
     if let Some(template) = title_template {
-        let mut result = template.to_string();
-        for (name, value) in values {
-            result = result.replace(&format!("{{{{{name}}}}}"), value);
-        }
+        let result = substitute_variables(&[template.to_string()], values)
+            .into_iter()
+            .next()
+            .unwrap_or_default();
         if result.is_empty() {
             None
         } else {

@@ -1154,7 +1154,6 @@ fn show_template_picker(ch: char, ctx: &ActionContext) {
 
     let config = &ctx.config;
     let metrics = KeyboardMetrics::from_monitor_width(ctx.monitor_width, config.layout);
-    apply_scaled_css(&metrics.scaled_css_variables());
 
     let container = GtkBox::builder()
         .orientation(Orientation::Vertical)
@@ -1197,16 +1196,9 @@ fn show_template_picker(ch: char, ctx: &ActionContext) {
 
     // Shared context for the template picker
     let picker_ctx = ActionContext {
-        mode: ctx.mode,
-        window: ctx.window.clone(),
         error_label,
         error_revealer: error_revealer.clone(),
-        config: ctx.config.clone(),
-        keyboard_infos: ctx.keyboard_infos.clone(),
-        monitor_width: ctx.monitor_width,
-        original_workspace: ctx.original_workspace.clone(),
-        selection_made: ctx.selection_made.clone(),
-        focused_output: ctx.focused_output.clone(),
+        ..ctx.clone()
     };
 
     // Store options as Rc for sharing with handlers
@@ -1295,24 +1287,10 @@ fn attach_template_key_handler(
         }
 
         // Arrow Up/Down → navigate
-        if key == gdk4::Key::Up || key == gdk4::Key::KP_Up {
-            let current = sel.get();
-            let new_idx = if current == 0 {
-                option_count - 1
-            } else {
-                current - 1
-            };
-            sel.set(new_idx);
-            update_selection(&widgets, new_idx);
-            return Propagation::Stop;
-        }
-        if key == gdk4::Key::Down || key == gdk4::Key::KP_Down {
-            let current = sel.get();
-            let new_idx = if current >= option_count - 1 {
-                0
-            } else {
-                current + 1
-            };
+        let is_up = key == gdk4::Key::Up || key == gdk4::Key::KP_Up;
+        let is_down = key == gdk4::Key::Down || key == gdk4::Key::KP_Down;
+        if is_up || is_down {
+            let new_idx = wrap_index(sel.get(), option_count, is_down);
             sel.set(new_idx);
             update_selection(&widgets, new_idx);
             return Propagation::Stop;
@@ -1580,9 +1558,8 @@ fn build_fuzzy_select(
 
             let new_indices = fuzzy_filter(&query, &opts, &mut matcher.borrow_mut());
 
-            let visible: HashSet<usize> = new_indices.iter().copied().collect();
             for (i, label) in labels.iter().enumerate() {
-                label.set_visible(visible.contains(&i));
+                label.set_visible(new_indices.contains(&i));
             }
 
             // Reorder labels in the list to match score order (best first)
@@ -1615,22 +1592,13 @@ fn build_fuzzy_select(
                 return Propagation::Proceed;
             }
 
-            let current = sel.get();
-            let new_idx = if key == gdk4::Key::Up || key == gdk4::Key::KP_Up {
-                if current == 0 {
-                    indices.len() - 1
-                } else {
-                    current - 1
-                }
-            } else if key == gdk4::Key::Down || key == gdk4::Key::KP_Down {
-                if current >= indices.len() - 1 {
-                    0
-                } else {
-                    current + 1
-                }
-            } else {
+            let is_up = key == gdk4::Key::Up || key == gdk4::Key::KP_Up;
+            let is_down = key == gdk4::Key::Down || key == gdk4::Key::KP_Down;
+            if !is_up && !is_down {
                 return Propagation::Proceed;
-            };
+            }
+            let current = sel.get();
+            let new_idx = wrap_index(current, indices.len(), is_down);
 
             update_fuzzy_selection(&labels, &indices, current, new_idx);
             sel.set(new_idx);
@@ -1657,10 +1625,6 @@ fn build_fuzzy_select(
     })
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "variable input form with widget construction and layout"
-)]
 fn show_variable_input(
     option: &TemplateOption,
     ch: char,
@@ -1672,7 +1636,6 @@ fn show_variable_input(
 
     let config = &ctx.config;
     let metrics = KeyboardMetrics::from_monitor_width(ctx.monitor_width, config.layout);
-    apply_scaled_css(&metrics.scaled_css_variables());
 
     let container = GtkBox::builder()
         .orientation(Orientation::Vertical)
@@ -1765,56 +1728,30 @@ fn show_variable_input(
     }
 
     let var_ctx = ActionContext {
-        mode: ctx.mode,
-        window: ctx.window.clone(),
         error_label,
         error_revealer,
-        config: ctx.config.clone(),
-        keyboard_infos: ctx.keyboard_infos.clone(),
-        monitor_width: ctx.monitor_width,
-        original_workspace: ctx.original_workspace.clone(),
-        selection_made: ctx.selection_made.clone(),
-        focused_output: ctx.focused_output.clone(),
+        ..ctx.clone()
     };
 
-    let var_names: Vec<String> = option.variables.iter().map(|v| v.name.clone()).collect();
-    let programs = option.programs.clone();
-    let template_title = option.title.clone();
-    let template_variables = option.variables.clone();
-
-    attach_variable_input_key_handler(
-        &var_ctx,
-        ch,
-        &widgets,
-        &var_names,
-        &programs,
-        template_name,
-        template_title,
-        template_variables,
-    );
+    attach_variable_input_key_handler(&var_ctx, ch, &widgets, option, template_name);
     attach_close_on_backdrop_click(window, &container);
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "template context requires passing title and variables for workspace naming"
-)]
 fn attach_variable_input_key_handler(
     ctx: &ActionContext,
     ch: char,
     widgets: &[VariableWidget],
-    var_names: &[String],
-    programs: &[String],
+    option: &TemplateOption,
     template_name: Option<String>,
-    template_title: Option<String>,
-    template_variables: Vec<TemplateVariable>,
 ) {
     let key_ctx = ctx.clone();
     let close_keybinds = ctx.config.close_keybinds.clone();
     let prefix = ctx.config.workspace_prefix.clone();
     let widgets: Vec<VariableWidget> = widgets.to_vec();
-    let var_names: Vec<String> = var_names.to_vec();
-    let programs: Vec<String> = programs.to_vec();
+    let var_names: Vec<String> = option.variables.iter().map(|v| v.name.clone()).collect();
+    let programs = option.programs.clone();
+    let template_title = option.title.clone();
+    let template_variables = option.variables.clone();
 
     let key_controller = new_key_controller();
     key_controller.connect_key_pressed(move |_, key, _, modifier| {
@@ -1921,6 +1858,21 @@ fn attach_close_on_backdrop_click(window: &ApplicationWindow, container: &GtkBox
 fn show_error(ctx: &ActionContext, msg: &str) {
     ctx.error_label.set_label(msg);
     ctx.error_revealer.set_reveal_child(true);
+}
+
+/// Wrap-around index navigation (Up decrements, Down increments).
+fn wrap_index(current: usize, len: usize, forward: bool) -> usize {
+    if forward {
+        if current >= len - 1 {
+            0
+        } else {
+            current + 1
+        }
+    } else if current == 0 {
+        len - 1
+    } else {
+        current - 1
+    }
 }
 
 #[cfg(test)]

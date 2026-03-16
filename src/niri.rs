@@ -149,7 +149,8 @@ pub fn spawn_workspace_programs(
     workspace_name: &str,
     programs: &[String],
 ) -> anyhow::Result<Option<ReorderRequest>> {
-    let existing_ids = if programs.len() >= 2 {
+    let needs_reorder = programs.len() >= 2;
+    let existing_ids = if needs_reorder {
         snapshot_workspace_window_ids(workspace_name)
     } else {
         HashSet::new()
@@ -163,7 +164,7 @@ pub fn spawn_workspace_programs(
         spawn_program(&parts).with_context(|| format!("failed to spawn '{cmd_str}'"))?;
     }
 
-    if programs.len() >= 2 {
+    if needs_reorder {
         Ok(Some(ReorderRequest {
             workspace_name: workspace_name.to_string(),
             commands: programs.to_vec(),
