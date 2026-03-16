@@ -267,6 +267,8 @@ struct ActionContext {
     original_workspace: Rc<RefCell<Option<String>>>,
     /// Set to true when the user makes a selection (skip restore on close).
     selection_made: Rc<Cell<bool>>,
+    /// Output name where the overlay is displayed (for hover-preview gating).
+    focused_output: Option<String>,
 }
 
 #[expect(
@@ -281,6 +283,7 @@ struct DynWorkspaceInfo {
     is_urgent: bool,
     name: Option<String>,
     ws_name: Option<String>,
+    output: Option<String>,
 }
 
 impl DynWorkspaceInfo {
@@ -293,6 +296,7 @@ impl DynWorkspaceInfo {
             is_urgent: false,
             name: None,
             ws_name: None,
+            output: None,
         }
     }
 }
@@ -368,6 +372,7 @@ fn build_dyn_workspace_infos(
                 is_urgent,
                 name,
                 ws_name: Some(ws_name.clone()),
+                output: ws.output.clone(),
             })
         })
         .collect();
@@ -485,15 +490,22 @@ fn build_key_widget(
     });
     key_box.add_controller(click);
 
-    // Hover preview: focus workspace on mouse enter (Normal mode, created cards only)
+    // Hover preview: focus workspace on mouse enter (Normal mode, created cards only).
+    // Only enable for workspaces on the same output to avoid jumping the cursor.
     if !is_disabled && mode == Mode::Normal && ctx.config.hover_preview {
-        if let Some(ref ws_name) = info.ws_name {
-            let hover_name = ws_name.clone();
-            let motion = EventControllerMotion::new();
-            motion.connect_enter(move |_, _, _| {
-                let _ = niri::focus_workspace_by_name(&hover_name);
-            });
-            key_box.add_controller(motion);
+        let same_output = match (&info.output, &ctx.focused_output) {
+            (Some(ws_out), Some(focus_out)) => ws_out == focus_out,
+            _ => false,
+        };
+        if same_output {
+            if let Some(ref ws_name) = info.ws_name {
+                let hover_name = ws_name.clone();
+                let motion = EventControllerMotion::new();
+                motion.connect_enter(move |_, _, _| {
+                    let _ = niri::focus_workspace_by_name(&hover_name);
+                });
+                key_box.add_controller(motion);
+            }
         }
     }
 
@@ -782,6 +794,7 @@ fn populate_overlay(
         monitor_width,
         original_workspace: original_workspace.clone(),
         selection_made: selection_made.clone(),
+        focused_output: find_focused_output(),
     };
 
     let keyboard = build_keyboard(&infos, mode, &ctx, &metrics);
@@ -1057,6 +1070,7 @@ fn show_template_picker(ch: char, ctx: &ActionContext) {
         monitor_width: ctx.monitor_width,
         original_workspace: ctx.original_workspace.clone(),
         selection_made: ctx.selection_made.clone(),
+        focused_output: ctx.focused_output.clone(),
     };
 
     // Store options as Rc for sharing with handlers
@@ -1624,6 +1638,7 @@ fn show_variable_input(
         monitor_width: ctx.monitor_width,
         original_workspace: ctx.original_workspace.clone(),
         selection_made: ctx.selection_made.clone(),
+        focused_output: ctx.focused_output.clone(),
     };
 
     let var_names: Vec<String> = option.variables.iter().map(|v| v.name.clone()).collect();
