@@ -9,7 +9,6 @@ use serde::Deserialize;
 #[serde(default)]
 struct Config {
     general: GeneralConfig,
-    layout: LayoutConfig,
     keybinds: KeybindsConfig,
     hooks: HooksConfig,
     workspace: HashMap<String, WorkspaceEntry>,
@@ -83,28 +82,6 @@ impl Default for GeneralConfig {
             auto_delete_empty: true,
             layout: "qwerty".to_string(),
             hover_preview: true,
-        }
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(default)]
-struct LayoutConfig {
-    max_columns: u32,
-    min_columns: u32,
-    max_windows_per_card: usize,
-    app_name_max_chars: i32,
-    window_title_max_chars: i32,
-}
-
-impl Default for LayoutConfig {
-    fn default() -> Self {
-        Self {
-            max_columns: 4,
-            min_columns: 2,
-            max_windows_per_card: 4,
-            app_name_max_chars: 12,
-            window_title_max_chars: 18,
         }
     }
 }
