@@ -594,11 +594,13 @@ pub fn run_hooks(commands: &[String], env: &[(String, String)]) {
                     .stderr(std::process::Stdio::inherit())
                     .spawn();
                 match result {
-                    Ok(mut child) => {
-                        if let Err(e) = child.wait() {
-                            eprintln!("warning: hook '{cmd}' failed: {e}");
+                    Ok(mut child) => match child.wait() {
+                        Ok(status) if !status.success() => {
+                            eprintln!("warning: hook '{cmd}' exited with {status}");
                         }
-                    }
+                        Ok(_) => {}
+                        Err(e) => eprintln!("warning: hook '{cmd}' failed: {e}"),
+                    },
                     Err(e) => eprintln!("warning: failed to spawn hook '{cmd}': {e}"),
                 }
             }
