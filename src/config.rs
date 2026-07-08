@@ -601,6 +601,22 @@ pub fn extract_variable_references(program: &str) -> Vec<String> {
     refs
 }
 
+/// Substitute `{{name}}` placeholders in each program string, shell-quoting
+/// each value so it survives word splitting as a single argument.
+///
+/// Use for program command lines. Display strings (workspace titles) should
+/// use [`substitute_variables`], which inserts values verbatim.
+pub fn substitute_variables_quoted(
+    programs: &[String],
+    values: &HashMap<String, String>,
+) -> Vec<String> {
+    let quoted: HashMap<String, String> = values
+        .iter()
+        .map(|(name, value)| (name.clone(), shell_words::quote(value).into_owned()))
+        .collect();
+    substitute_variables(programs, &quoted)
+}
+
 /// Substitute `{{name}}` placeholders in each program string with values.
 ///
 /// Unmatched placeholders (no matching key in `values`) are left as-is.
@@ -1493,6 +1509,41 @@ programs = ["firefox"]
                 "git -C /home/user/project checkout main",
                 "kitty"
             ]
+        );
+    }
+
+    // --- substitute_variables_quoted ---
+
+    #[test]
+    fn substitute_variables_quoted_spaces_survive_splitting() {
+        let programs = vec!["code {{path}}".to_string()];
+        let values = HashMap::from([("path".to_string(), "/home/me/my project".to_string())]);
+        let substituted = substitute_variables_quoted(&programs, &values);
+        assert_eq!(substituted, vec!["code '/home/me/my project'"]);
+        assert_eq!(
+            shell_words::split(&substituted[0]).unwrap(),
+            vec!["code", "/home/me/my project"]
+        );
+    }
+
+    #[test]
+    fn substitute_variables_quoted_plain_value_unquoted() {
+        let programs = vec!["git checkout {{branch}}".to_string()];
+        let values = HashMap::from([("branch".to_string(), "main".to_string())]);
+        assert_eq!(
+            substitute_variables_quoted(&programs, &values),
+            vec!["git checkout main"]
+        );
+    }
+
+    #[test]
+    fn substitute_variables_quoted_escapes_quotes() {
+        let programs = vec!["notify {{msg}}".to_string()];
+        let values = HashMap::from([("msg".to_string(), "it's done".to_string())]);
+        let substituted = substitute_variables_quoted(&programs, &values);
+        assert_eq!(
+            shell_words::split(&substituted[0]).unwrap(),
+            vec!["notify", "it's done"]
         );
     }
 

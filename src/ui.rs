@@ -1813,7 +1813,7 @@ fn attach_variable_input_key_handler(
             for (name, widget) in var_names.iter().zip(widgets.iter()) {
                 values.insert(name.clone(), widget.value());
             }
-            let substituted = crate::config::substitute_variables(&programs, &values);
+            let substituted = crate::config::substitute_variables_quoted(&programs, &values);
             let title = crate::config::resolve_workspace_title(
                 template_title.as_deref(),
                 &template_variables,

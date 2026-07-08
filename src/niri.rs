@@ -188,7 +188,8 @@ pub fn switch_workspace(
 
 /// Spawn programs for a newly created workspace.
 ///
-/// Splits each command string on whitespace and spawns via niri IPC.
+/// Splits each command string with shell quoting rules (no shell is invoked)
+/// and spawns via niri IPC.
 /// If two or more programs are launched, returns a [`ReorderRequest`] that the
 /// caller should pass to [`reorder_workspace_columns`] (either synchronously
 /// or in a background thread).
@@ -204,7 +205,8 @@ pub fn spawn_workspace_programs(
     };
 
     for cmd_str in programs {
-        let parts: Vec<String> = cmd_str.split_whitespace().map(String::from).collect();
+        let parts = shell_words::split(cmd_str)
+            .with_context(|| format!("failed to parse command '{cmd_str}'"))?;
         if parts.is_empty() {
             continue;
         }
@@ -228,6 +230,7 @@ pub fn spawn_program(command: &[String]) -> anyhow::Result<()> {
     })
 }
 
+#[derive(Debug)]
 pub struct ReorderRequest {
     pub workspace_name: String,
     pub commands: Vec<String>,
@@ -235,10 +238,25 @@ pub struct ReorderRequest {
 }
 
 /// Extract the executable name from a command string.
-/// Takes the first whitespace-delimited token and strips any leading path.
-fn executable_name(command: &str) -> &str {
-    let first_token = command.split_whitespace().next().unwrap_or(command);
-    first_token.rsplit('/').next().unwrap_or(first_token)
+///
+/// Takes the first shell-word (falling back to whitespace splitting when the
+/// command doesn't parse) and strips any leading path.
+fn executable_name(command: &str) -> String {
+    let first_token = shell_words::split(command)
+        .ok()
+        .and_then(|words| words.into_iter().next())
+        .unwrap_or_else(|| {
+            command
+                .split_whitespace()
+                .next()
+                .unwrap_or(command)
+                .to_string()
+        });
+    first_token
+        .rsplit('/')
+        .next()
+        .unwrap_or(&first_token)
+        .to_string()
 }
 
 /// Check whether a window's `app_id` matches an executable name.
@@ -335,7 +353,7 @@ fn reorder_workspace_columns_inner(request: &ReorderRequest) -> anyhow::Result<(
     }
 
     // Match each command to a new window by executable name / app_id
-    let exe_names: Vec<&str> = request
+    let exe_names: Vec<String> = request
         .commands
         .iter()
         .map(|c| executable_name(c))
@@ -849,6 +867,23 @@ mod tests {
             executable_name("/usr/bin/firefox --private-window"),
             "firefox"
         );
+    }
+
+    #[test]
+    fn executable_name_quoted_paths() {
+        assert_eq!(
+            executable_name("'/opt/my apps/firefox' --private-window"),
+            "firefox"
+        );
+        assert_eq!(executable_name("code '/home/me/my project'"), "code");
+        // Unparseable input falls back to whitespace splitting
+        assert_eq!(executable_name("foo 'unclosed"), "foo");
+    }
+
+    #[test]
+    fn spawn_workspace_programs_rejects_malformed_quoting() {
+        let err = spawn_workspace_programs("dyn-a", &["code 'unclosed".to_string()]).unwrap_err();
+        assert!(err.to_string().contains("failed to parse"));
     }
 
     #[test]

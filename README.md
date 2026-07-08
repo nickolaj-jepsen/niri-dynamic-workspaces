@@ -70,7 +70,10 @@ programs = ["firefox", "slack"]        # programs launched on create (replaces d
 # Configured workspaces that don't exist yet appear as muted keys with a dashed border.
 
 [workspace.b]
-programs = ["kitty --title myterm"]    # arguments supported via whitespace splitting
+programs = ["kitty --title myterm"]    # arguments split with shell quoting rules
+# Quote arguments containing spaces: ["kitty --title 'my term'"]. No shell is
+# involved — quoting only groups words. Substituted {{variables}} are quoted
+# automatically, so "code {{path}}" works with paths containing spaces.
 
 [workspace.1]                          # digit workspaces work too
 name = "Comms"

@@ -654,6 +654,7 @@ dependencies = [
  "nucleo-matcher",
  "serde",
  "serde_json",
+ "shell-words",
  "toml",
 ]
 
@@ -829,6 +830,12 @@ checksum = "f8bbf91e5a4d6315eee45e704372590b30e260ee83af6639d64557f51b067776"
 dependencies = [
  "serde_core",
 ]
+
+[[package]]
+name = "shell-words"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc6fe69c597f9c37bfeeeeeb33da3530379845f10be461a66d16d03eca2ded77"
 
 [[package]]
 name = "slab"
