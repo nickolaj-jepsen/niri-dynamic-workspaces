@@ -555,6 +555,85 @@ fn event_cleanup_loop(prefix_source: &mut impl FnMut() -> Option<String>) -> any
     }
 }
 
+/// Overlay-relevant compositor changes, coarsened from the niri event stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OverlayEvent {
+    /// Focus may have moved (workspace activation or window focus change).
+    FocusChanged,
+    /// Workspaces or windows changed; overlay cards may be stale.
+    Structural,
+}
+
+fn classify_event(event: &Event) -> Option<OverlayEvent> {
+    match event {
+        Event::WorkspacesChanged { .. }
+        | Event::WorkspaceUrgencyChanged { .. }
+        | Event::WindowsChanged { .. }
+        | Event::WindowOpenedOrChanged { .. }
+        | Event::WindowClosed { .. }
+        | Event::WindowUrgencyChanged { .. } => Some(OverlayEvent::Structural),
+        Event::WorkspaceActivated { .. } | Event::WindowFocusChanged { .. } => {
+            Some(OverlayEvent::FocusChanged)
+        }
+        _ => None,
+    }
+}
+
+/// Forward overlay-relevant niri events to `on_event` while `alive` is true.
+///
+/// Intended for a dedicated thread. Uses a socket read timeout so the loop
+/// notices `alive` flipping even when no events arrive, and reconnects if
+/// the socket drops.
+pub fn run_overlay_event_stream(
+    alive: &std::sync::atomic::AtomicBool,
+    mut on_event: impl FnMut(OverlayEvent),
+) {
+    while alive.load(std::sync::atomic::Ordering::Relaxed) {
+        match overlay_event_loop(alive, &mut on_event) {
+            Ok(()) => break,
+            Err(e) => {
+                eprintln!(
+                    "warning: overlay event stream failed: {e:#}, reconnecting in 1s\u{2026}"
+                );
+                thread::sleep(Duration::from_secs(1));
+            }
+        }
+    }
+}
+
+fn overlay_event_loop(
+    alive: &std::sync::atomic::AtomicBool,
+    on_event: &mut impl FnMut(OverlayEvent),
+) -> anyhow::Result<()> {
+    let reader = &mut connect_event_stream()?;
+    reader
+        .get_ref()
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .context("failed to set read timeout")?;
+
+    let mut buf = String::new();
+    while alive.load(std::sync::atomic::Ordering::Relaxed) {
+        match reader.read_line(&mut buf) {
+            Ok(0) => bail!("niri event stream closed"),
+            Ok(_) => {
+                // Skip events that don't deserialize (e.g. newer niri variants)
+                if let Ok(event) = serde_json::from_str::<Event>(&buf) {
+                    if let Some(overlay_event) = classify_event(&event) {
+                        on_event(overlay_event);
+                    }
+                }
+                buf.clear();
+            }
+            // Timeout: keep any partial line in buf and re-check `alive`.
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(e) => return Err(e).context("failed to read from niri socket"),
+        }
+    }
+    Ok(())
+}
+
 /// Snapshot all window IDs currently on a named workspace.
 ///
 /// Returns an empty set if the workspace doesn't exist or IPC fails.

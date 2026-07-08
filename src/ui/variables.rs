@@ -451,6 +451,7 @@ pub(super) fn show_variable_input(
     template_name: Option<String>,
 ) {
     let window = &ctx.window;
+    ctx.session.in_subview.set(true);
     remove_app_controllers(window);
 
     let config = &ctx.session.config;

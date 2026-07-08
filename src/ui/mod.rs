@@ -6,6 +6,8 @@ mod variables;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use glib::Propagation;
 use gtk4::prelude::*;
@@ -158,6 +160,9 @@ struct OverlaySession {
     /// Armed after the first real mouse movement; prevents hover-preview from
     /// triggering when the cursor is already over a card at overlay open.
     hover_armed: Cell<bool>,
+    /// True while a sub-view (template picker / variable form) is showing;
+    /// suppresses structural refreshes that would destroy it.
+    in_subview: Cell<bool>,
 }
 
 #[derive(Clone)]
@@ -205,6 +210,7 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
         }),
         selection_made: Cell::new(false),
         hover_armed: Cell::new(false),
+        in_subview: Cell::new(false),
     });
 
     // Arm hover-preview after the first real mouse movement so that a cursor
@@ -235,31 +241,67 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
         });
     }
 
-    // Poll for focused-output changes so the overlay follows the cursor.
+    // Follow compositor state while the overlay is open: a background thread
+    // forwards niri events; focus events move the overlay between outputs,
+    // structural events refresh the cards.
+    let (event_tx, event_rx) = async_channel::unbounded();
+    let stream_alive = Arc::new(AtomicBool::new(true));
+    {
+        let alive = stream_alive.clone();
+        std::thread::Builder::new()
+            .name("overlay-events".into())
+            .spawn(move || {
+                niri::run_overlay_event_stream(&alive, |event| {
+                    let _ = event_tx.send_blocking(event);
+                });
+            })
+            .ok();
+    }
+    window.connect_close_request(move |_| {
+        stream_alive.store(false, Ordering::Relaxed);
+        Propagation::Proceed
+    });
+
     let tracked_output = Rc::new(RefCell::new(focused_output));
     let track_window = window.clone();
     let track_session = session;
-    glib::timeout_add_local(std::time::Duration::from_millis(150), move || {
-        if !track_window.is_visible() {
-            return glib::ControlFlow::Break;
-        }
-        let fresh_workspaces = niri::list_workspaces().unwrap_or_default();
-        let current = focused_output_from(&fresh_workspaces);
-        if current != *tracked_output.borrow() {
-            tracked_output.borrow_mut().clone_from(&current);
-            if let Some(ref output) = current {
-                if let Some(monitor) = find_monitor_for_output(output) {
+    glib::spawn_future_local(async move {
+        while let Ok(event) = event_rx.recv().await {
+            if !track_window.is_visible() {
+                break;
+            }
+            let mut structural = event == niri::OverlayEvent::Structural;
+            if structural {
+                // Debounce: coalesce event bursts into one refresh.
+                glib::timeout_future(std::time::Duration::from_millis(100)).await;
+            }
+            while let Ok(more) = event_rx.try_recv() {
+                structural |= more == niri::OverlayEvent::Structural;
+            }
+
+            let fresh_workspaces = niri::list_workspaces().unwrap_or_default();
+            let current = focused_output_from(&fresh_workspaces);
+            let mode = Mode::from_window(&track_window.clone().upcast()).unwrap_or(Mode::Normal);
+
+            // Focused output changed → move the overlay to that monitor.
+            if current != *tracked_output.borrow() {
+                tracked_output.borrow_mut().clone_from(&current);
+                if let Some(monitor) = current.as_deref().and_then(find_monitor_for_output) {
                     track_window.set_monitor(Some(&monitor));
                     track_session
                         .monitor_width
                         .set(get_monitor_width(Some(&monitor)));
-                    let mode =
-                        Mode::from_window(&track_window.clone().upcast()).unwrap_or(Mode::Normal);
                     populate_overlay(&track_window, &track_session, mode, Some(fresh_workspaces));
+                    continue;
                 }
             }
+
+            // Workspaces/windows changed → refresh the cards, but never while
+            // a sub-view (picker or variable form) is up.
+            if structural && !track_session.in_subview.get() {
+                populate_overlay(&track_window, &track_session, mode, Some(fresh_workspaces));
+            }
         }
-        glib::ControlFlow::Continue
     });
 
     window.present();
@@ -386,6 +428,7 @@ fn populate_overlay(
     prefetched_workspaces: Option<Vec<niri_ipc::Workspace>>,
 ) {
     let config = &session.config;
+    session.in_subview.set(false);
     window.set_widget_name(mode.widget_name());
     remove_app_controllers(window);
 

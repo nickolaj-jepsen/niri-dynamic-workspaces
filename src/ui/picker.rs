@@ -142,6 +142,7 @@ fn select_template_option(option: &TemplateOption, ch: char, ctx: &ActionContext
 
 pub(super) fn show_template_picker(ch: char, ctx: &ActionContext) {
     let window = &ctx.window;
+    ctx.session.in_subview.set(true);
     remove_app_controllers(window);
 
     let config = &ctx.session.config;

@@ -185,6 +185,8 @@ All layouts contain the same 36 keys (a–z, 0–9) arranged in the physical pos
 
 All modes support toggle behavior: running the same command again closes the overlay.
 
+While open, the overlay tracks the compositor live: it follows the focused output across monitors and refreshes its cards when workspaces or windows change.
+
 #### Direct mode (no overlay)
 
 Pass a workspace key to act immediately without opening the overlay:
