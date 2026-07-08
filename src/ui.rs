@@ -1907,6 +1907,9 @@ fn show_error(ctx: &ActionContext, msg: &str) {
 
 /// Wrap-around index navigation (Up decrements, Down increments).
 fn wrap_index(current: usize, len: usize, forward: bool) -> usize {
+    if len == 0 {
+        return 0;
+    }
     if forward {
         if current >= len - 1 {
             0
@@ -1996,6 +1999,22 @@ mod tests {
         // "dev" (exact) should rank above "develop" (prefix)
         assert_eq!(result[0], 1);
         assert!(result.contains(&2));
+    }
+
+    // --- wrap_index ---
+
+    #[test]
+    fn wrap_index_cycles_both_directions() {
+        assert_eq!(wrap_index(0, 3, true), 1);
+        assert_eq!(wrap_index(2, 3, true), 0);
+        assert_eq!(wrap_index(0, 3, false), 2);
+        assert_eq!(wrap_index(1, 3, false), 0);
+    }
+
+    #[test]
+    fn wrap_index_empty_len_is_total() {
+        assert_eq!(wrap_index(0, 0, true), 0);
+        assert_eq!(wrap_index(5, 0, false), 0);
     }
 
     #[test]
