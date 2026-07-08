@@ -265,6 +265,9 @@ struct ActionContext {
     selection_made: Rc<Cell<bool>>,
     /// Output name where the overlay is displayed (for hover-preview gating).
     focused_output: Option<String>,
+    /// Armed after the first real mouse movement; prevents hover-preview from
+    /// triggering when the cursor is already over a card at overlay open.
+    hover_armed: Rc<Cell<bool>>,
 }
 
 #[expect(
@@ -474,11 +477,18 @@ fn build_card_shell(classes: Vec<&str>, key_size: i32) -> (GtkBox, GtkBox) {
 }
 
 /// Attach a hover-preview controller that focuses a workspace on mouse enter.
-fn attach_hover_preview(widget: &GtkBox, ws_name: &str) {
+///
+/// The `armed` flag prevents hover-preview from firing when the cursor is
+/// already over a card the moment the overlay appears. It is set to `true`
+/// by the window-level motion controller after the first real mouse movement.
+fn attach_hover_preview(widget: &GtkBox, ws_name: &str, armed: &Rc<Cell<bool>>) {
     let hover_name = ws_name.to_owned();
+    let hover_armed = armed.clone();
     let motion = EventControllerMotion::new();
     motion.connect_enter(move |_, _, _| {
-        let _ = niri::focus_workspace_by_name(&hover_name);
+        if hover_armed.get() {
+            let _ = niri::focus_workspace_by_name(&hover_name);
+        }
     });
     widget.add_controller(motion);
 }
@@ -542,7 +552,7 @@ fn build_key_widget(
         };
         if same_output {
             if let Some(ref ws_name) = info.ws_name {
-                attach_hover_preview(&key_box, ws_name);
+                attach_hover_preview(&key_box, ws_name, &ctx.hover_armed);
             }
         }
     }
@@ -637,7 +647,7 @@ fn build_static_card(
         card.add_controller(click);
 
         if mode == Mode::Normal && ctx.config.hover_preview {
-            attach_hover_preview(&card, &info.name);
+            attach_hover_preview(&card, &info.name, &ctx.hover_armed);
         }
     }
 
@@ -692,6 +702,20 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
         None
     }));
     let selection_made = Rc::new(Cell::new(false));
+    let hover_armed = Rc::new(Cell::new(false));
+
+    // Arm hover-preview after the first real mouse movement so that a cursor
+    // already resting over a card when the overlay appears does not trigger a
+    // workspace switch.
+    {
+        let armed = hover_armed.clone();
+        let motion = EventControllerMotion::new();
+        motion.set_name(Some("ndw-hover-arm"));
+        motion.connect_motion(move |_, _, _| {
+            armed.set(true);
+        });
+        window.add_controller(motion);
+    }
 
     let monitor_width = get_monitor_width(focused_monitor.as_ref());
     populate_overlay(
@@ -701,6 +725,7 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
         monitor_width,
         &original_workspace,
         &selection_made,
+        &hover_armed,
         Some(workspaces),
     );
 
@@ -724,6 +749,7 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
     let track_config = config.clone();
     let track_orig = original_workspace;
     let track_sel = selection_made;
+    let track_armed = hover_armed;
     glib::timeout_add_local(std::time::Duration::from_millis(150), move || {
         if !track_window.is_visible() {
             return glib::ControlFlow::Break;
@@ -745,6 +771,7 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
                         new_width,
                         &track_orig,
                         &track_sel,
+                        &track_armed,
                         Some(fresh_workspaces),
                     );
                 }
@@ -805,6 +832,7 @@ fn build_mode_tabs(ctx: &ActionContext, mode: Mode) -> GtkBox {
                     ctx.monitor_width,
                     &ctx.original_workspace,
                     &ctx.selection_made,
+                    &ctx.hover_armed,
                     None,
                 );
             });
@@ -878,6 +906,10 @@ fn build_hint_footer(metrics: &KeyboardMetrics, hints: &[&str]) -> GtkBox {
 /// Build (or rebuild) the overlay content for `mode` inside an existing window.
 ///
 /// If `prefetched_workspaces` is provided, uses them instead of making a fresh IPC call.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "shared state params for overlay lifecycle"
+)]
 fn populate_overlay(
     window: &ApplicationWindow,
     config: &Rc<ResolvedConfig>,
@@ -885,6 +917,7 @@ fn populate_overlay(
     monitor_width: i32,
     original_workspace: &Rc<RefCell<Option<String>>>,
     selection_made: &Rc<Cell<bool>>,
+    hover_armed: &Rc<Cell<bool>>,
     prefetched_workspaces: Option<Vec<niri_ipc::Workspace>>,
 ) {
     window.set_widget_name(mode.widget_name());
@@ -929,6 +962,7 @@ fn populate_overlay(
         original_workspace: original_workspace.clone(),
         selection_made: selection_made.clone(),
         focused_output: focused_output_from(&workspaces),
+        hover_armed: hover_armed.clone(),
     };
 
     // Assemble: static row → keyboard → hint footer → error revealer → mode tabs
@@ -1288,6 +1322,7 @@ fn attach_template_key_handler(
                     ctx.monitor_width,
                     &ctx.original_workspace,
                     &ctx.selection_made,
+                    &ctx.hover_armed,
                     None,
                 );
             });
@@ -1825,6 +1860,7 @@ fn attach_key_handler(ctx: &ActionContext, close_keybinds: &[crate::config::Keyb
                     ctx.monitor_width,
                     &ctx.original_workspace,
                     &ctx.selection_made,
+                    &ctx.hover_armed,
                     None,
                 );
             });
