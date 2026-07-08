@@ -116,7 +116,7 @@ programs = ["firefox", "slack"]
 
 - Each template needs a `programs` list (templates with empty programs are skipped)
 - The optional `key` field assigns a hotkey (a-z or 0-9) for quick selection in the picker
-- Templates without a `key` get one auto-assigned (1-9 then a-z)
+- Templates without a `key` get one auto-assigned (2-9 then a-z; `1` is reserved for the "Empty" option)
 - The picker always includes an "Empty" option that uses `default_programs`
 - Workspaces with per-key `[workspace.KEY].programs` skip the picker and create directly
 - Templates can define **variables** with `{{name}}` placeholders in program strings
@@ -204,6 +204,8 @@ spawn-at-startup "niri-dynamic-workspaces" "daemon"
 ```
 
 The daemon keeps GTK initialized and subsequent `switch`/`delete`/`move-window` invocations are forwarded to it over D-Bus, skipping startup overhead.
+
+Config changes are picked up automatically: the daemon re-reads the config file when it changes, so no restart is needed after editing it.
 
 The Home Manager module enables daemon mode by default. To disable it:
 
