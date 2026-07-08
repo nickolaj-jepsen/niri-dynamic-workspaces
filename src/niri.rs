@@ -106,6 +106,37 @@ pub fn focus_or_create_workspace(prefix: &str, ch: char, full_name: &str) -> any
     focus_or_create_impl(&mut SocketClient, prefix, ch, full_name)
 }
 
+/// Name the trailing empty workspace on the focused output.
+///
+/// Targets the workspace by id so the result doesn't depend on what happens
+/// to be focused when the request lands (naming the focused workspace was
+/// racy: focus can move between IPC calls).
+fn name_trailing_empty_workspace(
+    client: &mut impl NiriClient,
+    workspaces: &[Workspace],
+    full_name: &str,
+) -> anyhow::Result<()> {
+    let focused_output = workspaces
+        .iter()
+        .find(|w| w.is_focused)
+        .and_then(|w| w.output.clone());
+
+    let target = workspaces
+        .iter()
+        .filter(|w| w.output == focused_output)
+        .max_by_key(|w| w.idx)
+        .filter(|w| w.name.is_none() && w.active_window_id.is_none())
+        .ok_or_else(|| anyhow::anyhow!("no empty workspace available on the focused output"))?;
+
+    send_action_with(
+        client,
+        Action::SetWorkspaceName {
+            name: full_name.to_string(),
+            workspace: Some(WorkspaceReferenceArg::Id(target.id)),
+        },
+    )
+}
+
 fn focus_or_create_impl(
     client: &mut impl NiriClient,
     prefix: &str,
@@ -124,30 +155,12 @@ fn focus_or_create_impl(
         return Ok(false);
     }
 
-    let focused_output = workspaces
-        .iter()
-        .find(|w| w.is_focused)
-        .and_then(|w| w.output.clone());
-
-    let max_idx = workspaces
-        .iter()
-        .filter(|w| w.output == focused_output)
-        .map(|w| w.idx)
-        .max()
-        .unwrap_or(0);
+    name_trailing_empty_workspace(client, &workspaces, full_name)?;
 
     send_action_with(
         client,
         Action::FocusWorkspace {
-            reference: WorkspaceReferenceArg::Index(max_idx + 1),
-        },
-    )?;
-
-    send_action_with(
-        client,
-        Action::SetWorkspaceName {
-            name: full_name.to_string(),
-            workspace: None,
+            reference: WorkspaceReferenceArg::Name(full_name.to_string()),
         },
     )?;
 
@@ -387,23 +400,9 @@ fn move_window_impl(
     let ws_name = if let Some(existing) = find_workspace_name(&workspaces, prefix, ch) {
         existing
     } else {
-        let original_ws_id = workspaces
-            .iter()
-            .find(|w| w.is_focused)
-            .map(|w| w.id)
-            .ok_or_else(|| anyhow::anyhow!("no focused workspace found"))?;
-
-        // Create the target workspace (this switches focus to it)
-        focus_or_create_impl(client, prefix, ch, full_name)?;
-
-        // Switch back so the focused window is the one the user intended to move
-        send_action_with(
-            client,
-            Action::FocusWorkspace {
-                reference: WorkspaceReferenceArg::Id(original_ws_id),
-            },
-        )?;
-
+        // Naming by id needs no focus change, so the focused window — the one
+        // the user intends to move — stays focused throughout.
+        name_trailing_empty_workspace(client, &workspaces, full_name)?;
         full_name.to_string()
     };
 
@@ -670,6 +669,111 @@ mod tests {
                 reference: WorkspaceReferenceArg::Name(n),
             }) if n == "dyn-a My Project"
         ));
+    }
+
+    /// Focused workspace (id 1, idx 1) plus the trailing empty unnamed
+    /// workspace (id 2, idx 2) that niri keeps on every output.
+    fn workspaces_with_trailing_empty() -> Vec<Workspace> {
+        let mut focused = test_workspace(1, Some("browser"), true);
+        focused.active_window_id = Some(100);
+        let mut empty = test_workspace(2, None, false);
+        empty.idx = 2;
+        vec![focused, empty]
+    }
+
+    #[test]
+    fn focus_or_create_names_trailing_empty_by_id_then_focuses() {
+        let mut client = MockClient::new(vec![
+            Response::Workspaces(workspaces_with_trailing_empty()),
+            Response::Handled,
+            Response::Handled,
+        ]);
+
+        let created = focus_or_create_impl(&mut client, "dyn-", 'a', "dyn-a").unwrap();
+
+        assert!(created);
+        assert_eq!(client.sent.len(), 3);
+        assert!(matches!(
+            &client.sent[1],
+            Request::Action(Action::SetWorkspaceName {
+                name,
+                workspace: Some(WorkspaceReferenceArg::Id(2)),
+            }) if name == "dyn-a"
+        ));
+        assert!(matches!(
+            &client.sent[2],
+            Request::Action(Action::FocusWorkspace {
+                reference: WorkspaceReferenceArg::Name(n),
+            }) if n == "dyn-a"
+        ));
+    }
+
+    #[test]
+    fn focus_or_create_errors_when_trailing_workspace_not_empty() {
+        // Highest-idx workspace on the output is named/occupied — unexpected
+        // state, so creation must fail instead of renaming it.
+        let mut ws = test_workspace(1, Some("browser"), true);
+        ws.active_window_id = Some(100);
+        let mut client = MockClient::new(vec![Response::Workspaces(vec![ws])]);
+
+        let err = focus_or_create_impl(&mut client, "dyn-", 'a', "dyn-a").unwrap_err();
+
+        assert!(err.to_string().contains("no empty workspace"));
+        assert_eq!(client.sent.len(), 1);
+    }
+
+    #[test]
+    fn move_window_to_existing_workspace_moves_directly() {
+        let mut client = MockClient::new(vec![
+            Response::Workspaces(vec![test_workspace(1, Some("dyn-a My Project"), false)]),
+            Response::Handled,
+        ]);
+
+        move_window_impl(&mut client, "dyn-", 'a', "dyn-a").unwrap();
+
+        assert_eq!(client.sent.len(), 2);
+        assert!(matches!(
+            &client.sent[1],
+            Request::Action(Action::MoveWindowToWorkspace {
+                window_id: None,
+                reference: WorkspaceReferenceArg::Name(n),
+                focus: true,
+            }) if n == "dyn-a My Project"
+        ));
+    }
+
+    #[test]
+    fn move_window_creates_target_without_focus_change() {
+        let mut client = MockClient::new(vec![
+            Response::Workspaces(workspaces_with_trailing_empty()),
+            Response::Handled,
+            Response::Handled,
+        ]);
+
+        move_window_impl(&mut client, "dyn-", 'a', "dyn-a").unwrap();
+
+        assert_eq!(client.sent.len(), 3);
+        assert!(matches!(
+            &client.sent[1],
+            Request::Action(Action::SetWorkspaceName {
+                name,
+                workspace: Some(WorkspaceReferenceArg::Id(2)),
+            }) if name == "dyn-a"
+        ));
+        assert!(matches!(
+            &client.sent[2],
+            Request::Action(Action::MoveWindowToWorkspace {
+                window_id: None,
+                reference: WorkspaceReferenceArg::Name(n),
+                focus: true,
+            }) if n == "dyn-a"
+        ));
+        // The old implementation focused the new workspace and back — no
+        // FocusWorkspace action may appear at all.
+        assert!(!client
+            .sent
+            .iter()
+            .any(|r| matches!(r, Request::Action(Action::FocusWorkspace { .. }))));
     }
 
     #[test]
