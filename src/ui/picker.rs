@@ -130,7 +130,7 @@ fn select_template_option(option: &TemplateOption, ch: char, ctx: &ActionContext
         };
         // No variables, so title stays as-is (no substitution needed)
         let full_name = crate::config::workspace_name_with_title(
-            &ctx.config.workspace_prefix,
+            &ctx.session.config.workspace_prefix,
             ch,
             option.title.as_deref(),
         );
@@ -144,8 +144,9 @@ pub(super) fn show_template_picker(ch: char, ctx: &ActionContext) {
     let window = &ctx.window;
     remove_app_controllers(window);
 
-    let config = &ctx.config;
-    let metrics = KeyboardMetrics::from_monitor_width(ctx.monitor_width, config.layout);
+    let config = &ctx.session.config;
+    let metrics =
+        KeyboardMetrics::from_monitor_width(ctx.session.monitor_width.get(), config.layout);
 
     let container = GtkBox::builder()
         .orientation(Orientation::Vertical)
@@ -255,7 +256,7 @@ fn attach_template_key_handler(
     ws_char: char,
 ) {
     let key_ctx = ctx.clone();
-    let close_keybinds = ctx.config.close_keybinds.clone();
+    let close_keybinds = ctx.session.config.close_keybinds.clone();
     let options = options.clone();
     let widgets = option_widgets.clone();
     let sel = selected_idx.clone();
@@ -266,16 +267,7 @@ fn attach_template_key_handler(
         if matches_close_keybind(key, modifier, &close_keybinds) {
             let ctx = key_ctx.clone();
             glib::idle_add_local_once(move || {
-                populate_overlay(
-                    &ctx.window,
-                    &ctx.config,
-                    Mode::Normal,
-                    ctx.monitor_width,
-                    &ctx.original_workspace,
-                    &ctx.selection_made,
-                    &ctx.hover_armed,
-                    None,
-                );
+                populate_overlay(&ctx.window, &ctx.session, Mode::Normal, None);
             });
             return Propagation::Stop;
         }

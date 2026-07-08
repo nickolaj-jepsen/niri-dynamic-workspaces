@@ -1,4 +1,3 @@
-use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -9,7 +8,7 @@ use crate::config::ResolvedConfig;
 use crate::niri;
 
 use super::metrics::KeyboardMetrics;
-use super::{dispatch_action, display_key_char, show_error, ActionContext, Mode};
+use super::{dispatch_action, display_key_char, show_error, ActionContext, Mode, OverlaySession};
 
 #[expect(
     clippy::struct_excessive_bools,
@@ -219,15 +218,16 @@ fn build_card_shell(classes: Vec<&str>, key_size: i32) -> (GtkBox, GtkBox) {
 
 /// Attach a hover-preview controller that focuses a workspace on mouse enter.
 ///
-/// The `armed` flag prevents hover-preview from firing when the cursor is
-/// already over a card the moment the overlay appears. It is set to `true`
-/// by the window-level motion controller after the first real mouse movement.
-fn attach_hover_preview(widget: &GtkBox, ws_name: &str, armed: &Rc<Cell<bool>>) {
+/// The session's `hover_armed` flag prevents hover-preview from firing when
+/// the cursor is already over a card the moment the overlay appears. It is
+/// set to `true` by the window-level motion controller after the first real
+/// mouse movement.
+fn attach_hover_preview(widget: &GtkBox, ws_name: &str, session: &Rc<OverlaySession>) {
     let hover_name = ws_name.to_owned();
-    let hover_armed = armed.clone();
+    let hover_session = session.clone();
     let motion = EventControllerMotion::new();
     motion.connect_enter(move |_, _, _| {
-        if hover_armed.get() {
+        if hover_session.hover_armed.get() {
             let _ = niri::focus_workspace_by_name(&hover_name);
         }
     });
@@ -286,14 +286,14 @@ fn build_key_widget(
 
     // Hover preview: focus workspace on mouse enter (Normal mode, created cards only).
     // Only enable for workspaces on the same output to avoid jumping the cursor.
-    if !is_disabled && mode == Mode::Normal && ctx.config.hover_preview {
+    if !is_disabled && mode == Mode::Normal && ctx.session.config.hover_preview {
         let same_output = match (&info.output, &ctx.focused_output) {
             (Some(ws_out), Some(focus_out)) => ws_out == focus_out,
             _ => false,
         };
         if same_output {
             if let Some(ref ws_name) = info.ws_name {
-                attach_hover_preview(&key_box, ws_name, &ctx.hover_armed);
+                attach_hover_preview(&key_box, ws_name, &ctx.session);
             }
         }
     }
@@ -373,7 +373,7 @@ fn build_static_card(
         let click_ctx = ctx.clone();
         let click = GestureClick::new();
         click.connect_released(move |_, _, _, _| {
-            click_ctx.selection_made.set(true);
+            click_ctx.session.selection_made.set(true);
             let result = match click_ctx.mode {
                 Mode::Normal => niri::focus_workspace_by_name(&name),
                 Mode::MoveWindow => niri::move_window_to_workspace_by_name(&name),
@@ -387,8 +387,8 @@ fn build_static_card(
         });
         card.add_controller(click);
 
-        if mode == Mode::Normal && ctx.config.hover_preview {
-            attach_hover_preview(&card, &info.name, &ctx.hover_armed);
+        if mode == Mode::Normal && ctx.session.config.hover_preview {
+            attach_hover_preview(&card, &info.name, &ctx.session);
         }
     }
 

@@ -29,6 +29,7 @@ All three must pass clean before committing.
 Five top-level source files, plus the `ui/` module directory:
 
 - **main.rs** — clap CLI (`switch`/`delete`/`move-window` with optional direct key, `daemon`) and GTK4 application bootstrap. Direct-key invocations act via IPC without an overlay; otherwise `ui::build_ui` opens the overlay. `daemon` holds the app alive and runs the cleanup thread.
+- **actions.rs** — workspace action choreography shared by the CLI and the overlay: niri IPC call → on-create/on-delete hooks → background column reordering (with an application hold guard).
 - **config.rs** — Reads `~/.config/niri-dynamic-workspaces/config.toml` (TOML via serde), validates keybinds, workspaces, templates, and template variables, returns `ResolvedConfig`. All fields have defaults; missing/broken config is non-fatal (warnings to stderr). Also owns keyboard layout tables and `{{variable}}` substitution.
 - **niri.rs** — Niri IPC layer over the `NiriClient` transport trait (real `SocketClient` per request; scripted mock in tests). Key functions: `list_workspaces`, `list_windows`, `focus_or_create_workspace`, `delete_workspace`, `move_window_to_workspace`, `run_event_cleanup` (daemon event stream), `reorder_workspace_columns`, `run_hooks`.
 - **ui/** — Builds the full-screen layer-shell overlay with `gtk4-layer-shell`. `mod.rs` (overlay construction, modes, key handling), `metrics.rs` (sizing + scaled CSS), `cards.rs` (workspace info + card widgets), `picker.rs` (template picker), `variables.rs` (variable form + fuzzy select).

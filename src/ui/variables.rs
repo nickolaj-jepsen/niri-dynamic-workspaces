@@ -333,8 +333,9 @@ pub(super) fn show_variable_input(
     let window = &ctx.window;
     remove_app_controllers(window);
 
-    let config = &ctx.config;
-    let metrics = KeyboardMetrics::from_monitor_width(ctx.monitor_width, config.layout);
+    let config = &ctx.session.config;
+    let metrics =
+        KeyboardMetrics::from_monitor_width(ctx.session.monitor_width.get(), config.layout);
 
     let container = GtkBox::builder()
         .orientation(Orientation::Vertical)
@@ -444,8 +445,8 @@ fn attach_variable_input_key_handler(
     template_name: Option<String>,
 ) {
     let key_ctx = ctx.clone();
-    let close_keybinds = ctx.config.close_keybinds.clone();
-    let prefix = ctx.config.workspace_prefix.clone();
+    let close_keybinds = ctx.session.config.close_keybinds.clone();
+    let prefix = ctx.session.config.workspace_prefix.clone();
     let widgets: Vec<VariableWidget> = widgets.to_vec();
     let var_names: Vec<String> = option.variables.iter().map(|v| v.name.clone()).collect();
     let programs = option.programs.clone();

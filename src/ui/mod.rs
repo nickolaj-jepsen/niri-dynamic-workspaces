@@ -145,24 +145,31 @@ impl Mode {
 
 // --- Data types ---
 
+/// State shared across one overlay lifetime: created in [`build_ui`] and
+/// threaded through every repopulation and sub-view.
+struct OverlaySession {
+    config: Rc<ResolvedConfig>,
+    /// Width of the monitor the overlay currently occupies.
+    monitor_width: Cell<i32>,
+    /// Original workspace name when overlay opened (for hover-preview restore).
+    original_workspace: RefCell<Option<String>>,
+    /// Set to true when the user makes a selection (skip restore on close).
+    selection_made: Cell<bool>,
+    /// Armed after the first real mouse movement; prevents hover-preview from
+    /// triggering when the cursor is already over a card at overlay open.
+    hover_armed: Cell<bool>,
+}
+
 #[derive(Clone)]
 struct ActionContext {
     mode: Mode,
     window: ApplicationWindow,
     error_label: Label,
     error_revealer: Revealer,
-    config: Rc<ResolvedConfig>,
+    session: Rc<OverlaySession>,
     keyboard_infos: Rc<HashMap<char, DynWorkspaceInfo>>,
-    monitor_width: i32,
-    /// Original workspace name when overlay opened (for hover-preview restore).
-    original_workspace: Rc<RefCell<Option<String>>>,
-    /// Set to true when the user makes a selection (skip restore on close).
-    selection_made: Rc<Cell<bool>>,
     /// Output name where the overlay is displayed (for hover-preview gating).
     focused_output: Option<String>,
-    /// Armed after the first real mouse movement; prevents hover-preview from
-    /// triggering when the cursor is already over a card at overlay open.
-    hover_armed: Rc<Cell<bool>>,
 }
 
 // --- UI construction ---
@@ -186,47 +193,41 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
     window.set_anchor(Edge::Right, true);
     window.set_exclusive_zone(-1);
 
-    // Hover preview state — captured once at overlay open, shared across repopulations.
-    let original_workspace = Rc::new(RefCell::new(if config.hover_preview {
-        focused_workspace_name_from(&workspaces)
-    } else {
-        None
-    }));
-    let selection_made = Rc::new(Cell::new(false));
-    let hover_armed = Rc::new(Cell::new(false));
+    let session = Rc::new(OverlaySession {
+        config: config.clone(),
+        monitor_width: Cell::new(get_monitor_width(focused_monitor.as_ref())),
+        // Hover preview state — captured once at overlay open, shared across
+        // repopulations.
+        original_workspace: RefCell::new(if config.hover_preview {
+            focused_workspace_name_from(&workspaces)
+        } else {
+            None
+        }),
+        selection_made: Cell::new(false),
+        hover_armed: Cell::new(false),
+    });
 
     // Arm hover-preview after the first real mouse movement so that a cursor
     // already resting over a card when the overlay appears does not trigger a
     // workspace switch.
     {
-        let armed = hover_armed.clone();
+        let arm_session = session.clone();
         let motion = EventControllerMotion::new();
         motion.set_name(Some("ndw-hover-arm"));
         motion.connect_motion(move |_, _, _| {
-            armed.set(true);
+            arm_session.hover_armed.set(true);
         });
         window.add_controller(motion);
     }
 
-    let monitor_width = get_monitor_width(focused_monitor.as_ref());
-    populate_overlay(
-        &window,
-        config,
-        mode,
-        monitor_width,
-        &original_workspace,
-        &selection_made,
-        &hover_armed,
-        Some(workspaces),
-    );
+    populate_overlay(&window, &session, mode, Some(workspaces));
 
     // Restore original workspace on close if no selection was made.
     {
-        let orig = original_workspace.clone();
-        let sel = selection_made.clone();
+        let close_session = session.clone();
         window.connect_close_request(move |_| {
-            if !sel.get() {
-                if let Some(ref name) = *orig.borrow() {
+            if !close_session.selection_made.get() {
+                if let Some(ref name) = *close_session.original_workspace.borrow() {
                     let _ = niri::focus_workspace_by_name(name);
                 }
             }
@@ -237,10 +238,7 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
     // Poll for focused-output changes so the overlay follows the cursor.
     let tracked_output = Rc::new(RefCell::new(focused_output));
     let track_window = window.clone();
-    let track_config = config.clone();
-    let track_orig = original_workspace;
-    let track_sel = selection_made;
-    let track_armed = hover_armed;
+    let track_session = session;
     glib::timeout_add_local(std::time::Duration::from_millis(150), move || {
         if !track_window.is_visible() {
             return glib::ControlFlow::Break;
@@ -251,20 +249,13 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
             tracked_output.borrow_mut().clone_from(&current);
             if let Some(ref output) = current {
                 if let Some(monitor) = find_monitor_for_output(output) {
-                    let new_width = get_monitor_width(Some(&monitor));
                     track_window.set_monitor(Some(&monitor));
+                    track_session
+                        .monitor_width
+                        .set(get_monitor_width(Some(&monitor)));
                     let mode =
                         Mode::from_window(&track_window.clone().upcast()).unwrap_or(Mode::Normal);
-                    populate_overlay(
-                        &track_window,
-                        &track_config,
-                        mode,
-                        new_width,
-                        &track_orig,
-                        &track_sel,
-                        &track_armed,
-                        Some(fresh_workspaces),
-                    );
+                    populate_overlay(&track_window, &track_session, mode, Some(fresh_workspaces));
                 }
             }
         }
@@ -316,16 +307,7 @@ fn build_mode_tabs(ctx: &ActionContext, mode: Mode) -> GtkBox {
         click.connect_released(move |_, _, _, _| {
             let ctx = tab_ctx.clone();
             glib::idle_add_local_once(move || {
-                populate_overlay(
-                    &ctx.window,
-                    &ctx.config,
-                    m,
-                    ctx.monitor_width,
-                    &ctx.original_workspace,
-                    &ctx.selection_made,
-                    &ctx.hover_armed,
-                    None,
-                );
+                populate_overlay(&ctx.window, &ctx.session, m, None);
             });
         });
         tab_label.add_controller(click);
@@ -397,20 +379,13 @@ fn build_hint_footer(metrics: &KeyboardMetrics, hints: &[&str]) -> GtkBox {
 /// Build (or rebuild) the overlay content for `mode` inside an existing window.
 ///
 /// If `prefetched_workspaces` is provided, uses them instead of making a fresh IPC call.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "shared state params for overlay lifecycle"
-)]
 fn populate_overlay(
     window: &ApplicationWindow,
-    config: &Rc<ResolvedConfig>,
+    session: &Rc<OverlaySession>,
     mode: Mode,
-    monitor_width: i32,
-    original_workspace: &Rc<RefCell<Option<String>>>,
-    selection_made: &Rc<Cell<bool>>,
-    hover_armed: &Rc<Cell<bool>>,
     prefetched_workspaces: Option<Vec<niri_ipc::Workspace>>,
 ) {
+    let config = &session.config;
     window.set_widget_name(mode.widget_name());
     remove_app_controllers(window);
 
@@ -431,7 +406,7 @@ fn populate_overlay(
     let (error_label, error_revealer) = create_error_revealer();
 
     // Compute metrics from monitor size and apply scaled CSS
-    let metrics = KeyboardMetrics::from_monitor_width(monitor_width, config.layout);
+    let metrics = KeyboardMetrics::from_monitor_width(session.monitor_width.get(), config.layout);
     apply_scaled_css(&metrics.scaled_css_variables());
 
     // Use pre-fetched workspaces or fetch fresh; always fetch windows fresh.
@@ -447,13 +422,9 @@ fn populate_overlay(
         window: window.clone(),
         error_label,
         error_revealer: error_revealer.clone(),
-        config: config.clone(),
+        session: session.clone(),
         keyboard_infos: infos.clone(),
-        monitor_width,
-        original_workspace: original_workspace.clone(),
-        selection_made: selection_made.clone(),
         focused_output: focused_output_from(&workspaces),
-        hover_armed: hover_armed.clone(),
     };
 
     // Assemble: static row → keyboard → hint footer → error revealer → mode tabs
@@ -494,8 +465,14 @@ fn switch_and_close(
         show_error(ctx, "Failed: window has no application");
         return;
     };
-    let result =
-        crate::actions::switch_workspace(&app, &ctx.config, ws_key, ws_name, programs, hook_info);
+    let result = crate::actions::switch_workspace(
+        &app,
+        &ctx.session.config,
+        ws_key,
+        ws_name,
+        programs,
+        hook_info,
+    );
     if let Err(e) = result {
         show_error(ctx, &format!("Failed: {e:#}"));
         return;
@@ -504,26 +481,26 @@ fn switch_and_close(
 }
 
 fn dispatch_action(ch: char, ctx: &ActionContext) {
-    ctx.selection_made.set(true);
-    let prefix = &ctx.config.workspace_prefix;
+    ctx.session.selection_made.set(true);
+    let config = &ctx.session.config;
     let info = ctx.keyboard_infos.get(&ch);
     let ws_name = info
         .and_then(|i| i.ws_name.clone())
-        .unwrap_or_else(|| crate::config::workspace_name(prefix, ch));
+        .unwrap_or_else(|| crate::config::workspace_name(&config.workspace_prefix, ch));
 
     let result = match ctx.mode {
         Mode::Normal => {
             let is_uncreated = info.is_none_or(|i| i.is_uncreated);
-            if is_uncreated && ctx.config.should_show_templates(ch) {
+            if is_uncreated && config.should_show_templates(ch) {
                 show_template_picker(ch, ctx);
                 return;
             }
-            let programs = ctx.config.programs_for(ch);
+            let programs = config.programs_for(ch);
             switch_and_close(&ws_name, ch, programs, ctx, &HookInfo::default());
             return;
         }
-        Mode::Delete => crate::actions::delete_workspace(&ctx.config, ch, &ws_name),
-        Mode::MoveWindow => crate::actions::move_window(&ctx.config, ch, &ws_name),
+        Mode::Delete => crate::actions::delete_workspace(config, ch, &ws_name),
+        Mode::MoveWindow => crate::actions::move_window(config, ch, &ws_name),
     };
 
     if let Err(e) = result {
@@ -552,16 +529,7 @@ fn attach_key_handler(ctx: &ActionContext, close_keybinds: &[crate::config::Keyb
             };
             let ctx = key_ctx.clone();
             glib::idle_add_local_once(move || {
-                populate_overlay(
-                    &ctx.window,
-                    &ctx.config,
-                    next_mode,
-                    ctx.monitor_width,
-                    &ctx.original_workspace,
-                    &ctx.selection_made,
-                    &ctx.hover_armed,
-                    None,
-                );
+                populate_overlay(&ctx.window, &ctx.session, next_mode, None);
             });
             return Propagation::Stop;
         }
