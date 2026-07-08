@@ -761,12 +761,45 @@ fn default_config() -> ResolvedConfig {
     Config::default().resolve().0
 }
 
+/// Resolve the config file location: the override if given, else the XDG default.
+fn config_path(path_override: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    path_override.map(std::path::Path::to_path_buf).or_else(|| {
+        dirs::config_dir().map(|dir| dir.join("niri-dynamic-workspaces").join("config.toml"))
+    })
+}
+
+fn file_mtime(path: &std::path::Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+/// Build the cleanup-prefix source for the daemon's cleanup loop.
+///
+/// The returned closure yields the current workspace prefix while
+/// `auto_delete_empty` is enabled, or `None` to skip cleanup. The config file
+/// is reloaded whenever its mtime changes, so daemon behavior follows config
+/// edits without a restart.
+pub fn cleanup_prefix_source(
+    path_override: Option<&std::path::Path>,
+) -> impl FnMut() -> Option<String> + Send + 'static {
+    let mut current = load_config(path_override);
+    let path = config_path(path_override);
+    let mut last_mtime = path.as_deref().and_then(file_mtime);
+    move || {
+        if let Some(ref p) = path {
+            let mtime = file_mtime(p);
+            if mtime != last_mtime {
+                last_mtime = mtime;
+                current = load_config(Some(p));
+            }
+        }
+        current
+            .auto_delete_empty
+            .then(|| current.workspace_prefix.clone())
+    }
+}
+
 pub fn load_config(path_override: Option<&std::path::Path>) -> ResolvedConfig {
-    let config_path = if let Some(p) = path_override {
-        p.to_path_buf()
-    } else if let Some(dir) = dirs::config_dir() {
-        dir.join("niri-dynamic-workspaces").join("config.toml")
-    } else {
+    let Some(config_path) = config_path(path_override) else {
         eprintln!("warning: could not determine config directory, using defaults");
         return default_config();
     };
@@ -1545,6 +1578,47 @@ programs = ["firefox"]
             shell_words::split(&substituted[0]).unwrap(),
             vec!["notify", "it's done"]
         );
+    }
+
+    // --- cleanup_prefix_source ---
+
+    #[test]
+    fn cleanup_prefix_source_reloads_on_mtime_change() {
+        let path = std::env::temp_dir().join(format!(
+            "ndw-cleanup-source-test-{}.toml",
+            std::process::id()
+        ));
+        std::fs::write(&path, "[general]\nworkspace_prefix = \"aaa-\"\n").unwrap();
+
+        let mut source = cleanup_prefix_source(Some(&path));
+        assert_eq!(source(), Some("aaa-".to_string()));
+
+        // Ensure the rewrite lands on a different mtime tick.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::fs::write(
+            &path,
+            "[general]\nworkspace_prefix = \"bbb-\"\nauto_delete_empty = false\n",
+        )
+        .unwrap();
+        assert_eq!(source(), None);
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::fs::write(&path, "[general]\nworkspace_prefix = \"ccc-\"\n").unwrap();
+        assert_eq!(source(), Some("ccc-".to_string()));
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn cleanup_prefix_source_missing_file_uses_defaults() {
+        let path = std::env::temp_dir().join(format!(
+            "ndw-cleanup-source-missing-{}.toml",
+            std::process::id()
+        ));
+        std::fs::remove_file(&path).ok();
+
+        let mut source = cleanup_prefix_source(Some(&path));
+        assert_eq!(source(), Some("dyn-".to_string()));
     }
 
     // --- Template variable resolution ---

@@ -147,14 +147,14 @@ fn main() {
                 if hold_guard.borrow().is_some() {
                     return 0;
                 }
-                let cfg = config::load_config(cli.config.as_deref());
-                if cfg.auto_delete_empty {
-                    let prefix = cfg.workspace_prefix.clone();
-                    std::thread::Builder::new()
-                        .name("cleanup".into())
-                        .spawn(move || niri::run_event_cleanup(&prefix))
-                        .ok();
-                }
+                // Always spawn: the prefix source re-reads the config on
+                // change, so auto_delete_empty can be toggled without a
+                // daemon restart.
+                let prefix_source = config::cleanup_prefix_source(cli.config.as_deref());
+                std::thread::Builder::new()
+                    .name("cleanup".into())
+                    .spawn(move || niri::run_event_cleanup(prefix_source))
+                    .ok();
                 *hold_guard.borrow_mut() = Some(app.hold());
                 return 0;
             }

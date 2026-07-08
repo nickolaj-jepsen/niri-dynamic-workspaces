@@ -476,10 +476,13 @@ fn cleanup_empty_workspaces_impl(client: &mut impl NiriClient, prefix: &str) -> 
 
 /// Subscribe to niri's event stream and run cleanup when workspaces may become empty.
 ///
+/// `prefix_source` is consulted before each cleanup pass; it returns the
+/// current workspace prefix, or `None` to skip cleanup (auto-delete disabled).
+///
 /// Reconnects automatically if the socket drops (e.g. niri restarts).
-pub fn run_event_cleanup(prefix: &str) {
+pub fn run_event_cleanup(mut prefix_source: impl FnMut() -> Option<String>) {
     loop {
-        if let Err(e) = event_cleanup_loop(prefix) {
+        if let Err(e) = event_cleanup_loop(&mut prefix_source) {
             eprintln!("warning: event cleanup failed: {e:#}, reconnecting in 5s\u{2026}");
             thread::sleep(Duration::from_secs(5));
         }
@@ -508,7 +511,7 @@ fn connect_event_stream() -> anyhow::Result<BufReader<UnixStream>> {
     Ok(reader)
 }
 
-fn event_cleanup_loop(prefix: &str) -> anyhow::Result<()> {
+fn event_cleanup_loop(prefix_source: &mut impl FnMut() -> Option<String>) -> anyhow::Result<()> {
     let mut reader = connect_event_stream()?;
 
     // Read events line-by-line (no shutdown — avoids half-close issues with newer niri)
@@ -543,7 +546,9 @@ fn event_cleanup_loop(prefix: &str) -> anyhow::Result<()> {
         }
 
         if cleanup_pending && last_cleanup.elapsed() >= debounce {
-            cleanup_empty_workspaces(prefix);
+            if let Some(prefix) = prefix_source() {
+                cleanup_empty_workspaces(&prefix);
+            }
             cleanup_pending = false;
             last_cleanup = Instant::now();
         }
