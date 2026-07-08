@@ -26,12 +26,12 @@ All three must pass clean before committing.
 
 ## Architecture
 
-Five source files:
+Five top-level source files, plus the `ui/` module directory:
 
 - **main.rs** — clap CLI (`switch`/`delete`/`move-window` with optional direct key, `daemon`) and GTK4 application bootstrap. Direct-key invocations act via IPC without an overlay; otherwise `ui::build_ui` opens the overlay. `daemon` holds the app alive and runs the cleanup thread.
 - **config.rs** — Reads `~/.config/niri-dynamic-workspaces/config.toml` (TOML via serde), validates keybinds, workspaces, templates, and template variables, returns `ResolvedConfig`. All fields have defaults; missing/broken config is non-fatal (warnings to stderr). Also owns keyboard layout tables and `{{variable}}` substitution.
 - **niri.rs** — Niri IPC layer over the `NiriClient` transport trait (real `SocketClient` per request; scripted mock in tests). Key functions: `list_workspaces`, `list_windows`, `focus_or_create_workspace`, `delete_workspace`, `move_window_to_workspace`, `run_event_cleanup` (daemon event stream), `reorder_workspace_columns`, `run_hooks`.
-- **ui.rs** — Builds the full-screen layer-shell overlay with `gtk4-layer-shell`. Renders the keyboard grid plus a static-workspace row, handles keyboard/click/hover events, and hosts the template picker and variable-input sub-views.
+- **ui/** — Builds the full-screen layer-shell overlay with `gtk4-layer-shell`. `mod.rs` (overlay construction, modes, key handling), `metrics.rs` (sizing + scaled CSS), `cards.rs` (workspace info + card widgets), `picker.rs` (template picker), `variables.rs` (variable form + fuzzy select).
 - **test_helpers.rs** — constructors for `niri_ipc::Workspace`/`Window` test fixtures.
 
 Data flow: `main` → `config::load_config()` → `ui::build_ui(app, config, mode)` → `niri::*` IPC calls on user interaction.
@@ -44,7 +44,7 @@ Data flow: `main` → `config::load_config()` → `ui::build_ui(app, config, mod
 - **niri-ipc version pinned**: `niri-ipc = "=25.11.0"` in Cargo.toml — exact version match to the compositor IPC protocol.
 - **GTK4 CSS**: all visual styling lives in `style.css` at the repo root, loaded at runtime.
 - **Linting**: clippy `all` + `pedantic` warnings are enabled in `Cargo.toml [lints.clippy]`. A few noisy pedantic lints (`module_name_repetitions`, `wildcard_imports`, `cast_possible_truncation`) are suppressed. Fix warnings rather than suppressing them, unless the lint is truly inapplicable (e.g. `too_many_lines` on UI builder functions).
-- **Testing**: unit tests live in `#[cfg(test)] mod tests` at the bottom of `config.rs`, `ui.rs`, and `niri.rs`. Tests cover pure functions (parsing, config resolution, string transforms) and IPC logic via the mocked `NiriClient`. Add tests when adding new pure logic or IPC sequences.
+- **Testing**: unit tests live in `#[cfg(test)] mod tests` at the bottom of `config.rs`, `niri.rs`, and the `ui/` modules. Tests cover pure functions (parsing, config resolution, string transforms) and IPC logic via the mocked `NiriClient`. Add tests when adding new pure logic or IPC sequences.
 - **Formatting**: `rustfmt.toml` pins `edition = "2021"`. Run `cargo fmt` before committing.
 - **Commit messages**: use [Conventional Commits](https://www.conventionalcommits.org/) style (e.g. `feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, `test:`, `ci:`). Follow the 50/72 rule: subject line max 50 characters, wrap body text at 72 characters. Be as concise as possible when describing the change.
 - **README sync**: when modifying config options (defaults, field names, sections in `config.rs`), update the Configuration section in `README.md` to match. If you notice a discrepancy at any point, fix it.
