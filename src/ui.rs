@@ -14,6 +14,7 @@ use gtk4::{
 };
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
+use crate::actions::HookInfo;
 use crate::config::{KeyboardLayout, ResolvedConfig, Select, TemplateVariable, VariableType};
 use crate::niri;
 
@@ -243,12 +244,6 @@ impl Mode {
 }
 
 // --- Data types ---
-
-#[derive(Clone, Default)]
-struct HookInfo {
-    template_name: Option<String>,
-    variables: HashMap<String, String>,
-}
 
 #[derive(Clone)]
 struct ActionContext {
@@ -999,28 +994,12 @@ fn switch_and_close(
     ctx: &ActionContext,
     hook_info: &HookInfo,
 ) {
-    let result = niri::switch_workspace(&ctx.config.workspace_prefix, ws_key, ws_name, programs)
-        .map(|(created, req)| {
-            if let Some(r) = req {
-                std::thread::Builder::new()
-                    .name("reorder".into())
-                    .spawn(move || niri::reorder_workspace_columns(&r))
-                    .ok();
-            }
-            if created {
-                let hooks = crate::config::collect_create_hooks(
-                    &ctx.config,
-                    hook_info.template_name.as_deref(),
-                );
-                let env = crate::config::build_hook_env(
-                    ws_name,
-                    ws_key,
-                    hook_info.template_name.as_deref(),
-                    &hook_info.variables,
-                );
-                niri::run_hooks(&hooks, &env);
-            }
-        });
+    let Some(app) = ctx.window.application() else {
+        show_error(ctx, "Failed: window has no application");
+        return;
+    };
+    let result =
+        crate::actions::switch_workspace(&app, &ctx.config, ws_key, ws_name, programs, hook_info);
     if let Err(e) = result {
         show_error(ctx, &format!("Failed: {e:#}"));
         return;
@@ -1047,15 +1026,8 @@ fn dispatch_action(ch: char, ctx: &ActionContext) {
             switch_and_close(&ws_name, ch, programs, ctx, &HookInfo::default());
             return;
         }
-        Mode::Delete => {
-            let result = niri::delete_workspace(prefix, ch);
-            if result.is_ok() {
-                let env = crate::config::build_hook_env(&ws_name, ch, None, &HashMap::new());
-                niri::run_hooks(&ctx.config.hooks.on_delete, &env);
-            }
-            result
-        }
-        Mode::MoveWindow => niri::move_window_to_workspace(prefix, ch, &ws_name),
+        Mode::Delete => crate::actions::delete_workspace(&ctx.config, ch, &ws_name),
+        Mode::MoveWindow => crate::actions::move_window(&ctx.config, ch, &ws_name),
     };
 
     if let Err(e) = result {

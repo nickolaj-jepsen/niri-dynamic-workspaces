@@ -1,3 +1,4 @@
+mod actions;
 mod config;
 mod niri;
 #[cfg(test)]
@@ -49,40 +50,26 @@ enum Command {
     Daemon,
 }
 
-fn handle_direct_action(cli: &Cli, mode: ui::Mode, key: &str) -> i32 {
+fn handle_direct_action(app: &gtk4::Application, cli: &Cli, mode: ui::Mode, key: &str) -> i32 {
     let Some(ch) = config::parse_workspace_char(key) else {
         eprintln!("error: invalid workspace key '{key}' (must be a-z or 0-9)");
         return 1;
     };
 
     let cfg = config::load_config(cli.config.as_deref());
-    let prefix = &cfg.workspace_prefix;
-    let ws_name = config::workspace_name(prefix, ch);
-    let empty_vars = std::collections::HashMap::new();
+    let ws_name = config::workspace_name(&cfg.workspace_prefix, ch);
 
     let result = match mode {
-        ui::Mode::Normal => {
-            let programs = cfg.programs_for(ch);
-            niri::switch_workspace(prefix, ch, &ws_name, programs).map(|(created, req)| {
-                if let Some(r) = req {
-                    niri::reorder_workspace_columns(&r);
-                }
-                if created {
-                    let hooks = config::collect_create_hooks(&cfg, None);
-                    let env = config::build_hook_env(&ws_name, ch, None, &empty_vars);
-                    niri::run_hooks(&hooks, &env);
-                }
-            })
-        }
-        ui::Mode::Delete => {
-            let result = niri::delete_workspace(prefix, ch);
-            if result.is_ok() {
-                let env = config::build_hook_env(&ws_name, ch, None, &empty_vars);
-                niri::run_hooks(&cfg.hooks.on_delete, &env);
-            }
-            result
-        }
-        ui::Mode::MoveWindow => niri::move_window_to_workspace(prefix, ch, &ws_name),
+        ui::Mode::Normal => actions::switch_workspace(
+            app,
+            &cfg,
+            ch,
+            &ws_name,
+            cfg.programs_for(ch),
+            &actions::HookInfo::default(),
+        ),
+        ui::Mode::Delete => actions::delete_workspace(&cfg, ch, &ws_name),
+        ui::Mode::MoveWindow => actions::move_window(&cfg, ch, &ws_name),
     };
 
     if let Err(e) = result {
@@ -165,7 +152,7 @@ fn main() {
         };
 
         if let Some(key) = key {
-            return handle_direct_action(&cli, mode, key);
+            return handle_direct_action(app, &cli, mode, key);
         }
 
         handle_overlay(app, &cli, mode)
