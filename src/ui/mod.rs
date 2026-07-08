@@ -219,7 +219,9 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
     {
         let arm_session = session.clone();
         let motion = EventControllerMotion::new();
-        motion.set_name(Some("ndw-hover-arm"));
+        // No "ndw-" name: remove_app_controllers strips those on every
+        // repopulate, and this controller must outlive them all.
+        motion.set_name(Some("hover-arm"));
         motion.connect_motion(move |_, _, _| {
             arm_session.hover_armed.set(true);
         });
