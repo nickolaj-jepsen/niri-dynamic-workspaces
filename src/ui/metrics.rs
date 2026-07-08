@@ -8,6 +8,7 @@ thread_local! {
     static DYNAMIC_PROVIDER: RefCell<Option<gtk4::CssProvider>> = const { RefCell::new(None) };
 }
 
+#[derive(Clone, Copy)]
 pub(super) struct KeyboardMetrics {
     pub(super) key_size: i32,
     pub(super) key_gap: i32,

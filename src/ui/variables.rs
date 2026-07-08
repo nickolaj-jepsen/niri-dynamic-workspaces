@@ -6,6 +6,7 @@ use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config as MatcherConfig, Matcher, Utf32Str};
 
 use glib::Propagation;
+use gtk4::gio;
 use gtk4::prelude::*;
 use gtk4::{
     Align, Box as GtkBox, Entry, EventControllerKey, Label, Orientation, PolicyType, ScrolledWindow,
@@ -72,6 +73,8 @@ impl FuzzySelect {
 enum VariableWidget {
     Text(Entry),
     Enum(FuzzySelect),
+    /// Placeholder while a command/dir source resolves on a worker thread.
+    Loading(Entry),
 }
 
 impl VariableWidget {
@@ -79,12 +82,13 @@ impl VariableWidget {
         match self {
             Self::Text(entry) => entry.text().to_string(),
             Self::Enum(fuzzy) => fuzzy.value(),
+            Self::Loading(_) => String::new(),
         }
     }
 
     fn grab_focus(&self) {
         match self {
-            Self::Text(entry) => {
+            Self::Text(entry) | Self::Loading(entry) => {
                 entry.grab_focus();
             }
             Self::Enum(fuzzy) => {
@@ -189,6 +193,53 @@ fn resolve_select_options(source: &Select) -> Vec<String> {
         Select::Command(cmd) => run_options_command(cmd),
         Select::Dirs { dirs, depth } => scan_dir_options(dirs, *depth),
     }
+}
+
+/// Build the widget for a resolved option list inside `row` (fuzzy select,
+/// or a free-text entry when no options were produced).
+fn build_resolved_select(
+    row: &GtkBox,
+    options: &[String],
+    var_name: &str,
+    metrics: &KeyboardMetrics,
+) -> VariableWidget {
+    if options.is_empty() {
+        let entry = Entry::builder()
+            .css_classes(["variable-entry"])
+            .placeholder_text(var_name)
+            .build();
+        row.append(&entry);
+        VariableWidget::Text(entry)
+    } else {
+        build_fuzzy_select(row, options, metrics)
+    }
+}
+
+/// Resolve a command/dir select source on a worker thread and swap the
+/// loading placeholder for the real widget once done.
+///
+/// Keeps arbitrary shell commands and deep directory scans from freezing the
+/// overlay while the variable form opens.
+fn spawn_select_resolution(
+    source: Select,
+    slot: Rc<RefCell<VariableWidget>>,
+    row: GtkBox,
+    placeholder: Entry,
+    var_name: String,
+    metrics: KeyboardMetrics,
+) {
+    glib::spawn_future_local(async move {
+        let resolved = gio::spawn_blocking(move || resolve_select_options(&source))
+            .await
+            .unwrap_or_default();
+        let had_focus = placeholder.has_focus();
+        row.remove(&placeholder);
+        let widget = build_resolved_select(&row, &resolved, &var_name, &metrics);
+        if had_focus {
+            widget.grab_focus();
+        }
+        *slot.borrow_mut() = widget;
+    });
 }
 
 #[expect(
@@ -324,6 +375,75 @@ fn build_fuzzy_select(
     })
 }
 
+/// Build one labeled variable row inside `form` and return its value slot.
+///
+/// Static sources build synchronously; command/dir sources can be slow, so
+/// they show a placeholder and resolve off-thread (the slot is swapped in
+/// place once resolution finishes).
+fn build_variable_row(
+    var: &crate::config::TemplateVariable,
+    form: &GtkBox,
+    metrics: &KeyboardMetrics,
+) -> Rc<RefCell<VariableWidget>> {
+    let row = GtkBox::builder()
+        .orientation(Orientation::Vertical)
+        .spacing(0)
+        .css_classes(["variable-row"])
+        .build();
+
+    let label = Label::builder()
+        .label(&var.label)
+        .css_classes(["variable-label"])
+        .halign(Align::Start)
+        .build();
+    row.append(&label);
+
+    let mut deferred_source = None;
+    let widget = match &var.var_type {
+        VariableType::Text => {
+            let entry = Entry::builder()
+                .css_classes(["variable-entry"])
+                .placeholder_text(&var.name)
+                .build();
+            row.append(&entry);
+            VariableWidget::Text(entry)
+        }
+        VariableType::Select(Select::Options(opts)) => {
+            build_resolved_select(&row, opts, &var.name, metrics)
+        }
+        VariableType::Select(source) => {
+            let placeholder = Entry::builder()
+                .css_classes(["variable-entry", "loading"])
+                .placeholder_text("Loading\u{2026}")
+                .editable(false)
+                .build();
+            row.append(&placeholder);
+            deferred_source = Some(source.clone());
+            VariableWidget::Loading(placeholder)
+        }
+    };
+
+    form.append(&row);
+    let slot = Rc::new(RefCell::new(widget));
+
+    if let Some(source) = deferred_source {
+        let placeholder = match &*slot.borrow() {
+            VariableWidget::Loading(entry) => entry.clone(),
+            _ => unreachable!("deferred source always pairs with a Loading widget"),
+        };
+        spawn_select_resolution(
+            source,
+            slot.clone(),
+            row,
+            placeholder,
+            var.name.clone(),
+            *metrics,
+        );
+    }
+
+    slot
+}
+
 pub(super) fn show_variable_input(
     option: &TemplateOption,
     ch: char,
@@ -366,50 +486,10 @@ pub(super) fn show_variable_input(
         .css_classes(["variable-form"])
         .build();
 
-    let widgets: Vec<VariableWidget> = option
+    let widgets: Vec<Rc<RefCell<VariableWidget>>> = option
         .variables
         .iter()
-        .map(|var| {
-            let row = GtkBox::builder()
-                .orientation(Orientation::Vertical)
-                .spacing(0)
-                .css_classes(["variable-row"])
-                .build();
-
-            let label = Label::builder()
-                .label(&var.label)
-                .css_classes(["variable-label"])
-                .halign(Align::Start)
-                .build();
-            row.append(&label);
-
-            let widget = match &var.var_type {
-                VariableType::Text => {
-                    let entry = Entry::builder()
-                        .css_classes(["variable-entry"])
-                        .placeholder_text(&var.name)
-                        .build();
-                    row.append(&entry);
-                    VariableWidget::Text(entry)
-                }
-                VariableType::Select(source) => {
-                    let resolved = resolve_select_options(source);
-                    if resolved.is_empty() {
-                        let entry = Entry::builder()
-                            .css_classes(["variable-entry"])
-                            .placeholder_text(&var.name)
-                            .build();
-                        row.append(&entry);
-                        VariableWidget::Text(entry)
-                    } else {
-                        build_fuzzy_select(&row, &resolved, &metrics)
-                    }
-                }
-            };
-
-            form.append(&row);
-            widget
-        })
+        .map(|var| build_variable_row(var, &form, &metrics))
         .collect();
     container.append(&form);
 
@@ -424,7 +504,7 @@ pub(super) fn show_variable_input(
 
     // Focus the first widget
     if let Some(first) = widgets.first() {
-        first.grab_focus();
+        first.borrow().grab_focus();
     }
 
     let var_ctx = ActionContext {
@@ -440,14 +520,14 @@ pub(super) fn show_variable_input(
 fn attach_variable_input_key_handler(
     ctx: &ActionContext,
     ch: char,
-    widgets: &[VariableWidget],
+    widgets: &[Rc<RefCell<VariableWidget>>],
     option: &TemplateOption,
     template_name: Option<String>,
 ) {
     let key_ctx = ctx.clone();
     let close_keybinds = ctx.session.config.close_keybinds.clone();
     let prefix = ctx.session.config.workspace_prefix.clone();
-    let widgets: Vec<VariableWidget> = widgets.to_vec();
+    let widgets: Vec<Rc<RefCell<VariableWidget>>> = widgets.to_vec();
     let var_names: Vec<String> = option.variables.iter().map(|v| v.name.clone()).collect();
     let programs = option.programs.clone();
     let template_title = option.title.clone();
@@ -466,9 +546,16 @@ fn attach_variable_input_key_handler(
 
         // Enter → collect values and create workspace
         if key == gdk4::Key::Return || key == gdk4::Key::KP_Enter {
+            // Ignore Enter while any select source is still resolving.
+            if widgets
+                .iter()
+                .any(|w| matches!(&*w.borrow(), VariableWidget::Loading(_)))
+            {
+                return Propagation::Stop;
+            }
             let mut values = HashMap::new();
             for (name, widget) in var_names.iter().zip(widgets.iter()) {
-                values.insert(name.clone(), widget.value());
+                values.insert(name.clone(), widget.borrow().value());
             }
             let substituted = crate::config::substitute_variables_quoted(&programs, &values);
             let title = crate::config::resolve_workspace_title(
