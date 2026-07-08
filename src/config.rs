@@ -924,7 +924,6 @@ mod tests {
         let config = Config {
             keybinds: KeybindsConfig {
                 close: vec!["Bogus+x".to_string(), "Escape".to_string()],
-                ..KeybindsConfig::default()
             },
             ..Config::default()
         };
@@ -958,7 +957,7 @@ mod tests {
                 ..WorkspaceEntry::default()
             },
         );
-        workspace.insert("".to_string(), WorkspaceEntry::default());
+        workspace.insert(String::new(), WorkspaceEntry::default());
         let config = Config {
             workspace,
             ..Config::default()

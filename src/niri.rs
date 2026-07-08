@@ -8,19 +8,36 @@ use anyhow::{bail, Context};
 use niri_ipc::socket::Socket;
 use niri_ipc::{Action, Event, Request, Response, Window, Workspace, WorkspaceReferenceArg};
 
-fn send_request(request: Request) -> anyhow::Result<Response> {
-    let mut socket = Socket::connect().context("failed to connect to niri")?;
-    socket
-        .send(request)
-        .context("failed to send request")?
-        .map_err(|msg| anyhow::anyhow!(msg))
+/// Transport for niri IPC requests.
+///
+/// Implemented by [`SocketClient`] for the real compositor socket; tests use
+/// a scripted mock to assert the exact request sequence.
+pub trait NiriClient {
+    fn send(&mut self, request: Request) -> anyhow::Result<Response>;
 }
 
-fn send_action(action: Action) -> anyhow::Result<()> {
-    match send_request(Request::Action(action))? {
+/// [`NiriClient`] that opens a fresh connection to the niri socket per request.
+pub struct SocketClient;
+
+impl NiriClient for SocketClient {
+    fn send(&mut self, request: Request) -> anyhow::Result<Response> {
+        let mut socket = Socket::connect().context("failed to connect to niri")?;
+        socket
+            .send(request)
+            .context("failed to send request")?
+            .map_err(|msg| anyhow::anyhow!(msg))
+    }
+}
+
+fn send_action_with(client: &mut impl NiriClient, action: Action) -> anyhow::Result<()> {
+    match client.send(Request::Action(action))? {
         Response::Handled => Ok(()),
         other => bail!("unexpected response: {other:?}"),
     }
+}
+
+fn send_action(action: Action) -> anyhow::Result<()> {
+    send_action_with(&mut SocketClient, action)
 }
 
 /// Focus an existing workspace by name (no creation).
@@ -30,14 +47,18 @@ pub fn focus_workspace_by_name(name: &str) -> anyhow::Result<()> {
     })
 }
 
-pub fn list_workspaces() -> anyhow::Result<Vec<Workspace>> {
-    match send_request(Request::Workspaces)? {
+fn list_workspaces_with(client: &mut impl NiriClient) -> anyhow::Result<Vec<Workspace>> {
+    match client.send(Request::Workspaces)? {
         Response::Workspaces(mut workspaces) => {
             workspaces.sort_by(|a, b| a.output.cmp(&b.output).then(a.idx.cmp(&b.idx)));
             Ok(workspaces)
         }
         other => bail!("unexpected response: {other:?}"),
     }
+}
+
+pub fn list_workspaces() -> anyhow::Result<Vec<Workspace>> {
+    list_workspaces_with(&mut SocketClient)
 }
 
 fn find_workspace_by_name<'a>(workspaces: &'a [Workspace], name: &str) -> Option<&'a Workspace> {
@@ -65,11 +86,15 @@ fn find_workspace_name(workspaces: &[Workspace], prefix: &str, ch: char) -> Opti
     find_workspace_by_char(workspaces, prefix, ch).and_then(|w| w.name.clone())
 }
 
-pub fn list_windows() -> anyhow::Result<Vec<Window>> {
-    match send_request(Request::Windows)? {
+fn list_windows_with(client: &mut impl NiriClient) -> anyhow::Result<Vec<Window>> {
+    match client.send(Request::Windows)? {
         Response::Windows(windows) => Ok(windows),
         other => bail!("unexpected response: {other:?}"),
     }
+}
+
+pub fn list_windows() -> anyhow::Result<Vec<Window>> {
+    list_windows_with(&mut SocketClient)
 }
 
 /// Focus an existing workspace or create a new one.
@@ -78,12 +103,24 @@ pub fn list_windows() -> anyhow::Result<Vec<Window>> {
 /// When creating, uses `full_name` for the workspace name.
 /// Returns `true` if a new workspace was created, `false` if an existing one was focused.
 pub fn focus_or_create_workspace(prefix: &str, ch: char, full_name: &str) -> anyhow::Result<bool> {
-    let workspaces = list_workspaces()?;
+    focus_or_create_impl(&mut SocketClient, prefix, ch, full_name)
+}
+
+fn focus_or_create_impl(
+    client: &mut impl NiriClient,
+    prefix: &str,
+    ch: char,
+    full_name: &str,
+) -> anyhow::Result<bool> {
+    let workspaces = list_workspaces_with(client)?;
 
     if let Some(existing_name) = find_workspace_name(&workspaces, prefix, ch) {
-        send_action(Action::FocusWorkspace {
-            reference: WorkspaceReferenceArg::Name(existing_name),
-        })?;
+        send_action_with(
+            client,
+            Action::FocusWorkspace {
+                reference: WorkspaceReferenceArg::Name(existing_name),
+            },
+        )?;
         return Ok(false);
     }
 
@@ -99,14 +136,20 @@ pub fn focus_or_create_workspace(prefix: &str, ch: char, full_name: &str) -> any
         .max()
         .unwrap_or(0);
 
-    send_action(Action::FocusWorkspace {
-        reference: WorkspaceReferenceArg::Index(max_idx + 1),
-    })?;
+    send_action_with(
+        client,
+        Action::FocusWorkspace {
+            reference: WorkspaceReferenceArg::Index(max_idx + 1),
+        },
+    )?;
 
-    send_action(Action::SetWorkspaceName {
-        name: full_name.to_string(),
-        workspace: None,
-    })?;
+    send_action_with(
+        client,
+        Action::SetWorkspaceName {
+            name: full_name.to_string(),
+            workspace: None,
+        },
+    )?;
 
     Ok(true)
 }
@@ -330,7 +373,16 @@ pub fn move_window_to_workspace_by_name(name: &str) -> anyhow::Result<()> {
 
 /// Move the focused window to a workspace, creating it if it doesn't exist.
 pub fn move_window_to_workspace(prefix: &str, ch: char, full_name: &str) -> anyhow::Result<()> {
-    let workspaces = list_workspaces()?;
+    move_window_impl(&mut SocketClient, prefix, ch, full_name)
+}
+
+fn move_window_impl(
+    client: &mut impl NiriClient,
+    prefix: &str,
+    ch: char,
+    full_name: &str,
+) -> anyhow::Result<()> {
+    let workspaces = list_workspaces_with(client)?;
 
     let ws_name = if let Some(existing) = find_workspace_name(&workspaces, prefix, ch) {
         existing
@@ -342,21 +394,27 @@ pub fn move_window_to_workspace(prefix: &str, ch: char, full_name: &str) -> anyh
             .ok_or_else(|| anyhow::anyhow!("no focused workspace found"))?;
 
         // Create the target workspace (this switches focus to it)
-        focus_or_create_workspace(prefix, ch, full_name)?;
+        focus_or_create_impl(client, prefix, ch, full_name)?;
 
         // Switch back so the focused window is the one the user intended to move
-        send_action(Action::FocusWorkspace {
-            reference: WorkspaceReferenceArg::Id(original_ws_id),
-        })?;
+        send_action_with(
+            client,
+            Action::FocusWorkspace {
+                reference: WorkspaceReferenceArg::Id(original_ws_id),
+            },
+        )?;
 
         full_name.to_string()
     };
 
-    send_action(Action::MoveWindowToWorkspace {
-        window_id: None,
-        reference: WorkspaceReferenceArg::Name(ws_name),
-        focus: true,
-    })
+    send_action_with(
+        client,
+        Action::MoveWindowToWorkspace {
+            window_id: None,
+            reference: WorkspaceReferenceArg::Name(ws_name),
+            focus: true,
+        },
+    )
 }
 
 /// Remove empty, unfocused dynamic workspaces matching the given prefix.
@@ -369,8 +427,12 @@ pub fn cleanup_empty_workspaces(prefix: &str) {
 }
 
 fn cleanup_empty_workspaces_inner(prefix: &str) -> anyhow::Result<()> {
-    let workspaces = list_workspaces()?;
-    let windows = list_windows()?;
+    cleanup_empty_workspaces_impl(&mut SocketClient, prefix)
+}
+
+fn cleanup_empty_workspaces_impl(client: &mut impl NiriClient, prefix: &str) -> anyhow::Result<()> {
+    let workspaces = list_workspaces_with(client)?;
+    let windows = list_windows_with(client)?;
 
     let window_ws_ids: HashSet<u64> = windows.iter().filter_map(|w| w.workspace_id).collect();
 
@@ -384,9 +446,12 @@ fn cleanup_empty_workspaces_inner(prefix: &str) -> anyhow::Result<()> {
             continue;
         }
 
-        send_action(Action::UnsetWorkspaceName {
-            reference: Some(WorkspaceReferenceArg::Name(name.clone())),
-        })?;
+        send_action_with(
+            client,
+            Action::UnsetWorkspaceName {
+                reference: Some(WorkspaceReferenceArg::Name(name.clone())),
+            },
+        )?;
     }
 
     Ok(())
@@ -525,7 +590,15 @@ pub fn run_hooks(commands: &[String], env: &[(String, String)]) {
 }
 
 pub fn delete_workspace(prefix: &str, ch: char) -> anyhow::Result<()> {
-    let workspaces = list_workspaces()?;
+    delete_workspace_impl(&mut SocketClient, prefix, ch)
+}
+
+fn delete_workspace_impl(
+    client: &mut impl NiriClient,
+    prefix: &str,
+    ch: char,
+) -> anyhow::Result<()> {
+    let workspaces = list_workspaces_with(client)?;
     let ws = find_workspace_by_char(&workspaces, prefix, ch)
         .ok_or_else(|| anyhow::anyhow!("workspace '{prefix}{ch}' not found"))?;
     let ws_id = ws.id;
@@ -535,21 +608,133 @@ pub fn delete_workspace(prefix: &str, ch: char) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("workspace has no name"))?;
 
     // Close all windows on this workspace
-    let windows = list_windows()?;
+    let windows = list_windows_with(client)?;
     for win in windows.iter().filter(|w| w.workspace_id == Some(ws_id)) {
-        send_action(Action::CloseWindow { id: Some(win.id) })?;
+        send_action_with(client, Action::CloseWindow { id: Some(win.id) })?;
     }
 
     // Unset the workspace name so niri cleans it up
-    send_action(Action::UnsetWorkspaceName {
-        reference: Some(WorkspaceReferenceArg::Name(ws_name)),
-    })
+    send_action_with(
+        client,
+        Action::UnsetWorkspaceName {
+            reference: Some(WorkspaceReferenceArg::Name(ws_name)),
+        },
+    )
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+
     use super::*;
     use crate::test_helpers::{test_window, test_workspace};
+
+    /// Scripted [`NiriClient`] that records every request it receives.
+    struct MockClient {
+        responses: VecDeque<Response>,
+        sent: Vec<Request>,
+    }
+
+    impl MockClient {
+        fn new(responses: Vec<Response>) -> Self {
+            Self {
+                responses: responses.into(),
+                sent: Vec::new(),
+            }
+        }
+    }
+
+    impl NiriClient for MockClient {
+        fn send(&mut self, request: Request) -> anyhow::Result<Response> {
+            self.sent.push(request);
+            self.responses
+                .pop_front()
+                .ok_or_else(|| anyhow::anyhow!("no scripted response left"))
+        }
+    }
+
+    #[test]
+    fn focus_or_create_focuses_existing_by_full_name() {
+        let mut client = MockClient::new(vec![
+            Response::Workspaces(vec![test_workspace(1, Some("dyn-a My Project"), false)]),
+            Response::Handled,
+        ]);
+
+        let created = focus_or_create_impl(&mut client, "dyn-", 'a', "dyn-a").unwrap();
+
+        assert!(!created);
+        assert_eq!(client.sent.len(), 2);
+        assert!(matches!(
+            &client.sent[1],
+            Request::Action(Action::FocusWorkspace {
+                reference: WorkspaceReferenceArg::Name(n),
+            }) if n == "dyn-a My Project"
+        ));
+    }
+
+    #[test]
+    fn delete_workspace_closes_windows_then_unsets_name() {
+        let mut client = MockClient::new(vec![
+            Response::Workspaces(vec![test_workspace(10, Some("dyn-a"), false)]),
+            Response::Windows(vec![
+                test_window(1, 10, "firefox"),
+                test_window(2, 20, "kitty"),
+            ]),
+            Response::Handled,
+            Response::Handled,
+        ]);
+
+        delete_workspace_impl(&mut client, "dyn-", 'a').unwrap();
+
+        assert_eq!(client.sent.len(), 4);
+        assert!(matches!(
+            &client.sent[2],
+            Request::Action(Action::CloseWindow { id: Some(1) })
+        ));
+        assert!(matches!(
+            &client.sent[3],
+            Request::Action(Action::UnsetWorkspaceName {
+                reference: Some(WorkspaceReferenceArg::Name(n)),
+            }) if n == "dyn-a"
+        ));
+    }
+
+    #[test]
+    fn delete_workspace_missing_errors_without_actions() {
+        let mut client = MockClient::new(vec![Response::Workspaces(vec![])]);
+
+        let err = delete_workspace_impl(&mut client, "dyn-", 'a').unwrap_err();
+
+        assert!(err.to_string().contains("not found"));
+        assert_eq!(client.sent.len(), 1);
+    }
+
+    #[test]
+    fn cleanup_skips_focused_active_and_occupied() {
+        let mut occupied = test_workspace(1, Some("dyn-a"), false);
+        occupied.active_window_id = Some(100);
+        let focused = test_workspace(2, Some("dyn-b"), true);
+        let mut active = test_workspace(3, Some("dyn-c"), false);
+        active.is_active = true;
+        let empty = test_workspace(4, Some("dyn-d"), false);
+        let non_dyn = test_workspace(5, Some("static"), false);
+
+        let mut client = MockClient::new(vec![
+            Response::Workspaces(vec![occupied, focused, active, empty, non_dyn]),
+            Response::Windows(vec![test_window(100, 1, "firefox")]),
+            Response::Handled,
+        ]);
+
+        cleanup_empty_workspaces_impl(&mut client, "dyn-").unwrap();
+
+        assert_eq!(client.sent.len(), 3);
+        assert!(matches!(
+            &client.sent[2],
+            Request::Action(Action::UnsetWorkspaceName {
+                reference: Some(WorkspaceReferenceArg::Name(n)),
+            }) if n == "dyn-d"
+        ));
+    }
 
     #[test]
     fn executable_name_variants() {
