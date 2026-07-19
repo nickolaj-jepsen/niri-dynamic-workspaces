@@ -197,6 +197,14 @@ pub(super) fn build_static_workspace_infos(
                 .as_ref()
                 .is_none_or(|n| !config.static_workspaces.values().any(|t| t == n))
         })
+        // Never hide the focused or urgent workspace, even when empty.
+        .filter(|ws| {
+            !config.hide_empty_static
+                || occupied_ws_ids.contains(&ws.id)
+                || ws.is_focused
+                || ws.is_urgent
+                || urgent_ws_ids.contains(&ws.id)
+        })
         .map(|ws| StaticWorkspaceInfo {
             name: ws.name.clone().unwrap_or_else(|| ws.idx.to_string()),
             is_focused: ws.is_focused,
@@ -547,6 +555,7 @@ pub(super) mod tests {
             static_workspaces: HashMap::new(),
             auto_delete_empty: true,
             hover_preview: true,
+            hide_empty_static: false,
             layout: &LAYOUT_QWERTY,
             templates: Vec::new(),
             hooks: crate::config::HookConfig::default(),
@@ -913,5 +922,63 @@ pub(super) mod tests {
         let infos = build_static_workspace_infos(&workspaces, &windows, &config);
         assert!(!infos[0].is_empty); // has a window
         assert!(infos[1].is_empty); // no windows
+    }
+
+    #[test]
+    fn static_infos_hide_empty_filters_windowless() {
+        let workspaces = vec![
+            test_workspace(1, Some("browser"), true),
+            test_workspace(2, Some("mail"), false),
+        ];
+        let windows = vec![test_window(100, 1, "firefox")];
+        let mut config = default_test_config();
+        config.hide_empty_static = true;
+
+        let infos = build_static_workspace_infos(&workspaces, &windows, &config);
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].name, "browser");
+    }
+
+    #[test]
+    fn static_infos_hide_empty_keeps_focused() {
+        let workspaces = vec![
+            test_workspace(1, Some("browser"), true),
+            test_workspace(2, Some("mail"), false),
+        ];
+        let mut config = default_test_config();
+        config.hide_empty_static = true;
+
+        let infos = build_static_workspace_infos(&workspaces, &[], &config);
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].name, "browser");
+        assert!(infos[0].is_focused);
+    }
+
+    #[test]
+    fn static_infos_hide_empty_keeps_urgent() {
+        let mut urgent_ws = test_workspace(2, Some("mail"), false);
+        urgent_ws.is_urgent = true;
+        let workspaces = vec![test_workspace(1, Some("browser"), true), urgent_ws];
+        let mut config = default_test_config();
+        config.hide_empty_static = true;
+
+        let infos = build_static_workspace_infos(&workspaces, &[], &config);
+        assert_eq!(infos.len(), 2);
+        assert!(infos[1].is_urgent);
+    }
+
+    #[test]
+    fn static_infos_hide_empty_can_empty_the_row() {
+        // Focused elsewhere (dyn workspace) → every empty static hides.
+        let workspaces = vec![
+            test_workspace(1, Some("dyn-a"), true),
+            test_workspace(2, Some("mail"), false),
+            test_workspace(3, Some("scratch"), false),
+        ];
+        let mut config = default_test_config();
+        config.hide_empty_static = true;
+
+        let infos = build_static_workspace_infos(&workspaces, &[], &config);
+        assert!(infos.is_empty());
     }
 }

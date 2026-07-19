@@ -74,6 +74,7 @@ struct GeneralConfig {
     auto_delete_empty: bool,
     layout: String,
     hover_preview: bool,
+    hide_empty_static: bool,
 }
 
 impl Default for GeneralConfig {
@@ -84,6 +85,7 @@ impl Default for GeneralConfig {
             auto_delete_empty: true,
             layout: "qwerty".to_string(),
             hover_preview: true,
+            hide_empty_static: false,
         }
     }
 }
@@ -125,6 +127,8 @@ pub struct ResolvedConfig {
     pub static_workspaces: HashMap<char, String>,
     pub auto_delete_empty: bool,
     pub hover_preview: bool,
+    /// Hide windowless workspaces from the static row (focused/urgent stay).
+    pub hide_empty_static: bool,
     pub layout: &'static KeyboardLayout,
     pub templates: Vec<Template>,
     pub hooks: HookConfig,
@@ -597,6 +601,7 @@ impl Config {
             static_workspaces,
             auto_delete_empty: self.general.auto_delete_empty,
             hover_preview: self.general.hover_preview,
+            hide_empty_static: self.general.hide_empty_static,
             layout,
             templates,
             hooks: HookConfig {
@@ -996,6 +1001,21 @@ mod tests {
         assert!(resolved.workspace_names.is_empty());
         assert_eq!(resolved.layout.name, "qwerty");
         assert!(resolved.templates.is_empty());
+        assert!(!resolved.hide_empty_static);
+    }
+
+    #[test]
+    fn resolve_hide_empty_static() {
+        let config = Config {
+            general: GeneralConfig {
+                hide_empty_static: true,
+                ..GeneralConfig::default()
+            },
+            ..Config::default()
+        };
+        let (resolved, warnings) = config.resolve();
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        assert!(resolved.hide_empty_static);
     }
 
     #[test]
@@ -2046,6 +2066,7 @@ type = "text"
             static_workspaces: HashMap::new(),
             auto_delete_empty: true,
             hover_preview: true,
+            hide_empty_static: false,
             layout: &LAYOUT_QWERTY,
             templates,
             hooks: HookConfig {
