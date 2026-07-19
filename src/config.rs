@@ -444,7 +444,7 @@ impl Config {
                         ));
                     }
                     static_workspaces.insert(ch, target);
-                    if let Some(name) = entry.name {
+                    if let Some(name) = entry.name.filter(|n| !n.is_empty()) {
                         workspace_names.insert(ch, name);
                     }
                     continue;
@@ -1100,14 +1100,22 @@ static = "01"
 [workspace.w]
 static = "02"
 name = "Web"
+
+[workspace.e]
+static = "03"
+name = ""
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         let (resolved, warnings) = config.resolve();
         assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
         assert_eq!(resolved.static_workspaces[&'q'], "01");
         assert_eq!(resolved.static_workspaces[&'w'], "02");
+        assert_eq!(resolved.static_workspaces[&'e'], "03");
         // Display name kept, no dyn programs registered
         assert_eq!(resolved.workspace_names[&'w'], "Web");
+        // Missing or empty name → no display name
+        assert!(!resolved.workspace_names.contains_key(&'q'));
+        assert!(!resolved.workspace_names.contains_key(&'e'));
         assert!(resolved.workspace_programs.is_empty());
     }
 

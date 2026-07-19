@@ -81,7 +81,7 @@ programs = ["slack", "discord"]
 
 [workspace.q]
 static = "01"                          # pin an existing niri workspace to this key
-name = "Main"                          # optional display name (defaults to the workspace name)
+name = "Main"                          # optional display name shown on the key
 ```
 
 #### Static workspace mappings

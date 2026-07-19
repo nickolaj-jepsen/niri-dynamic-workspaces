@@ -152,11 +152,7 @@ fn build_dyn_workspace_infos(
             is_uncreated: live.is_none(),
             is_urgent: live.is_some_and(|ws| urgent_ws_ids.contains(&ws.id)),
             is_static: true,
-            name: config
-                .workspace_names
-                .get(&ch)
-                .cloned()
-                .or_else(|| Some(target.clone())),
+            name: config.workspace_names.get(&ch).cloned(),
             ws_name: Some(target.clone()),
             output: live.and_then(|ws| ws.output.clone()),
         });
@@ -705,7 +701,8 @@ pub(super) mod tests {
         assert!(info.is_focused);
         assert!(!info.is_active); // focused trumps active
         assert_eq!(info.ws_name.as_deref(), Some("01"));
-        assert_eq!(info.name.as_deref(), Some("01"));
+        // No configured display name → no name label
+        assert_eq!(info.name, None);
         assert_eq!(info.output.as_deref(), Some("DP-1"));
     }
 
