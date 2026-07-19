@@ -34,6 +34,8 @@ pub(super) struct DynWorkspaceInfo {
     pub(super) is_urgent: bool,
     /// Key is pinned to an existing (non-dynamic) workspace via config.
     pub(super) is_static: bool,
+    /// Live workspace exists but holds no windows.
+    pub(super) is_empty: bool,
     pub(super) name: Option<String>,
     pub(super) ws_name: Option<String>,
     pub(super) output: Option<String>,
@@ -48,6 +50,7 @@ impl DynWorkspaceInfo {
             is_uncreated: true,
             is_urgent: false,
             is_static: false,
+            is_empty: false,
             name: None,
             ws_name: None,
             output: None,
@@ -76,6 +79,7 @@ fn build_dyn_workspace_infos(
 ) -> Vec<DynWorkspaceInfo> {
     let prefix = &config.workspace_prefix;
     let urgent_ws_ids = urgent_workspace_ids(windows);
+    let occupied_ws_ids = occupied_workspace_ids(windows);
 
     // Find the globally focused workspace
     let focused_ws_id = workspaces.iter().find(|ws| ws.is_focused).map(|ws| ws.id);
@@ -105,7 +109,7 @@ fn build_dyn_workspace_infos(
                 .get(&ch)
                 .cloned()
                 .or_else(|| crate::config::extract_workspace_title(ws_name, prefix));
-            let is_urgent = urgent_ws_ids.contains(&ws.id);
+            let is_urgent = ws.is_urgent || urgent_ws_ids.contains(&ws.id);
 
             Some(DynWorkspaceInfo {
                 char_id: ch,
@@ -114,6 +118,7 @@ fn build_dyn_workspace_infos(
                 is_uncreated: false,
                 is_urgent,
                 is_static: false,
+                is_empty: !occupied_ws_ids.contains(&ws.id),
                 name,
                 ws_name: Some(ws_name.clone()),
                 output: ws.output.clone(),
@@ -150,8 +155,9 @@ fn build_dyn_workspace_infos(
             is_focused,
             is_active: !is_focused && live.is_some_and(|ws| ws.is_active),
             is_uncreated: live.is_none(),
-            is_urgent: live.is_some_and(|ws| urgent_ws_ids.contains(&ws.id)),
+            is_urgent: live.is_some_and(|ws| ws.is_urgent || urgent_ws_ids.contains(&ws.id)),
             is_static: true,
+            is_empty: live.is_some_and(|ws| !occupied_ws_ids.contains(&ws.id)),
             name: config.workspace_names.get(&ch).cloned(),
             ws_name: Some(target.clone()),
             output: live.and_then(|ws| ws.output.clone()),
@@ -195,7 +201,7 @@ pub(super) fn build_static_workspace_infos(
             name: ws.name.clone().unwrap_or_else(|| ws.idx.to_string()),
             is_focused: ws.is_focused,
             is_active: !ws.is_focused && ws.is_active,
-            is_urgent: urgent_ws_ids.contains(&ws.id),
+            is_urgent: ws.is_urgent || urgent_ws_ids.contains(&ws.id),
             is_empty: !occupied_ws_ids.contains(&ws.id),
         })
         .collect()
@@ -289,7 +295,9 @@ fn build_key_widget(
     let is_disabled = match mode {
         Mode::MoveWindow => info.is_uncreated || info.is_focused,
         Mode::Delete => info.is_uncreated || info.is_static,
-        Mode::Normal => info.is_uncreated,
+        // Empty pinned workspaces render dimmed like the static row, but the
+        // key still switches to them.
+        Mode::Normal => info.is_uncreated || (info.is_static && info.is_empty),
     };
     if is_disabled {
         classes.push("disabled");
@@ -704,6 +712,44 @@ pub(super) mod tests {
         // No configured display name → no name label
         assert_eq!(info.name, None);
         assert_eq!(info.output.as_deref(), Some("DP-1"));
+        // No windows → empty
+        assert!(info.is_empty);
+    }
+
+    #[test]
+    fn build_dyn_workspace_infos_static_mapping_occupied_not_empty() {
+        let workspaces = vec![test_workspace(5, Some("01"), false)];
+        let windows = vec![test_window(1, 5, "firefox")];
+        let mut config = default_test_config();
+        config.static_workspaces.insert('q', "01".to_string());
+
+        let infos = build_dyn_workspace_infos(&workspaces, &windows, &config);
+
+        assert!(!infos[0].is_empty);
+    }
+
+    #[test]
+    fn build_dyn_workspace_infos_static_mapping_workspace_urgency_flag() {
+        let mut ws = test_workspace(5, Some("01"), false);
+        ws.is_urgent = true;
+        let mut config = default_test_config();
+        config.static_workspaces.insert('q', "01".to_string());
+
+        // Urgency from the workspace flag alone, without any urgent window
+        let infos = build_dyn_workspace_infos(&[ws], &[], &config);
+
+        assert!(infos[0].is_urgent);
+    }
+
+    #[test]
+    fn build_dyn_workspace_infos_workspace_urgency_flag() {
+        let mut ws = test_workspace(10, Some("dyn-a"), false);
+        ws.is_urgent = true;
+        let config = default_test_config();
+
+        let infos = build_dyn_workspace_infos(&[ws], &[], &config);
+
+        assert!(infos[0].is_urgent);
     }
 
     #[test]
@@ -803,6 +849,16 @@ pub(super) mod tests {
         let infos = build_static_workspace_infos(&workspaces, &[], &config);
         assert_eq!(infos.len(), 1);
         assert_eq!(infos[0].name, "3");
+    }
+
+    #[test]
+    fn static_infos_urgency_from_workspace_flag() {
+        let mut ws = test_workspace(1, Some("browser"), true);
+        ws.is_urgent = true;
+        let config = default_test_config();
+
+        let infos = build_static_workspace_infos(&[ws], &[], &config);
+        assert!(infos[0].is_urgent);
     }
 
     #[test]

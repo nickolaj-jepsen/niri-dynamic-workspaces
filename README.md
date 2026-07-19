@@ -94,6 +94,8 @@ their key instead of in the row above the keyboard.
 - Switch and move-window act on the existing workspace directly; nothing is created
 - Delete mode is disabled for pinned keys (remove the workspace from your niri config instead)
 - `programs` has no effect on a pinned key and produces a warning
+- Empty pinned workspaces appear dimmed in switch mode (the key still works)
+- Urgent windows highlight the key, like any other workspace card
 - If the named workspace doesn't exist, the key appears disabled
 
 #### Templates
