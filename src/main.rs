@@ -57,6 +57,27 @@ fn handle_direct_action(app: &gtk4::Application, cli: &Cli, mode: ui::Mode, key:
     };
 
     let cfg = config::load_config(cli.config.as_deref());
+
+    // Statically mapped key: act on the pinned workspace directly.
+    if let Some(target) = cfg.static_workspaces.get(&ch) {
+        let result = match mode {
+            ui::Mode::Normal => niri::focus_workspace_by_name(target),
+            ui::Mode::MoveWindow => niri::move_window_to_workspace_by_name(target),
+            ui::Mode::Delete => {
+                eprintln!(
+                    "error: key '{ch}' is pinned to static workspace '{target}', \
+                     which cannot be deleted"
+                );
+                return 1;
+            }
+        };
+        if let Err(e) = result {
+            eprintln!("error: {e:#}");
+            return 1;
+        }
+        return 0;
+    }
+
     let ws_name = config::workspace_name(&cfg.workspace_prefix, ch);
 
     let result = match mode {

@@ -62,6 +62,8 @@ struct TemplateEntry {
 struct WorkspaceEntry {
     name: Option<String>,
     programs: Vec<String>,
+    #[serde(rename = "static")]
+    static_workspace: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -119,6 +121,8 @@ pub struct ResolvedConfig {
     pub default_programs: Vec<String>,
     pub workspace_programs: HashMap<char, Vec<String>>,
     pub workspace_names: HashMap<char, String>,
+    /// Keys pinned to existing (non-dynamic) niri workspaces by name.
+    pub static_workspaces: HashMap<char, String>,
     pub auto_delete_empty: bool,
     pub hover_preview: bool,
     pub layout: &'static KeyboardLayout,
@@ -415,18 +419,43 @@ impl Config {
 
         let mut workspace_programs = HashMap::new();
         let mut workspace_names = HashMap::new();
+        let mut static_workspaces = HashMap::new();
         for (key, entry) in self.workspace {
-            if let Some(ch) = parse_workspace_char(&key) {
-                if !entry.programs.is_empty() {
-                    workspace_programs.insert(ch, entry.programs);
-                }
-                if let Some(name) = entry.name {
-                    workspace_names.insert(ch, name);
-                }
-            } else {
+            let Some(ch) = parse_workspace_char(&key) else {
                 warnings.push(format!(
                     "ignoring [workspace] key '{key}': must be a single workspace key (a-z or 0-9)"
                 ));
+                continue;
+            };
+            match entry.static_workspace {
+                Some(target) if target.is_empty() => {
+                    warnings.push(format!("[workspace.{key}]: 'static' is empty, ignoring"));
+                }
+                Some(target) if target.starts_with(&self.general.workspace_prefix) => {
+                    warnings.push(format!(
+                        "[workspace.{key}]: 'static' target '{target}' starts with the \
+                         dynamic workspace prefix, ignoring"
+                    ));
+                }
+                Some(target) => {
+                    if !entry.programs.is_empty() {
+                        warnings.push(format!(
+                            "[workspace.{key}]: 'programs' are ignored for static workspaces"
+                        ));
+                    }
+                    static_workspaces.insert(ch, target);
+                    if let Some(name) = entry.name {
+                        workspace_names.insert(ch, name);
+                    }
+                    continue;
+                }
+                None => {}
+            }
+            if !entry.programs.is_empty() {
+                workspace_programs.insert(ch, entry.programs);
+            }
+            if let Some(name) = entry.name {
+                workspace_names.insert(ch, name);
             }
         }
 
@@ -565,6 +594,7 @@ impl Config {
             default_programs: self.general.default_programs,
             workspace_programs,
             workspace_names,
+            static_workspaces,
             auto_delete_empty: self.general.auto_delete_empty,
             hover_preview: self.general.hover_preview,
             layout,
@@ -1028,6 +1058,7 @@ mod tests {
             WorkspaceEntry {
                 name: Some("Browser".to_string()),
                 programs: vec!["firefox".to_string()],
+                ..WorkspaceEntry::default()
             },
         );
         workspace.insert(
@@ -1035,6 +1066,7 @@ mod tests {
             WorkspaceEntry {
                 name: Some("Terminal".to_string()),
                 programs: Vec::new(),
+                ..WorkspaceEntry::default()
             },
         );
         workspace.insert(
@@ -1055,6 +1087,69 @@ mod tests {
         assert!(!resolved.workspace_programs.contains_key(&'b'));
         assert_eq!(resolved.workspace_names[&'a'], "Browser");
         assert_eq!(resolved.workspace_names[&'b'], "Terminal");
+    }
+
+    // --- Static workspace mappings ---
+
+    #[test]
+    fn resolve_static_workspace_mapping() {
+        let toml_str = r#"
+[workspace.q]
+static = "01"
+
+[workspace.w]
+static = "02"
+name = "Web"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let (resolved, warnings) = config.resolve();
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        assert_eq!(resolved.static_workspaces[&'q'], "01");
+        assert_eq!(resolved.static_workspaces[&'w'], "02");
+        // Display name kept, no dyn programs registered
+        assert_eq!(resolved.workspace_names[&'w'], "Web");
+        assert!(resolved.workspace_programs.is_empty());
+    }
+
+    #[test]
+    fn resolve_static_with_programs_warns_and_ignores_programs() {
+        let toml_str = r#"
+[workspace.q]
+static = "01"
+programs = ["firefox"]
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let (resolved, warnings) = config.resolve();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("'programs' are ignored"));
+        assert_eq!(resolved.static_workspaces[&'q'], "01");
+        assert!(resolved.workspace_programs.is_empty());
+    }
+
+    #[test]
+    fn resolve_static_empty_target_warns() {
+        let toml_str = r#"
+[workspace.q]
+static = ""
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let (resolved, warnings) = config.resolve();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("'static' is empty"));
+        assert!(resolved.static_workspaces.is_empty());
+    }
+
+    #[test]
+    fn resolve_static_prefix_target_warns() {
+        let toml_str = r#"
+[workspace.q]
+static = "dyn-a"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let (resolved, warnings) = config.resolve();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("dynamic workspace prefix"));
+        assert!(resolved.static_workspaces.is_empty());
     }
 
     // --- TOML deserialization ---
@@ -1940,6 +2035,7 @@ type = "text"
             default_programs: Vec::new(),
             workspace_programs: HashMap::new(),
             workspace_names: HashMap::new(),
+            static_workspaces: HashMap::new(),
             auto_delete_empty: true,
             hover_preview: true,
             layout: &LAYOUT_QWERTY,

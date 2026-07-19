@@ -24,7 +24,7 @@ pub(super) struct StaticWorkspaceInfo {
 
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "four bools represent independent workspace states"
+    reason = "bools represent independent workspace states"
 )]
 pub(super) struct DynWorkspaceInfo {
     pub(super) char_id: char,
@@ -32,6 +32,8 @@ pub(super) struct DynWorkspaceInfo {
     pub(super) is_active: bool,
     pub(super) is_uncreated: bool,
     pub(super) is_urgent: bool,
+    /// Key is pinned to an existing (non-dynamic) workspace via config.
+    pub(super) is_static: bool,
     pub(super) name: Option<String>,
     pub(super) ws_name: Option<String>,
     pub(super) output: Option<String>,
@@ -45,6 +47,7 @@ impl DynWorkspaceInfo {
             is_active: false,
             is_uncreated: true,
             is_urgent: false,
+            is_static: false,
             name: None,
             ws_name: None,
             output: None,
@@ -87,6 +90,10 @@ fn build_dyn_workspace_infos(
             if !crate::config::is_workspace_char(ch) {
                 return None;
             }
+            // Statically mapped keys always show their pinned workspace.
+            if config.static_workspaces.contains_key(&ch) {
+                return None;
+            }
 
             live_chars.insert(ch);
 
@@ -106,6 +113,7 @@ fn build_dyn_workspace_infos(
                 is_active,
                 is_uncreated: false,
                 is_urgent,
+                is_static: false,
                 name,
                 ws_name: Some(ws_name.clone()),
                 output: ws.output.clone(),
@@ -122,12 +130,36 @@ fn build_dyn_workspace_infos(
         .collect();
 
     for ch in configured_chars {
-        if live_chars.contains(&ch) {
+        if live_chars.contains(&ch) || config.static_workspaces.contains_key(&ch) {
             continue;
         }
         let mut info = DynWorkspaceInfo::uncreated(ch);
         info.name = config.workspace_names.get(&ch).cloned();
         infos.push(info);
+    }
+
+    // Statically mapped keys mirror the state of their pinned workspace;
+    // a missing target renders as uncreated (disabled).
+    for (&ch, target) in &config.static_workspaces {
+        let live = workspaces
+            .iter()
+            .find(|ws| ws.name.as_deref() == Some(target.as_str()));
+        let is_focused = live.is_some_and(|ws| Some(ws.id) == focused_ws_id);
+        infos.push(DynWorkspaceInfo {
+            char_id: ch,
+            is_focused,
+            is_active: !is_focused && live.is_some_and(|ws| ws.is_active),
+            is_uncreated: live.is_none(),
+            is_urgent: live.is_some_and(|ws| urgent_ws_ids.contains(&ws.id)),
+            is_static: true,
+            name: config
+                .workspace_names
+                .get(&ch)
+                .cloned()
+                .or_else(|| Some(target.clone())),
+            ws_name: Some(target.clone()),
+            output: live.and_then(|ws| ws.output.clone()),
+        });
     }
 
     infos.sort_by_key(|i| i.char_id);
@@ -156,6 +188,12 @@ pub(super) fn build_static_workspace_infos(
             ws.name
                 .as_ref()
                 .is_none_or(|n| !n.starts_with(prefix.as_str()))
+        })
+        // Workspaces pinned to a key appear on the keyboard, not in this row.
+        .filter(|ws| {
+            ws.name
+                .as_ref()
+                .is_none_or(|n| !config.static_workspaces.values().any(|t| t == n))
         })
         .map(|ws| StaticWorkspaceInfo {
             name: ws.name.clone().unwrap_or_else(|| ws.idx.to_string()),
@@ -242,6 +280,9 @@ fn build_key_widget(
 ) -> GtkBox {
     let mut classes = vec!["keyboard-key"];
 
+    if info.is_static {
+        classes.push("static-workspace");
+    }
     if info.is_focused || info.is_active {
         classes.push("active");
     }
@@ -251,7 +292,8 @@ fn build_key_widget(
 
     let is_disabled = match mode {
         Mode::MoveWindow => info.is_uncreated || info.is_focused,
-        Mode::Delete | Mode::Normal => info.is_uncreated,
+        Mode::Delete => info.is_uncreated || info.is_static,
+        Mode::Normal => info.is_uncreated,
     };
     if is_disabled {
         classes.push("disabled");
@@ -498,6 +540,7 @@ pub(super) mod tests {
             default_programs: Vec::new(),
             workspace_programs: HashMap::new(),
             workspace_names: HashMap::new(),
+            static_workspaces: HashMap::new(),
             auto_delete_empty: true,
             hover_preview: true,
             layout: &LAYOUT_QWERTY,
@@ -640,6 +683,88 @@ pub(super) mod tests {
         // 'c' — neither
         assert!(!infos[2].is_focused);
         assert!(!infos[2].is_active);
+    }
+
+    // --- static workspace mappings ---
+
+    #[test]
+    fn build_dyn_workspace_infos_static_mapping_live() {
+        let mut ws = test_workspace(5, Some("01"), true);
+        ws.is_active = true;
+        let workspaces = vec![ws];
+        let mut config = default_test_config();
+        config.static_workspaces.insert('q', "01".to_string());
+
+        let infos = build_dyn_workspace_infos(&workspaces, &[], &config);
+
+        assert_eq!(infos.len(), 1);
+        let info = &infos[0];
+        assert_eq!(info.char_id, 'q');
+        assert!(info.is_static);
+        assert!(!info.is_uncreated);
+        assert!(info.is_focused);
+        assert!(!info.is_active); // focused trumps active
+        assert_eq!(info.ws_name.as_deref(), Some("01"));
+        assert_eq!(info.name.as_deref(), Some("01"));
+        assert_eq!(info.output.as_deref(), Some("DP-1"));
+    }
+
+    #[test]
+    fn build_dyn_workspace_infos_static_mapping_missing_target() {
+        let mut config = default_test_config();
+        config.static_workspaces.insert('q', "01".to_string());
+        config.workspace_names.insert('q', "Main".to_string());
+
+        let infos = build_dyn_workspace_infos(&[], &[], &config);
+
+        assert_eq!(infos.len(), 1);
+        assert!(infos[0].is_static);
+        assert!(infos[0].is_uncreated);
+        // Configured display name overrides the target workspace name
+        assert_eq!(infos[0].name.as_deref(), Some("Main"));
+    }
+
+    #[test]
+    fn build_dyn_workspace_infos_static_mapping_wins_over_dyn() {
+        let workspaces = vec![
+            test_workspace(1, Some("dyn-q"), false),
+            test_workspace(2, Some("01"), true),
+        ];
+        let mut config = default_test_config();
+        config.static_workspaces.insert('q', "01".to_string());
+
+        let infos = build_dyn_workspace_infos(&workspaces, &[], &config);
+
+        assert_eq!(infos.len(), 1);
+        assert!(infos[0].is_static);
+        assert_eq!(infos[0].ws_name.as_deref(), Some("01"));
+    }
+
+    #[test]
+    fn build_dyn_workspace_infos_static_mapping_urgency() {
+        let workspaces = vec![test_workspace(5, Some("01"), false)];
+        let mut win = test_window(1, 5, "slack");
+        win.is_urgent = true;
+        let mut config = default_test_config();
+        config.static_workspaces.insert('q', "01".to_string());
+
+        let infos = build_dyn_workspace_infos(&workspaces, &[win], &config);
+
+        assert!(infos[0].is_urgent);
+    }
+
+    #[test]
+    fn static_infos_excludes_pinned_workspaces() {
+        let workspaces = vec![
+            test_workspace(1, Some("01"), true),
+            test_workspace(2, Some("browser"), false),
+        ];
+        let mut config = default_test_config();
+        config.static_workspaces.insert('q', "01".to_string());
+
+        let infos = build_static_workspace_infos(&workspaces, &[], &config);
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].name, "browser");
     }
 
     // --- build_static_workspace_infos ---

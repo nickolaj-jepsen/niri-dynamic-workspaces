@@ -78,7 +78,23 @@ programs = ["kitty --title myterm"]    # arguments split with shell quoting rule
 [workspace.1]                          # digit workspaces work too
 name = "Comms"
 programs = ["slack", "discord"]
+
+[workspace.q]
+static = "01"                          # pin an existing niri workspace to this key
+name = "Main"                          # optional display name (defaults to the workspace name)
 ```
+
+#### Static workspace mappings
+
+If you have fixed named workspaces in your niri config (e.g. `workspace "01"`
+bound to `Mod+Q`), `static = "<name>"` pins that workspace to the same key in
+the overlay, mirroring your compositor keybinds. Pinned workspaces appear on
+their key instead of in the row above the keyboard.
+
+- Switch and move-window act on the existing workspace directly; nothing is created
+- Delete mode is disabled for pinned keys (remove the workspace from your niri config instead)
+- `programs` has no effect on a pinned key and produces a warning
+- If the named workspace doesn't exist, the key appears disabled
 
 #### Templates
 

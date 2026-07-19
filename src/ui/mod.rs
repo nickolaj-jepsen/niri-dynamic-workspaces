@@ -528,6 +528,28 @@ fn switch_and_close(
 fn dispatch_action(ch: char, ctx: &ActionContext) {
     ctx.session.selection_made.set(true);
     let config = &ctx.session.config;
+
+    // Statically mapped key: act on the pinned workspace directly.
+    if let Some(target) = config.static_workspaces.get(&ch) {
+        let result = match ctx.mode {
+            Mode::Normal => niri::focus_workspace_by_name(target),
+            Mode::MoveWindow => niri::move_window_to_workspace_by_name(target),
+            Mode::Delete => {
+                show_error(
+                    ctx,
+                    &format!("'{target}' is a static workspace and cannot be deleted"),
+                );
+                return;
+            }
+        };
+        if let Err(e) = result {
+            show_error(ctx, &format!("Failed: {e:#}"));
+            return;
+        }
+        ctx.window.close();
+        return;
+    }
+
     let info = ctx.keyboard_infos.get(&ch);
     let ws_name = info
         .and_then(|i| i.ws_name.clone())
