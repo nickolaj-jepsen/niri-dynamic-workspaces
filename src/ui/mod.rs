@@ -190,13 +190,7 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
     let focused_monitor = focused_output.as_deref().and_then(find_monitor_for_output);
     window.set_monitor(focused_monitor.as_ref());
 
-    window.set_layer(Layer::Overlay);
-    window.set_keyboard_mode(KeyboardMode::Exclusive);
-    window.set_anchor(Edge::Top, true);
-    window.set_anchor(Edge::Bottom, true);
-    window.set_anchor(Edge::Left, true);
-    window.set_anchor(Edge::Right, true);
-    window.set_exclusive_zone(-1);
+    configure_layer_shell(&window);
 
     let session = Rc::new(OverlaySession {
         config: config.clone(),
@@ -306,7 +300,37 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
         }
     });
 
+    if config.inhibit_compositor_shortcuts {
+        inhibit_compositor_shortcuts(&window);
+    }
+
     window.present();
+}
+
+/// Anchor the window to all edges as an exclusive-keyboard overlay layer surface.
+fn configure_layer_shell(window: &ApplicationWindow) {
+    window.set_layer(Layer::Overlay);
+    window.set_keyboard_mode(KeyboardMode::Exclusive);
+    window.set_anchor(Edge::Top, true);
+    window.set_anchor(Edge::Bottom, true);
+    window.set_anchor(Edge::Left, true);
+    window.set_anchor(Edge::Right, true);
+    window.set_exclusive_zone(-1);
+}
+
+/// Ask the compositor to stop processing its own keybinds while the overlay
+/// has keyboard focus (keyboard-shortcuts-inhibit protocol), so a still-held
+/// Mod+<key> reaches the overlay instead of firing niri binds. Niri binds
+/// marked allow-inhibiting=false still fire.
+fn inhibit_compositor_shortcuts(window: &ApplicationWindow) {
+    window.connect_map(|window| {
+        if let Some(toplevel) = window
+            .surface()
+            .and_then(|s| s.downcast::<gdk4::Toplevel>().ok())
+        {
+            toplevel.inhibit_system_shortcuts(gdk4::Event::NONE);
+        }
+    });
 }
 
 /// Remove controllers we previously attached (identified by "ndw-" name prefix).

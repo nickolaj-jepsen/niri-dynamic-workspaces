@@ -61,6 +61,10 @@ auto_delete_empty = true           # daemon: auto-delete empty unfocused workspa
 hover_preview = true               # preview workspaces by hovering over cards
 hide_empty_static = false          # hide empty workspaces from the row above the
                                    # keyboard (focused/urgent ones stay visible)
+inhibit_compositor_shortcuts = true # suppress niri keybinds while the overlay is
+                                   # open, so a still-held Mod+<key> reaches the
+                                   # overlay instead of firing compositor binds
+                                   # (binds with allow-inhibiting=false still fire)
 layout = "qwerty"                  # keyboard layout for the overlay (see table below)
 
 [keybinds]

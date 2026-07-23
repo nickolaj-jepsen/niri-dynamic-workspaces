@@ -68,6 +68,7 @@ struct WorkspaceEntry {
 
 #[derive(Deserialize)]
 #[serde(default)]
+#[expect(clippy::struct_excessive_bools, reason = "independent config flags")]
 struct GeneralConfig {
     workspace_prefix: String,
     default_programs: Vec<String>,
@@ -75,6 +76,7 @@ struct GeneralConfig {
     layout: String,
     hover_preview: bool,
     hide_empty_static: bool,
+    inhibit_compositor_shortcuts: bool,
 }
 
 impl Default for GeneralConfig {
@@ -86,6 +88,7 @@ impl Default for GeneralConfig {
             layout: "qwerty".to_string(),
             hover_preview: true,
             hide_empty_static: false,
+            inhibit_compositor_shortcuts: true,
         }
     }
 }
@@ -117,6 +120,7 @@ pub struct HookConfig {
     pub on_delete: Vec<String>,
 }
 
+#[expect(clippy::struct_excessive_bools, reason = "independent config flags")]
 pub struct ResolvedConfig {
     pub workspace_prefix: String,
     pub close_keybinds: Vec<Keybind>,
@@ -129,6 +133,9 @@ pub struct ResolvedConfig {
     pub hover_preview: bool,
     /// Hide windowless workspaces from the static row (focused/urgent stay).
     pub hide_empty_static: bool,
+    /// Suppress compositor keybinds while the overlay is open, so a held
+    /// Mod+<key> reaches the overlay instead of firing niri binds.
+    pub inhibit_compositor_shortcuts: bool,
     pub layout: &'static KeyboardLayout,
     pub templates: Vec<Template>,
     pub hooks: HookConfig,
@@ -602,6 +609,7 @@ impl Config {
             auto_delete_empty: self.general.auto_delete_empty,
             hover_preview: self.general.hover_preview,
             hide_empty_static: self.general.hide_empty_static,
+            inhibit_compositor_shortcuts: self.general.inhibit_compositor_shortcuts,
             layout,
             templates,
             hooks: HookConfig {
@@ -1002,6 +1010,21 @@ mod tests {
         assert_eq!(resolved.layout.name, "qwerty");
         assert!(resolved.templates.is_empty());
         assert!(!resolved.hide_empty_static);
+        assert!(resolved.inhibit_compositor_shortcuts);
+    }
+
+    #[test]
+    fn resolve_inhibit_compositor_shortcuts_disabled() {
+        let config = Config {
+            general: GeneralConfig {
+                inhibit_compositor_shortcuts: false,
+                ..GeneralConfig::default()
+            },
+            ..Config::default()
+        };
+        let (resolved, warnings) = config.resolve();
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        assert!(!resolved.inhibit_compositor_shortcuts);
     }
 
     #[test]
@@ -2067,6 +2090,7 @@ type = "text"
             auto_delete_empty: true,
             hover_preview: true,
             hide_empty_static: false,
+            inhibit_compositor_shortcuts: true,
             layout: &LAYOUT_QWERTY,
             templates,
             hooks: HookConfig {

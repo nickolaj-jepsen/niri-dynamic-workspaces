@@ -556,6 +556,7 @@ pub(super) mod tests {
             auto_delete_empty: true,
             hover_preview: true,
             hide_empty_static: false,
+            inhibit_compositor_shortcuts: true,
             layout: &LAYOUT_QWERTY,
             templates: Vec::new(),
             hooks: crate::config::HookConfig::default(),
