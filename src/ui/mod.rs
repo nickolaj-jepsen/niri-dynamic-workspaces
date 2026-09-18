@@ -137,14 +137,6 @@ impl Mode {
     pub fn from_window(window: &gtk4::Window) -> Option<Self> {
         Self::from_widget_name(window.widget_name().as_str())
     }
-
-    const fn container_css_class(self) -> Option<&'static str> {
-        match self {
-            Self::Normal => None,
-            Self::Delete => Some("delete-mode"),
-            Self::MoveWindow => Some("move-window-mode"),
-        }
-    }
 }
 
 // --- Data types ---
@@ -445,14 +437,11 @@ fn build_hint_footer(metrics: &KeyboardMetrics, hints: &[&str]) -> GtkBox {
     let footer = GtkBox::builder()
         .orientation(Orientation::Horizontal)
         .spacing(metrics.key_size / 4)
-        .css_classes(["hint-footer"])
+        .css_classes(["hints"])
         .halign(Align::Center)
         .build();
     for text in hints {
-        let label = Label::builder()
-            .label(*text)
-            .css_classes(["hint-footer-item"])
-            .build();
+        let label = Label::builder().label(*text).css_classes(["hint"]).build();
         footer.append(&label);
     }
     footer
@@ -470,17 +459,17 @@ fn populate_overlay(
     let config = &session.config;
     session.in_subview.set(false);
     window.set_widget_name(mode.widget_name());
-    remove_app_controllers(window);
-
-    let mut container_classes = vec!["popup-container"];
-    if let Some(cls) = mode.container_css_class() {
-        container_classes.push(cls);
+    // Same strings as CSS classes, so themes can style per mode (`window.mode-delete`).
+    for m in Mode::all() {
+        window.remove_css_class(m.widget_name());
     }
+    window.add_css_class(mode.widget_name());
+    remove_app_controllers(window);
 
     let container = GtkBox::builder()
         .orientation(Orientation::Vertical)
         .spacing(0)
-        .css_classes(container_classes)
+        .css_classes(["content"])
         .halign(Align::Center)
         .valign(Align::Center)
         .build();

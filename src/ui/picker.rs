@@ -153,7 +153,7 @@ pub(super) fn show_template_picker(ch: char, ctx: &ActionContext) {
     let container = GtkBox::builder()
         .orientation(Orientation::Vertical)
         .spacing(0)
-        .css_classes(["popup-container", "template-picker"])
+        .css_classes(["content", "template-picker"])
         .halign(Align::Center)
         .valign(Align::Center)
         .build();

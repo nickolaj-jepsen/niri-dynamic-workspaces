@@ -19,23 +19,19 @@ window {
     background-color: var(--backdrop-bg);
 }
 
-.popup-container {
-    background-color: transparent;
-}
-
 /* --- Static workspaces (row above keyboard) --- */
 
 .static-workspaces {
     margin-bottom: var(--key-margin);
 }
 
-/* --- Keyboard keys --- */
+/* --- Workspace cards (keyboard keys and the static row) --- */
 
 .keyboard {
     margin: var(--key-margin) 0;
 }
 
-.keyboard-key {
+.workspace-card {
     background-color: var(--card-bg);
     color: var(--card-fg);
     border: 1px solid var(--card-border);
@@ -44,45 +40,34 @@ window {
     transition: 200ms ease;
 }
 
-.keyboard-key:hover {
+.workspace-card:hover {
     border-color: var(--card-border-hover);
 }
 
-.keyboard-key.active {
+.workspace-card.active {
     background-color: var(--accent);
     color: var(--accent-fg);
     border: 2px solid var(--accent-text);
 }
 
-.keyboard-key.urgent {
+.workspace-card.urgent {
     background-color: var(--urgent);
     color: var(--urgent-fg);
     border: 2px solid var(--urgent);
 }
 
-.keyboard-key.disabled {
+.workspace-card.disabled {
     opacity: 0.40;
 }
 
-.key-char {
+.card-title {
     font-weight: bold;
     font-size: var(--font-char);
 }
 
-.key-name {
+.card-name {
     font-size: var(--font-name);
     opacity: 0.7;
-}
-
-.key-apps {
-    font-size: var(--font-detail);
-    opacity: 0.5;
-    font-style: italic;
-}
-
-.key-status {
-    font-size: var(--font-detail);
-    opacity: 0.5;
 }
 
 /* --- Mode tabs (bottom bar) --- */
@@ -116,11 +101,11 @@ window {
 
 /* --- Hints & errors --- */
 
-.hint-footer {
+.hints {
     margin-top: var(--section-gap);
 }
 
-.hint-footer-item {
+.hint {
     font-size: var(--font-footer);
     color: var(--card-fg);
     opacity: 0.5;
@@ -134,7 +119,8 @@ window {
 
 /* --- Template picker --- */
 
-.template-picker {
+.template-picker,
+.variable-prompt {
     padding: var(--section-gap);
 }
 
