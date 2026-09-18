@@ -75,9 +75,10 @@ fn find_workspace_by_char<'a>(
     ch: char,
 ) -> Option<&'a Workspace> {
     workspaces.iter().find(|w| {
-        w.name.as_ref().is_some_and(|n| {
-            n.strip_prefix(prefix).and_then(|rest| rest.chars().next()) == Some(ch)
-        })
+        w.name
+            .as_deref()
+            .and_then(|n| crate::config::parse_dynamic_name(n, prefix))
+            .is_some_and(|(key, _)| key == ch)
     })
 }
 
@@ -443,7 +444,7 @@ fn removable_workspaces(
         .iter()
         .filter_map(|ws| {
             let name = ws.name.as_ref()?;
-            if !name.starts_with(prefix)
+            if crate::config::parse_dynamic_name(name, prefix).is_none()
                 || ws.is_focused
                 || ws.is_active
                 || window_ws_ids.contains(&ws.id)
@@ -1134,6 +1135,12 @@ mod tests {
         // None-named workspaces never match
         let ws = find_workspace_by_char(&workspaces, "dyn-", 'c');
         assert!(ws.is_none());
+    }
+
+    #[test]
+    fn find_workspace_by_char_ignores_lookalike_names() {
+        let workspaces = vec![test_workspace(1, Some("dyn-alpha"), false)];
+        assert!(find_workspace_by_char(&workspaces, "dyn-", 'a').is_none());
     }
 
     fn test_debouncer() -> Debouncer {
