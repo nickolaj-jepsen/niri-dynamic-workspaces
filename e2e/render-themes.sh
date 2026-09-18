@@ -34,9 +34,9 @@ render() {
     done
     "$harness" overlay switch
     "$harness" shot "$shot" >/dev/null
-    # A theme file that is not wired into config::Theme falls back to gtk with only a warning.
+    # An unknown name or broken CSS still opens the overlay, just with the wrong colours.
     local warnings
-    warnings=$("$harness" logs 50 | grep "config warning:\|theme warning:" | sort -u || true)
+    warnings=$("$harness" logs 50 | grep "config warning:\|theme warning:\|Theme pars" | sort -u || true)
     if [[ -n $warnings ]]; then
         echo "$warnings" >&2
         echo "render-themes: '$theme' did not load cleanly" >&2

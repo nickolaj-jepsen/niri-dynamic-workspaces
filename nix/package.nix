@@ -21,6 +21,7 @@ in
           || lib.hasPrefix "themes" relPath
           || name == "Cargo.toml"
           || name == "Cargo.lock"
+          || name == "build.rs"
           || name == "style.css";
       };
 
