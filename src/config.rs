@@ -77,6 +77,7 @@ struct GeneralConfig {
     hover_preview: bool,
     hide_empty_static: bool,
     inhibit_compositor_shortcuts: bool,
+    theme: String,
 }
 
 impl Default for GeneralConfig {
@@ -89,6 +90,7 @@ impl Default for GeneralConfig {
             hover_preview: true,
             hide_empty_static: false,
             inhibit_compositor_shortcuts: true,
+            theme: "gtk".to_string(),
         }
     }
 }
@@ -137,8 +139,44 @@ pub struct ResolvedConfig {
     /// Mod+<key> reaches the overlay instead of firing niri binds.
     pub inhibit_compositor_shortcuts: bool,
     pub layout: &'static KeyboardLayout,
+    pub theme: Theme,
     pub templates: Vec<Template>,
     pub hooks: HookConfig,
+}
+
+/// Colour palette for the overlay, from `general.theme`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Theme {
+    /// Follow the GTK theme.
+    #[default]
+    Gtk,
+    Dark,
+    Light,
+    /// A CSS file layered over the GTK-derived defaults. Relative paths are
+    /// resolved against the config file's directory by [`load_config`].
+    File(std::path::PathBuf),
+}
+
+impl Theme {
+    /// Parse a `general.theme` value: anything containing `/` or ending in
+    /// `.css` is a file, everything else must be a built-in name.
+    fn parse(value: &str) -> Result<Self, String> {
+        let is_path = value.contains('/')
+            || std::path::Path::new(value)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("css"));
+        if is_path {
+            return Ok(Self::File(expand_tilde(value).into()));
+        }
+        match value.to_lowercase().as_str() {
+            "gtk" => Ok(Self::Gtk),
+            "dark" => Ok(Self::Dark),
+            "light" => Ok(Self::Light),
+            _ => Err(format!(
+                "unknown theme '{value}' (expected gtk, dark, light or a .css path), defaulting to gtk"
+            )),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -480,6 +518,11 @@ impl Config {
             &LAYOUT_QWERTY
         };
 
+        let theme = Theme::parse(&self.general.theme).unwrap_or_else(|w| {
+            warnings.push(w);
+            Theme::Gtk
+        });
+
         // --- Templates ---
         let mut templates: Vec<Template> = Vec::new();
         // Reserve '1' for the "Empty" option in the template picker.
@@ -611,6 +654,7 @@ impl Config {
             hide_empty_static: self.general.hide_empty_static,
             inhibit_compositor_shortcuts: self.general.inhibit_compositor_shortcuts,
             layout,
+            theme,
             templates,
             hooks: HookConfig {
                 on_create: self.hooks.on_create,
@@ -834,6 +878,16 @@ pub fn parse_workspace_char(s: &str) -> Option<char> {
 
 // --- Public API ---
 
+/// Expand a leading `~/` in a path to the user's home directory.
+pub fn expand_tilde(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return format!("{}/{rest}", home.display());
+        }
+    }
+    path.to_string()
+}
+
 fn default_config() -> ResolvedConfig {
     Config::default().resolve().0
 }
@@ -906,9 +960,12 @@ pub fn load_config(path_override: Option<&std::path::Path>) -> ResolvedConfig {
         }
     };
 
-    let (resolved, warnings) = config.resolve();
+    let (mut resolved, warnings) = config.resolve();
     for w in &warnings {
         eprintln!("config warning: {w}");
+    }
+    if let (Theme::File(path), Some(dir)) = (&mut resolved.theme, config_path.parent()) {
+        *path = dir.join(&*path);
     }
     resolved
 }
@@ -1042,6 +1099,7 @@ mod tests {
         assert!(resolved.workspace_programs.is_empty());
         assert!(resolved.workspace_names.is_empty());
         assert_eq!(resolved.layout.name, "qwerty");
+        assert_eq!(resolved.theme, Theme::Gtk);
         assert!(resolved.templates.is_empty());
         assert!(!resolved.hide_empty_static);
         assert!(resolved.inhibit_compositor_shortcuts);
@@ -2126,6 +2184,7 @@ type = "text"
             hide_empty_static: false,
             inhibit_compositor_shortcuts: true,
             layout: &LAYOUT_QWERTY,
+            theme: Theme::Gtk,
             templates,
             hooks: HookConfig {
                 on_create: global_hooks,
@@ -2461,5 +2520,85 @@ depth = 2
         values.insert("branch".to_string(), String::new());
         let result = resolve_workspace_title(None, &variables, &values);
         assert_eq!(result, None);
+    }
+
+    // --- Theme ---
+
+    #[test]
+    fn theme_parse_builtin_names() {
+        assert_eq!(Theme::parse("gtk"), Ok(Theme::Gtk));
+        assert_eq!(Theme::parse("dark"), Ok(Theme::Dark));
+        assert_eq!(Theme::parse("Light"), Ok(Theme::Light));
+    }
+
+    #[test]
+    fn theme_parse_paths() {
+        assert_eq!(Theme::parse("mine.css"), Ok(Theme::File("mine.css".into())));
+        assert_eq!(
+            Theme::parse("/etc/ndw/theme.CSS"),
+            Ok(Theme::File("/etc/ndw/theme.CSS".into()))
+        );
+        assert_eq!(
+            Theme::parse("themes/mine"),
+            Ok(Theme::File("themes/mine".into()))
+        );
+    }
+
+    #[test]
+    fn theme_parse_expands_tilde() {
+        let Ok(Theme::File(path)) = Theme::parse("~/themes/mine.css") else {
+            panic!("expected a file theme");
+        };
+        assert!(path.is_absolute());
+        assert!(path.ends_with("themes/mine.css"));
+    }
+
+    #[test]
+    fn theme_parse_unknown_name() {
+        assert!(Theme::parse("solarized").is_err());
+        assert!(Theme::parse("").is_err());
+    }
+
+    #[test]
+    fn resolve_unknown_theme_warns_and_defaults() {
+        let config = Config {
+            general: GeneralConfig {
+                theme: "solarized".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (resolved, warnings) = config.resolve();
+        assert_eq!(resolved.theme, Theme::Gtk);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("solarized"));
+    }
+
+    #[test]
+    fn toml_with_theme() {
+        let config: Config = toml::from_str("[general]\ntheme = \"dark\"\n").unwrap();
+        let (resolved, warnings) = config.resolve();
+        assert!(warnings.is_empty());
+        assert_eq!(resolved.theme, Theme::Dark);
+    }
+
+    // --- expand_tilde ---
+
+    #[test]
+    fn expand_tilde_with_home() {
+        let result = expand_tilde("~/dev");
+        assert!(!result.starts_with('~'));
+        assert!(result.ends_with("/dev"));
+    }
+
+    #[test]
+    fn expand_tilde_no_tilde() {
+        assert_eq!(expand_tilde("/tmp/foo"), "/tmp/foo");
+    }
+
+    #[test]
+    fn expand_tilde_only_tilde_slash() {
+        let result = expand_tilde("~/");
+        assert!(!result.starts_with('~'));
     }
 }

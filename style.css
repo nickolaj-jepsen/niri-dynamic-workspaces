@@ -206,8 +206,24 @@ window {
     margin-bottom: var(--key-pad-v);
 }
 
+/* Entries would otherwise keep the GTK theme's colours under another palette. */
 .variable-entry {
     font-size: var(--font-name);
+    background-color: color-mix(in srgb, var(--card-fg) 10%, transparent);
+    color: var(--card-fg);
+    caret-color: var(--card-fg);
+    border: 1px solid var(--card-border);
+    box-shadow: none;
+    outline-color: var(--accent-text);
+}
+
+.variable-entry > text > placeholder {
+    color: color-mix(in srgb, var(--card-fg) 50%, transparent);
+}
+
+.variable-entry > text > selection {
+    background-color: var(--accent);
+    color: var(--accent-fg);
 }
 
 /* --- Fuzzy select (enum variables) --- */

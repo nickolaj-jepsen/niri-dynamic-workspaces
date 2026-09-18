@@ -177,6 +177,7 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
     let window = ApplicationWindow::builder().application(app).build();
     window.remove_css_class("background");
     window.init_layer_shell();
+    theme::apply(&config.theme);
 
     // Single IPC fetch — derive focused output, monitor, and workspace name from it.
     let workspaces = niri::list_workspaces().unwrap_or_default();

@@ -66,6 +66,9 @@ inhibit_compositor_shortcuts = true # suppress niri keybinds while the overlay i
                                    # overlay instead of firing compositor binds
                                    # (binds with allow-inhibiting=false still fire)
 layout = "qwerty"                  # keyboard layout for the overlay (see table below)
+theme = "gtk"                      # "gtk" follows your GTK theme; "dark" and "light"
+                                   # are built in; or a path to a CSS file, relative
+                                   # to this file's directory (see Theming)
 
 [keybinds]
 close = ["Escape", "Ctrl+c", "Ctrl+w", "Ctrl+q"]  # keys to dismiss the overlay
