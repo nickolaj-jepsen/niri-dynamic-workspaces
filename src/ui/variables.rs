@@ -163,16 +163,6 @@ fn run_options_command(cmd: &str) -> Vec<String> {
     }
 }
 
-/// Expand a leading `~/` in a path to the user's home directory.
-fn expand_tilde(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return format!("{}/{rest}", home.display());
-        }
-    }
-    path.to_string()
-}
-
 /// Recursively collect child directories up to `remaining` levels deep.
 ///
 /// Skips hidden entries (names starting with `.`). Only directories are
@@ -206,7 +196,7 @@ fn collect_children(current: &std::path::Path, remaining: u32, results: &mut Vec
 fn scan_dir_options(dirs: &[String], depth: u32) -> Vec<String> {
     let mut results = Vec::new();
     for dir in dirs {
-        let expanded = expand_tilde(dir);
+        let expanded = crate::config::expand_tilde(dir);
         let root = std::path::Path::new(&expanded);
         if root.is_dir() {
             collect_children(root, depth, &mut results);
@@ -669,26 +659,6 @@ mod tests {
         let source = Select::Command("nonexistent_cmd_12345".to_string());
         let result = resolve_select_options(&source);
         assert!(result.is_empty());
-    }
-
-    // --- expand_tilde ---
-
-    #[test]
-    fn expand_tilde_with_home() {
-        let result = expand_tilde("~/dev");
-        assert!(!result.starts_with('~'));
-        assert!(result.ends_with("/dev"));
-    }
-
-    #[test]
-    fn expand_tilde_no_tilde() {
-        assert_eq!(expand_tilde("/tmp/foo"), "/tmp/foo");
-    }
-
-    #[test]
-    fn expand_tilde_only_tilde_slash() {
-        let result = expand_tilde("~/");
-        assert!(!result.starts_with('~'));
     }
 
     // --- scan_dir_options ---
