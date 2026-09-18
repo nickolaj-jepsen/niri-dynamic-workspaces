@@ -78,8 +78,9 @@ programs = ["firefox", "slack"]        # programs launched on create (replaces d
 [workspace.b]
 programs = ["kitty --title myterm"]    # arguments split with shell quoting rules
 # Quote arguments containing spaces: ["kitty --title 'my term'"]. No shell is
-# involved — quoting only groups words. Substituted {{variables}} are quoted
-# automatically, so "code {{path}}" works with paths containing spaces.
+# involved — quoting only groups words. {{variables}} are filled in after the
+# split, so a value never breaks out of its argument: "code {{path}}" and
+# "kitty --title 'ws: {{path}}'" both work with paths containing spaces.
 
 [workspace.1]                          # digit workspaces work too
 name = "Comms"

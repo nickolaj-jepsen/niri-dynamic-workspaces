@@ -558,7 +558,6 @@ fn attach_variable_input_key_handler(
             for (name, widget) in var_names.iter().zip(widgets.iter()) {
                 values.insert(name.clone(), widget.borrow().value());
             }
-            let substituted = crate::config::substitute_variables_quoted(&programs, &values);
             let title = crate::config::resolve_workspace_title(
                 template_title.as_deref(),
                 &template_variables,
@@ -569,7 +568,7 @@ fn attach_variable_input_key_handler(
                 template_name: template_name.clone(),
                 variables: values,
             };
-            switch_and_close(&full_name, ch, &substituted, &key_ctx, &hook_info);
+            switch_and_close(&full_name, ch, &programs, &key_ctx, &hook_info);
             return Propagation::Stop;
         }
 

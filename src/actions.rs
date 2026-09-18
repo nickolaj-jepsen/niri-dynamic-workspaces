@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 
+use anyhow::Context as _;
 use gtk4::gio;
 use gtk4::prelude::*;
 
@@ -19,6 +20,9 @@ pub struct HookInfo {
 /// Switch to a workspace (creating it if needed), spawn its programs, and run
 /// on-create hooks when a new workspace was made.
 ///
+/// `programs` are command strings; `{{name}}` placeholders are filled from
+/// `hook_info.variables`. A malformed command fails before anything is created.
+///
 /// Column reordering (needed when 2+ programs spawn) runs on a background
 /// thread; see [`spawn_reorder`].
 pub fn switch_workspace(
@@ -29,8 +33,15 @@ pub fn switch_workspace(
     programs: &[String],
     hook_info: &HookInfo,
 ) -> anyhow::Result<()> {
+    let commands = programs
+        .iter()
+        .map(|program| {
+            config::build_argv(program, &hook_info.variables)
+                .with_context(|| format!("failed to parse command '{program}'"))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
     let (created, reorder) =
-        niri::switch_workspace(&config.workspace_prefix, ch, ws_name, programs)?;
+        niri::switch_workspace(&config.workspace_prefix, ch, ws_name, &commands)?;
     if let Some(request) = reorder {
         spawn_reorder(app, request);
     }

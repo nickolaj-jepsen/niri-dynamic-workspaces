@@ -622,58 +622,96 @@ impl Config {
     }
 }
 
+/// A piece of a template string: literal text or a `{{name}}` placeholder.
+enum Segment<'a> {
+    Literal(&'a str),
+    /// `raw` is the full `{{ name }}` text, `name` the trimmed variable name.
+    Placeholder {
+        raw: &'a str,
+        name: &'a str,
+    },
+}
+
+/// Split a template string into literal and `{{name}}` placeholder segments.
+///
+/// An unterminated `{{` is literal text.
+fn segments(template: &str) -> Vec<Segment<'_>> {
+    let mut out = Vec::new();
+    let mut rest = template;
+    while let Some(start) = rest.find("{{") {
+        let Some(len) = rest[start + 2..].find("}}") else {
+            break;
+        };
+        if start > 0 {
+            out.push(Segment::Literal(&rest[..start]));
+        }
+        let end = start + 2 + len + 2;
+        out.push(Segment::Placeholder {
+            raw: &rest[start..end],
+            name: rest[start + 2..end - 2].trim(),
+        });
+        rest = &rest[end..];
+    }
+    if !rest.is_empty() {
+        out.push(Segment::Literal(rest));
+    }
+    out
+}
+
 /// Extract all `{{name}}` variable references from a program string.
 ///
 /// Returns a deduplicated list of variable names in order of first occurrence.
 pub fn extract_variable_references(program: &str) -> Vec<String> {
-    let mut refs = Vec::new();
-    let mut seen = HashSet::new();
-    let mut rest = program;
-    while let Some(start) = rest.find("{{") {
-        let after_open = &rest[start + 2..];
-        if let Some(end) = after_open.find("}}") {
-            let name = after_open[..end].trim();
-            if !name.is_empty() && seen.insert(name.to_string()) {
+    let mut refs: Vec<String> = Vec::new();
+    for segment in segments(program) {
+        if let Segment::Placeholder { name, .. } = segment {
+            if !name.is_empty() && !refs.iter().any(|r| r == name) {
                 refs.push(name.to_string());
             }
-            rest = &after_open[end + 2..];
-        } else {
-            break;
         }
     }
     refs
 }
 
-/// Substitute `{{name}}` placeholders in each program string, shell-quoting
-/// each value so it survives word splitting as a single argument.
+/// Substitute `{{name}}` placeholders with their values in a single pass.
 ///
-/// Use for program command lines. Display strings (workspace titles) should
-/// use [`substitute_variables`], which inserts values verbatim.
-pub fn substitute_variables_quoted(
-    programs: &[String],
-    values: &HashMap<String, String>,
-) -> Vec<String> {
-    let quoted: HashMap<String, String> = values
-        .iter()
-        .map(|(name, value)| (name.clone(), shell_words::quote(value).into_owned()))
-        .collect();
-    substitute_variables(programs, &quoted)
-}
-
-/// Substitute `{{name}}` placeholders in each program string with values.
-///
-/// Unmatched placeholders (no matching key in `values`) are left as-is.
-pub fn substitute_variables(programs: &[String], values: &HashMap<String, String>) -> Vec<String> {
-    programs
-        .iter()
-        .map(|prog| {
-            let mut result = prog.clone();
-            for (name, value) in values {
-                result = result.replace(&format!("{{{{{name}}}}}"), value);
-            }
-            result
+/// Inserted values are never rescanned, so a value containing `{{other}}`
+/// stays verbatim. Placeholders with no matching key are left as-is.
+pub fn substitute(template: &str, values: &HashMap<String, String>) -> String {
+    segments(template)
+        .into_iter()
+        .map(|segment| match segment {
+            Segment::Literal(text) => text,
+            Segment::Placeholder { raw, name } => values.get(name).map_or(raw, String::as_str),
         })
         .collect()
+}
+
+/// Turn a program string into an argument vector: split with shell quoting
+/// rules (no shell is invoked), then substitute placeholders in each word.
+///
+/// Splitting first keeps every value inside the argument its placeholder was
+/// written in, whatever spaces or quotes the value contains.
+///
+/// # Errors
+///
+/// Fails when the program string has unbalanced quotes.
+pub fn build_argv(
+    program: &str,
+    values: &HashMap<String, String>,
+) -> Result<Vec<String>, shell_words::ParseError> {
+    // `{{ name }}` would otherwise split into three words.
+    let normalized: String = segments(program)
+        .into_iter()
+        .map(|segment| match segment {
+            Segment::Literal(text) => text.to_string(),
+            Segment::Placeholder { name, .. } => format!("{{{{{name}}}}}"),
+        })
+        .collect();
+    Ok(shell_words::split(&normalized)?
+        .iter()
+        .map(|word| substitute(word, values))
+        .collect())
 }
 
 /// Build the environment variable pairs for hook execution.
@@ -755,10 +793,7 @@ pub fn resolve_workspace_title(
     values: &std::collections::HashMap<String, String>,
 ) -> Option<String> {
     if let Some(template) = title_template {
-        let result = substitute_variables(&[template.to_string()], values)
-            .into_iter()
-            .next()
-            .unwrap_or_default();
+        let result = substitute(template, values);
         if result.is_empty() {
             None
         } else {
@@ -1638,92 +1673,71 @@ programs = ["firefox"]
         assert_eq!(extract_variable_references("code {{ path }}"), vec!["path"]);
     }
 
-    // --- substitute_variables ---
+    // --- substitute ---
 
-    #[test]
-    fn substitute_variables_basic() {
-        let programs = vec!["code {{path}}".to_string()];
-        let values = HashMap::from([("path".to_string(), "/home/user".to_string())]);
-        assert_eq!(
-            substitute_variables(&programs, &values),
-            vec!["code /home/user"]
-        );
+    fn values(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
     }
 
     #[test]
-    fn substitute_variables_multiple() {
-        let programs = vec!["{{cmd}} {{arg}}".to_string()];
-        let values = HashMap::from([
-            ("cmd".to_string(), "code".to_string()),
-            ("arg".to_string(), "/tmp".to_string()),
-        ]);
-        assert_eq!(substitute_variables(&programs, &values), vec!["code /tmp"]);
+    fn substitute_replaces_placeholders() {
+        let values = values(&[("cmd", "code"), ("arg", "/tmp")]);
+        assert_eq!(substitute("{{cmd}} {{ arg }}!", &values), "code /tmp!");
     }
 
     #[test]
-    fn substitute_variables_missing_key() {
-        let programs = vec!["code {{path}}".to_string()];
-        let values = HashMap::new();
-        assert_eq!(
-            substitute_variables(&programs, &values),
-            vec!["code {{path}}"]
-        );
+    fn substitute_leaves_unknown_and_unterminated_placeholders() {
+        let values = values(&[("a", "1")]);
+        assert_eq!(substitute("{{a}} {{b}} {{a", &values), "1 {{b}} {{a");
     }
 
     #[test]
-    fn substitute_variables_multiple_programs() {
-        let programs = vec![
-            "code {{path}}".to_string(),
-            "git -C {{path}} checkout {{branch}}".to_string(),
-            "kitty".to_string(),
-        ];
-        let values = HashMap::from([
-            ("path".to_string(), "/home/user/project".to_string()),
-            ("branch".to_string(), "main".to_string()),
-        ]);
-        assert_eq!(
-            substitute_variables(&programs, &values),
-            vec![
-                "code /home/user/project",
-                "git -C /home/user/project checkout main",
-                "kitty"
-            ]
-        );
+    fn substitute_does_not_rescan_inserted_values() {
+        let values = values(&[("a", "{{b}}"), ("b", "{{a}}")]);
+        assert_eq!(substitute("{{a}} {{b}}", &values), "{{b}} {{a}}");
     }
 
-    // --- substitute_variables_quoted ---
+    // --- build_argv ---
 
     #[test]
-    fn substitute_variables_quoted_spaces_survive_splitting() {
-        let programs = vec!["code {{path}}".to_string()];
-        let values = HashMap::from([("path".to_string(), "/home/me/my project".to_string())]);
-        let substituted = substitute_variables_quoted(&programs, &values);
-        assert_eq!(substituted, vec!["code '/home/me/my project'"]);
+    fn build_argv_value_with_spaces_stays_one_argument() {
+        let values = values(&[("path", "/home/me/my project")]);
         assert_eq!(
-            shell_words::split(&substituted[0]).unwrap(),
+            build_argv("code {{path}}", &values).unwrap(),
             vec!["code", "/home/me/my project"]
         );
     }
 
     #[test]
-    fn substitute_variables_quoted_plain_value_unquoted() {
-        let programs = vec!["git checkout {{branch}}".to_string()];
-        let values = HashMap::from([("branch".to_string(), "main".to_string())]);
+    fn build_argv_placeholder_inside_quotes() {
+        let values = values(&[("x", "it's a \"test\"")]);
         assert_eq!(
-            substitute_variables_quoted(&programs, &values),
-            vec!["git checkout main"]
+            build_argv("kitty --title 'ws: {{x}}'", &values).unwrap(),
+            vec!["kitty", "--title", "ws: it's a \"test\""]
         );
     }
 
     #[test]
-    fn substitute_variables_quoted_escapes_quotes() {
-        let programs = vec!["notify {{msg}}".to_string()];
-        let values = HashMap::from([("msg".to_string(), "it's done".to_string())]);
-        let substituted = substitute_variables_quoted(&programs, &values);
+    fn build_argv_spaced_placeholder_is_one_word() {
+        let values = values(&[("path", "/tmp")]);
         assert_eq!(
-            shell_words::split(&substituted[0]).unwrap(),
-            vec!["notify", "it's done"]
+            build_argv("code {{ path }}", &values).unwrap(),
+            vec!["code", "/tmp"]
         );
+    }
+
+    #[test]
+    fn build_argv_empty_value_keeps_the_argument() {
+        let values = values(&[("x", "")]);
+        assert_eq!(build_argv("echo {{x}}", &values).unwrap(), vec!["echo", ""]);
+    }
+
+    #[test]
+    fn build_argv_rejects_unbalanced_quotes() {
+        assert!(build_argv("code 'unclosed", &HashMap::new()).is_err());
     }
 
     // --- cleanup_prefix_source ---
