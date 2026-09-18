@@ -219,7 +219,7 @@ Every theme is rendered in the [theme gallery](docs/themes.md).
 |-------|--------|
 | `"gtk"` (default) | Follows your GTK theme, including libadwaita-style colours defined in `~/.config/gtk-4.0/gtk.css` (matugen, stylix, adw-gtk3, …). Themes without those names get them derived from GTK's core colours. |
 | `"dark"`, `"light"` | Self-contained neutral palettes that ignore the GTK theme. |
-| a palette name | `catppuccin-mocha`, `catppuccin-latte`, `gruvbox-dark`, `gruvbox-light`, `nord`, `dracula`, `tokyo-night`, `rose-pine`, `everforest`, `kanagawa`, `solarized-dark`, `solarized-light`, `flexoki-dark`, `flexoki-light` — all shown in the [gallery](docs/themes.md). |
+| a palette name | `catppuccin-mocha`, `catppuccin-latte`, `gruvbox-dark`, `gruvbox-light`, `nord`, `dracula`, `tokyo-night`, `rose-pine`, `everforest`, `kanagawa`, `solarized-dark`, `solarized-light`, `flexoki-dark`, `flexoki-light`, `fireproof` — all shown in the [gallery](docs/themes.md). |
 | a path | Your own CSS file. Anything containing `/` or ending in `.css` is a path; `~/` is expanded and relative paths start at the config file's directory. |
 
 A theme file is ordinary [GTK CSS](https://docs.gtk.org/gtk4/css-properties.html) and only needs what it changes: primaries it leaves out still come from the GTK theme. It is re-read every time the overlay opens, daemon included; CSS errors are reported on stderr and the rest of the file still applies.

@@ -165,6 +165,35 @@ window {
 
 </details>
 
+## fireproof
+
+```toml
+[general]
+theme = "fireproof"
+```
+
+![fireproof](themes/fireproof.png)
+
+<details>
+<summary><code>themes/fireproof.css</code></summary>
+
+```css
+/* Fireproof — the author's desktop palette, a warm Flexoki dark with a terracotta accent. */
+
+window {
+    --bg: #1c1b1a;
+    --fg: #dad8ce;
+    --accent: #cf6a4c;
+    --urgent: #d0a215;
+    --danger: #d14d41;
+
+    --card-bg: #282726;
+    --accent-fg: #f2f0e5;
+}
+```
+
+</details>
+
 ## flexoki-dark
 
 ```toml
