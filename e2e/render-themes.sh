@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
-# Render every theme into docs/themes/<name>.png and regenerate docs/themes.md.
-# Covers the built-in themes plus any contrib/themes/*.css; run inside 'nix develop' after 'cargo build'.
+# Render every theme in themes/ into docs/themes/<name>.png and regenerate docs/themes.md.
+# Run inside 'nix develop' after 'cargo build'.
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repo=$(dirname "$here")
 harness=$here/harness.sh
 gallery=$repo/docs/themes.md
-export NDW_E2E_OUT=$repo/docs/themes
+shots=$repo/docs/themes
 
+# Everything lands in a scratch dir first, so a failed run leaves docs/ untouched.
 tmp=$(mktemp -d)
+export NDW_E2E_OUT=$tmp/shots
 trap '"$harness" stop; rm -rf "$tmp"' EXIT
 
 # Named, created workspaces so the shot shows focused, plain and uncreated cards.
@@ -32,6 +34,14 @@ render() {
     done
     "$harness" overlay switch
     "$harness" shot "$shot" >/dev/null
+    # A theme file that is not wired into config::Theme falls back to gtk with only a warning.
+    local warnings
+    warnings=$("$harness" logs 50 | grep "config warning:\|theme warning:" | sort -u || true)
+    if [[ -n $warnings ]]; then
+        echo "$warnings" >&2
+        echo "render-themes: '$theme' did not load cleanly" >&2
+        exit 1
+    fi
     "$harness" stop
     echo "rendered $shot" >&2
 }
@@ -45,7 +55,6 @@ section() {
     fi
 }
 
-rm -rf "$NDW_E2E_OUT"
 mkdir -p "$NDW_E2E_OUT"
 
 {
@@ -57,24 +66,23 @@ Set `general.theme` to one of the built-in names, or to the path of a CSS
 file. See [Theming](../README.md#theming) for the variables and classes.
 MD
 
+    # The default comes first; it follows the GTK theme, so show it under both variants.
     render gtk-dark gtk Default:dark
     section "gtk, under a dark GTK theme" gtk-dark gtk
     render gtk-light gtk Default:light
     section "gtk, under a light GTK theme" gtk-light gtk
 
-    # Against the opposite GTK variant: the built-in palettes must not depend on it.
-    render dark dark Default:light
-    section dark dark dark "$repo/themes/dark.css"
-    render light light Default:dark
-    section light light light "$repo/themes/light.css"
-
-    shopt -s nullglob
-    for css in "$repo"/contrib/themes/*.css; do
+    for css in "$repo"/themes/*.css; do
         name=$(basename "$css" .css)
-        render "$name" "$css" Default:dark
-        section "$name" "$name" "$name.css" "$css"
+        # gtk.css is done above; gtk-*.css are support files.
+        [[ $name == gtk || $name == gtk-* ]] && continue
+        # Under GTK's light variant: a self-contained palette must not depend on it.
+        render "$name" "$name" Default:light
+        section "$name" "$name" "$name" "$css"
     done
-} >"$gallery.tmp"
+} >"$tmp/themes.md"
 
-mv "$gallery.tmp" "$gallery"
+rm -rf "$shots"
+mv "$NDW_E2E_OUT" "$shots"
+mv "$tmp/themes.md" "$gallery"
 echo "wrote ${gallery#"$repo"/}" >&2
