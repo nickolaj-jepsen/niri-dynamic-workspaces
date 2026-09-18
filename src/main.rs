@@ -14,6 +14,26 @@ use gtk4::gio::{ApplicationFlags, ApplicationHoldGuard};
 use gtk4::prelude::*;
 use gtk4::{gdk, CssProvider};
 
+/// D-Bus name owned by the running instance.
+const APP_ID: &str = "dev.nickolaj.niri-dynamic-workspaces";
+
+/// Debug builds and `NDW_APP_ID` take distinct ids so a locally built overlay
+/// is never forwarded over D-Bus to an installed daemon.
+fn application_id() -> String {
+    if let Some(id) = std::env::var("NDW_APP_ID").ok().filter(|s| !s.is_empty()) {
+        if gtk4::gio::Application::id_is_valid(&id) {
+            return id;
+        }
+        eprintln!("warning: ignoring invalid NDW_APP_ID '{id}'");
+    }
+
+    if cfg!(debug_assertions) {
+        format!("{APP_ID}.Devel")
+    } else {
+        APP_ID.to_string()
+    }
+}
+
 /// A dynamic workspace switcher for the niri Wayland compositor.
 ///
 /// Opens a fullscreen overlay showing workspace cards.
@@ -124,7 +144,7 @@ fn main() {
     }
 
     let app = gtk4::Application::builder()
-        .application_id("dev.nickolaj.niri-dynamic-workspaces")
+        .application_id(application_id())
         .flags(ApplicationFlags::HANDLES_COMMAND_LINE)
         .build();
 

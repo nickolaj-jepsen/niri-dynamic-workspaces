@@ -256,3 +256,16 @@ cargo fmt -- --check   # check formatting
 cargo clippy           # lint (clippy all + pedantic)
 cargo test             # run unit tests
 ```
+
+### Testing against a running daemon
+
+An invocation is forwarded over D-Bus to whichever process owns the application
+id, so a locally built overlay would otherwise be drawn by an installed daemon.
+Debug builds (`cargo build`, `cargo run`) use
+`dev.nickolaj.niri-dynamic-workspaces.Devel` instead.
+
+To test a release build alongside an installed one, override the id:
+
+```bash
+NDW_APP_ID=dev.nickolaj.niri-dynamic-workspaces.Test ./target/release/niri-dynamic-workspaces
+```
