@@ -208,6 +208,90 @@ name = "Project path"
 
 All layouts contain the same 36 keys (a–z, 0–9) arranged in the physical positions of each keyboard layout. The value is case-insensitive.
 
+### Theming
+
+![gtk, dark, light and a custom theme file](docs/themes.png)
+
+`general.theme` picks the palette:
+
+| Value | Result |
+|-------|--------|
+| `"gtk"` (default) | Follows your GTK theme, including libadwaita-style colours defined in `~/.config/gtk-4.0/gtk.css` (matugen, stylix, adw-gtk3, …). Themes without those names get them derived from GTK's core colours. |
+| `"dark"`, `"light"` | Self-contained palettes that ignore the GTK theme. |
+| a path | Your own CSS file. Anything containing `/` or ending in `.css` is a path; `~/` is expanded and relative paths start at the config file's directory. |
+
+A theme file is ordinary [GTK CSS](https://docs.gtk.org/gtk4/css-properties.html) and only needs what it changes: primaries it leaves out still come from the GTK theme. It is re-read every time the overlay opens, daemon included; CSS errors are reported on stderr and the rest of the file still applies.
+
+```css
+/* ~/.config/niri-dynamic-workspaces/mocha.css, with theme = "mocha.css" */
+window {
+    --bg: #1e1e2e;
+    --fg: #cdd6f4;
+    --accent: #89b4fa;
+    --urgent: #f9e2af;
+    --danger: #f38ba8;
+}
+```
+
+[`themes/dark.css`](themes/dark.css) is a complete palette to copy from.
+
+#### Variables
+
+All variables are set on `window`. The five primaries are enough for a full theme; the derived ones follow them unless you set them too.
+
+| Primary | Used for |
+|---------|----------|
+| `--bg` | backdrop and base surface |
+| `--fg` | text |
+| `--accent` | focused workspace, selection |
+| `--urgent` | urgent workspace |
+| `--danger` | delete mode, errors |
+
+| Derived | Default |
+|---------|---------|
+| `--backdrop-bg` | `--bg` at 85% opacity |
+| `--card-bg` | `--bg` with 6% `--fg` mixed in |
+| `--card-fg` | `--fg` |
+| `--card-border`, `--card-border-hover` | `--card-fg` at 15% / 30% opacity |
+| `--accent-fg` | `--bg` (text on `--accent`) |
+| `--accent-text` | `--accent` (accent used as a text colour) |
+| `--urgent-fg` | `--bg` (text on `--urgent`) |
+
+Under `theme = "gtk"`, `--card-bg`, `--card-fg`, `--accent-fg`, `--accent-text` and `--urgent-fg` come from the GTK theme instead.
+
+Sizes scale with the monitor and are regenerated on every open, but a theme file wins over them: `--key-radius`, `--key-margin`, `--key-pad-v`, `--key-pad-h`, `--section-gap`, `--tab-radius`, `--tab-pad-h`, `--option-min-width`, and the font sizes `--font-char`, `--font-name`, `--font-detail`, `--font-tab`, `--font-footer`.
+
+```css
+window { --key-radius: 0; --backdrop-bg: rgba(0, 0, 0, 0.6); }
+```
+
+#### Classes
+
+For anything variables can't express, style the widgets directly.
+
+| Selector | Widget |
+|----------|--------|
+| `window.mode-switch`, `.mode-delete`, `.mode-move-window` | the overlay, by current mode |
+| `.backdrop` | full-screen background |
+| `.content` | centred container of the current view |
+| `.static-workspaces`, `.keyboard`, `.keyboard-row` | the row of static workspaces, the key grid and its rows |
+| `.workspace-card` | a key or a static workspace; contains `.card-title` and `.card-name` |
+| `.mode-tabs`, `.mode-tab` | mode bar; tabs carry `.switch`, `.delete` or `.move-window`, plus `.active` |
+| `.hints`, `.hint`, `.error-message` | footer hints and the error line |
+| `.template-picker` | template view: `.template-title`, `.template-list`, `.template-option` (`.selected`) with `.template-key`, `.template-name`, `.template-programs` |
+| `.variable-prompt` | variable view: `.variable-title`, `.variable-form`, `.variable-row`, `.variable-label`, `.variable-entry` (`.loading`) |
+| `.fuzzy-list`, `.fuzzy-option` (`.selected`), `.fuzzy-more` | select-variable options |
+
+`.workspace-card` states: `.static` or `.dynamic`; `.uncreated`, `.empty` or `.occupied`; `.focused`; `.active` (focused, or the visible workspace of another output); `.urgent`; `.disabled` (not a valid target in the current mode).
+
+```css
+window.mode-delete .backdrop { background-color: rgba(60, 0, 0, 0.85); }
+.workspace-card.uncreated { border-style: dashed; }
+@media (prefers-color-scheme: light) { window { --accent: #1c71d8; } }  /* GTK 4.20+ */
+```
+
+Variable and class names are covered by semver. The widget tree between them is not, so prefer class selectors over child combinators.
+
 ### Usage
 
 - **`niri-dynamic-workspaces`** or **`niri-dynamic-workspaces switch`** — opens the switcher overlay (press key to switch/create)
