@@ -85,7 +85,9 @@ start() {
 
     # The overlay forwards invocations over D-Bus; a private bus keeps a host daemon from answering.
     local dbus_addr
-    dbus-daemon --session --nofork --print-address >"$run_dir/dbus.addr" 2>/dev/null &
+    # Activated services (the settings portal) inherit this environment; the host config would leak its GTK theme.
+    XDG_CONFIG_HOME="$run_dir/config" \
+        dbus-daemon --session --nofork --print-address >"$run_dir/dbus.addr" 2>/dev/null &
     echo $! >"$run_dir/dbus.pid"
     wait_for 10 test -s "$run_dir/dbus.addr" || die "session bus did not start"
     dbus_addr=$(cat "$run_dir/dbus.addr")
@@ -108,6 +110,7 @@ export WAYLAND_DISPLAY=$(log_value "listening on Wayland socket: ")
 export NIRI_SOCKET=$(log_value "IPC listening on: ")
 export NDW_APP_ID=dev.nickolaj.niri-dynamic-workspaces.E2e
 export GSK_RENDERER=cairo
+export GTK_THEME=${NDW_E2E_GTK_THEME-Default:dark}
 export LIBGL_ALWAYS_SOFTWARE=1
 EOF
     wait_for 10 in_env niri msg version || die "nested niri IPC not responding"
