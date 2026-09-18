@@ -42,7 +42,7 @@ Data flow: `main` → `config::load_config()` → `ui::build_ui(app, config, mod
 - **Error handling**: `anyhow` with `.context()` throughout niri.rs; UI handlers show errors in a label rather than panicking.
 - **Workspace naming**: all dynamic workspaces are prefixed (default `dyn-`) followed by a single workspace key character (a–z or 0–9), optionally followed by a space and a title (`dyn-a My Project`). The prefix is configurable.
 - **Nix-first**: the project is built and developed via Nix flakes. `nix/package.nix` is the build derivation, `nix/devshell.nix` provides the dev environment, `nix/hm-module.nix` is a Home Manager integration module.
-- **niri-ipc version pinned**: `niri-ipc = "=25.11.0"` in Cargo.toml — exact version match to the compositor IPC protocol.
+- **niri-ipc version pinned**: `niri-ipc = "=26.4.0"` in Cargo.toml — exact version match to the compositor IPC protocol.
 - **GTK4 CSS**: all visual styling lives in `style.css` at the repo root, loaded at runtime.
 - **Linting**: clippy `all` + `pedantic` warnings are enabled in `Cargo.toml [lints.clippy]`. A few noisy pedantic lints (`module_name_repetitions`, `wildcard_imports`, `cast_possible_truncation`) are suppressed. Fix warnings rather than suppressing them, unless the lint is truly inapplicable (e.g. `too_many_lines` on UI builder functions).
 - **Testing**: unit tests live in `#[cfg(test)] mod tests` at the bottom of `config.rs`, `niri.rs`, and the `ui/` modules. Tests cover pure functions (parsing, config resolution, string transforms) and IPC logic via the mocked `NiriClient`. Add tests when adding new pure logic or IPC sequences.
