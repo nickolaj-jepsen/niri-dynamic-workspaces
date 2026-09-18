@@ -34,6 +34,10 @@ programs.niri-dynamic-workspaces = {
   settings = {
     general.workspace_prefix = "dyn-";
   };
+  # Optional: a theme file, written next to the config and selected for you
+  themeCss = ''
+    window { --accent: #89b4fa; }
+  '';
 };
 ```
 
