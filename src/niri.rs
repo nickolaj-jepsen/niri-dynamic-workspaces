@@ -546,46 +546,92 @@ fn connect_event_stream() -> anyhow::Result<BufReader<UnixStream>> {
     Ok(reader)
 }
 
-fn event_cleanup_loop(prefix_source: &mut impl FnMut() -> Option<String>) -> anyhow::Result<()> {
-    let mut reader = connect_event_stream()?;
+/// Trailing-edge debounce: due once events have been quiet for `quiet`, or
+/// `max_wait` after the first pending event so a busy stream cannot starve it.
+pub(crate) struct Debouncer {
+    quiet: Duration,
+    max_wait: Duration,
+    /// `(first, last)` event times since the last [`Debouncer::clear`].
+    pending: Option<(Instant, Instant)>,
+}
 
-    // Read events line-by-line (no shutdown — avoids half-close issues with newer niri)
-    let debounce = Duration::from_millis(500);
-    let mut last_cleanup = Instant::now();
-    let mut cleanup_pending = false;
-    let mut buf = String::new();
-
-    loop {
-        buf.clear();
-        let n = reader
-            .read_line(&mut buf)
-            .context("failed to read from niri socket")?;
-        if n == 0 {
-            bail!("niri event stream closed");
+impl Debouncer {
+    pub(crate) const fn new(quiet: Duration, max_wait: Duration) -> Self {
+        Self {
+            quiet,
+            max_wait,
+            pending: None,
         }
+    }
 
-        // Skip events that don't deserialize (e.g. new variants from a newer niri)
-        let Ok(event) = serde_json::from_str::<Event>(&buf) else {
-            continue;
-        };
+    pub(crate) fn on_event(&mut self, now: Instant) {
+        let first = self.pending.map_or(now, |(first, _)| first);
+        self.pending = Some((first, now));
+    }
 
-        match &event {
-            Event::WindowOpenedOrChanged { .. }
+    pub(crate) fn due(&self, now: Instant) -> bool {
+        self.pending.is_some_and(|(first, last)| {
+            now.duration_since(last) >= self.quiet || now.duration_since(first) >= self.max_wait
+        })
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.pending = None;
+    }
+}
+
+/// Whether an event can leave a dynamic workspace empty and unfocused.
+fn triggers_cleanup(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::WindowOpenedOrChanged { .. }
             | Event::WindowClosed { .. }
             | Event::WindowsChanged { .. }
             | Event::WorkspaceActivated { .. }
-            | Event::WorkspacesChanged { .. } => {
-                cleanup_pending = true;
+            | Event::WorkspacesChanged { .. }
+    )
+}
+
+fn is_read_timeout(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    )
+}
+
+fn event_cleanup_loop(prefix_source: &mut impl FnMut() -> Option<String>) -> anyhow::Result<()> {
+    let mut reader = connect_event_stream()?;
+    // The timeout lets a pending cleanup fire when no further event arrives.
+    reader
+        .get_ref()
+        .set_read_timeout(Some(Duration::from_millis(250)))
+        .context("failed to set read timeout")?;
+
+    let mut debouncer = Debouncer::new(Duration::from_millis(500), Duration::from_secs(2));
+    // Bytes, not String: a timeout mid-line must keep a partial UTF-8 sequence.
+    let mut buf = Vec::new();
+
+    loop {
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) => bail!("niri event stream closed"),
+            Ok(_) => {
+                // Skip events that don't deserialize (e.g. new variants from a newer niri)
+                if let Ok(event) = serde_json::from_slice::<Event>(&buf) {
+                    if triggers_cleanup(&event) {
+                        debouncer.on_event(Instant::now());
+                    }
+                }
+                buf.clear();
             }
-            _ => {}
+            Err(e) if is_read_timeout(&e) => {}
+            Err(e) => return Err(e).context("failed to read from niri socket"),
         }
 
-        if cleanup_pending && last_cleanup.elapsed() >= debounce {
+        if debouncer.due(Instant::now()) {
+            debouncer.clear();
             if let Some(prefix) = prefix_source() {
                 cleanup_empty_workspaces(&prefix);
             }
-            cleanup_pending = false;
-            last_cleanup = Instant::now();
         }
     }
 }
@@ -660,9 +706,7 @@ fn overlay_event_loop(
                 buf.clear();
             }
             // Timeout: keep any partial line in buf and re-check `alive`.
-            Err(e)
-                if e.kind() == std::io::ErrorKind::WouldBlock
-                    || e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(e) if is_read_timeout(&e) => {}
             Err(e) => return Err(e).context("failed to read from niri socket"),
         }
     }
@@ -1133,5 +1177,57 @@ mod tests {
         // None-named workspaces never match
         let ws = find_workspace_by_char(&workspaces, "dyn-", 'c');
         assert!(ws.is_none());
+    }
+
+    fn test_debouncer() -> Debouncer {
+        Debouncer::new(Duration::from_millis(500), Duration::from_secs(2))
+    }
+
+    #[test]
+    fn debouncer_idle_is_never_due() {
+        let debouncer = test_debouncer();
+        assert!(!debouncer.due(Instant::now() + Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn debouncer_fires_after_quiet_period_without_further_events() {
+        let mut debouncer = test_debouncer();
+        let t0 = Instant::now();
+        debouncer.on_event(t0);
+
+        assert!(!debouncer.due(t0 + Duration::from_millis(499)));
+        assert!(debouncer.due(t0 + Duration::from_millis(500)));
+    }
+
+    #[test]
+    fn debouncer_events_extend_the_quiet_period() {
+        let mut debouncer = test_debouncer();
+        let t0 = Instant::now();
+        debouncer.on_event(t0);
+        debouncer.on_event(t0 + Duration::from_millis(400));
+
+        assert!(!debouncer.due(t0 + Duration::from_millis(600)));
+        assert!(debouncer.due(t0 + Duration::from_millis(900)));
+    }
+
+    #[test]
+    fn debouncer_busy_stream_fires_at_max_wait() {
+        let mut debouncer = test_debouncer();
+        let t0 = Instant::now();
+        for i in 0..=20 {
+            debouncer.on_event(t0 + Duration::from_millis(i * 100));
+        }
+
+        assert!(debouncer.due(t0 + Duration::from_millis(2000)));
+    }
+
+    #[test]
+    fn debouncer_clear_resets_pending() {
+        let mut debouncer = test_debouncer();
+        let t0 = Instant::now();
+        debouncer.on_event(t0);
+        debouncer.clear();
+
+        assert!(!debouncer.due(t0 + Duration::from_secs(10)));
     }
 }
