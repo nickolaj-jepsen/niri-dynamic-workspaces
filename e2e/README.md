@@ -52,6 +52,10 @@ its own D-Bus session bus, and `NDW_APP_ID=dev.nickolaj.niri-dynamic-workspaces.
 Without the private bus an installed daemon on the host bus would own the
 application id and answer the invocation instead.
 
+`GTK_THEME` is pinned to `Default:dark` so screenshots never show the host
+theme; set `NDW_E2E_GTK_THEME` before `start` to look at another one (empty
+leaves it unset).
+
 ## Keyboard input does not work yet
 
 niri mistranslates keycodes coming from the virtual-keyboard protocol, so a key
