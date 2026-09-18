@@ -20,7 +20,7 @@ use super::picker::{show_template_picker, TemplateOption};
 use super::{
     attach_close_on_backdrop_click, build_hint_footer, create_error_revealer,
     format_workspace_display, matches_close_keybind, new_key_controller, remove_app_controllers,
-    switch_and_close, wrap_in_backdrop, wrap_index, ActionContext,
+    scroll_to_child, switch_and_close, wrap_in_backdrop, wrap_index, ActionContext,
 };
 
 /// Filter `options` by fuzzy-matching against `query`, returning indices sorted
@@ -49,12 +49,17 @@ fn fuzzy_filter(query: &str, options: &[String], matcher: &mut Matcher) -> Vec<u
     scored.into_iter().map(|(i, _)| i).collect()
 }
 
+/// Rows rendered by a fuzzy select; further matches are reached by typing.
+const MAX_VISIBLE_OPTIONS: usize = 50;
+
 #[derive(Clone)]
 struct FuzzySelect {
     entry: Entry,
+    /// Index into `filtered`; always within the rendered rows.
     selected: Rc<Cell<usize>>,
+    /// Indices into `options` of all current matches, best first.
     filtered: Rc<RefCell<Vec<usize>>>,
-    options: Vec<String>,
+    options: Rc<Vec<String>>,
 }
 
 impl FuzzySelect {
@@ -98,13 +103,39 @@ impl VariableWidget {
     }
 }
 
-fn update_fuzzy_selection(labels: &[Label], filtered: &[usize], old_idx: usize, new_idx: usize) {
-    if let Some(&old) = filtered.get(old_idx) {
-        labels[old].remove_css_class("selected");
+/// Text for the row shown under a truncated match list, if any matches are hidden.
+fn hidden_matches_hint(match_count: usize) -> Option<String> {
+    let hidden = match_count
+        .checked_sub(MAX_VISIBLE_OPTIONS)
+        .filter(|&n| n > 0)?;
+    Some(format!("\u{2026} and {hidden} more, keep typing to narrow"))
+}
+
+/// Show the best matches in the fixed row pool and highlight `selected`.
+fn render_fuzzy_rows(
+    rows: &[Label],
+    more_label: &Label,
+    options: &[String],
+    filtered: &[usize],
+    selected: usize,
+) {
+    for (slot, row) in rows.iter().enumerate() {
+        match filtered.get(slot) {
+            Some(&i) => {
+                row.set_label(&options[i]);
+                row.set_visible(true);
+            }
+            None => row.set_visible(false),
+        }
+        if slot == selected {
+            row.add_css_class("selected");
+        } else {
+            row.remove_css_class("selected");
+        }
     }
-    if let Some(&new) = filtered.get(new_idx) {
-        labels[new].add_css_class("selected");
-    }
+    let hint = hidden_matches_hint(filtered.len());
+    more_label.set_visible(hint.is_some());
+    more_label.set_label(hint.as_deref().unwrap_or_default());
 }
 
 /// Run a shell command and return each non-empty stdout line as a `String`.
@@ -242,10 +273,6 @@ fn spawn_select_resolution(
     });
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "fuzzy select widget with filter and key handling setup"
-)]
 fn build_fuzzy_select(
     row: &GtkBox,
     options: &[String],
@@ -263,100 +290,23 @@ fn build_fuzzy_select(
         .css_classes(["fuzzy-list"])
         .build();
 
-    let option_labels: Vec<Label> = options
-        .iter()
-        .enumerate()
-        .map(|(i, opt)| {
-            let mut classes = vec!["fuzzy-option"];
-            if i == 0 {
-                classes.push("selected");
-            }
+    // A fixed pool of rows: large option lists (deep dir scans) would
+    // otherwise cost a widget per option and a relayout per keystroke.
+    let rows: Vec<Label> = (0..options.len().min(MAX_VISIBLE_OPTIONS))
+        .map(|_| {
             let label = Label::builder()
-                .label(opt)
-                .css_classes(classes)
+                .css_classes(["fuzzy-option"])
                 .halign(Align::Start)
                 .build();
             list_box.append(&label);
             label
         })
         .collect();
-
-    let all_indices: Vec<usize> = (0..options.len()).collect();
-    let filtered = Rc::new(RefCell::new(all_indices));
-    let selected = Rc::new(Cell::new(0_usize));
-    let labels_rc = Rc::new(option_labels);
-    let matcher = Rc::new(RefCell::new(Matcher::new(MatcherConfig::DEFAULT)));
-
-    // Filter on text change
-    {
-        let opts: Vec<String> = options.to_vec();
-        let filt = filtered.clone();
-        let sel = selected.clone();
-        let labels = labels_rc.clone();
-        let matcher = matcher.clone();
-        let list = list_box.clone();
-        search_entry.connect_changed(move |entry| {
-            let query = entry.text();
-
-            // Remove old selection highlight
-            {
-                let old_filt = filt.borrow();
-                if let Some(&old_real) = old_filt.get(sel.get()) {
-                    labels[old_real].remove_css_class("selected");
-                }
-            }
-
-            let new_indices = fuzzy_filter(&query, &opts, &mut matcher.borrow_mut());
-
-            for (i, label) in labels.iter().enumerate() {
-                label.set_visible(new_indices.contains(&i));
-            }
-
-            // Reorder labels in the list to match score order (best first)
-            for (pos, &i) in new_indices.iter().enumerate() {
-                if pos == 0 {
-                    labels[i].insert_after(&list, None::<&Label>);
-                } else {
-                    labels[i].insert_after(&list, Some(&labels[new_indices[pos - 1]]));
-                }
-            }
-
-            sel.set(0);
-            if let Some(&first_idx) = new_indices.first() {
-                labels[first_idx].add_css_class("selected");
-            }
-
-            *filt.borrow_mut() = new_indices;
-        });
-    }
-
-    // Handle Up/Down keys on the search entry
-    {
-        let filt = filtered.clone();
-        let sel = selected.clone();
-        let labels = labels_rc.clone();
-        let key_ctrl = EventControllerKey::new();
-        key_ctrl.connect_key_pressed(move |_, key, _, _| {
-            let indices = filt.borrow();
-            if indices.is_empty() {
-                return Propagation::Proceed;
-            }
-
-            let is_up = key == gdk4::Key::Up || key == gdk4::Key::KP_Up;
-            let is_down = key == gdk4::Key::Down || key == gdk4::Key::KP_Down;
-            if !is_up && !is_down {
-                return Propagation::Proceed;
-            }
-            let current = sel.get();
-            let new_idx = wrap_index(current, indices.len(), is_down);
-
-            update_fuzzy_selection(&labels, &indices, current, new_idx);
-            sel.set(new_idx);
-
-            Propagation::Stop
-        });
-        search_entry.add_controller(key_ctrl);
-    }
+    let more_label = Label::builder()
+        .css_classes(["fuzzy-more"])
+        .halign(Align::Start)
+        .build();
+    list_box.append(&more_label);
 
     let scrolled = ScrolledWindow::builder()
         .hscrollbar_policy(PolicyType::Never)
@@ -367,11 +317,59 @@ fn build_fuzzy_select(
         .build();
     row.append(&scrolled);
 
+    let options: Rc<Vec<String>> = Rc::new(options.to_vec());
+    let filtered = Rc::new(RefCell::new((0..options.len()).collect::<Vec<usize>>()));
+    let selected = Rc::new(Cell::new(0_usize));
+    let rows = Rc::new(rows);
+    render_fuzzy_rows(&rows, &more_label, &options, &filtered.borrow(), 0);
+
+    // Filter on text change
+    {
+        let options = options.clone();
+        let filtered = filtered.clone();
+        let selected = selected.clone();
+        let rows = rows.clone();
+        let scrolled = scrolled.clone();
+        let matcher = RefCell::new(Matcher::new(MatcherConfig::DEFAULT));
+        search_entry.connect_changed(move |entry| {
+            let hits = fuzzy_filter(&entry.text(), &options, &mut matcher.borrow_mut());
+            selected.set(0);
+            render_fuzzy_rows(&rows, &more_label, &options, &hits, 0);
+            scrolled.vadjustment().set_value(0.0);
+            *filtered.borrow_mut() = hits;
+        });
+    }
+
+    // Handle Up/Down keys on the search entry
+    {
+        let filtered = filtered.clone();
+        let selected = selected.clone();
+        let key_ctrl = EventControllerKey::new();
+        key_ctrl.connect_key_pressed(move |_, key, _, _| {
+            let is_up = key == gdk4::Key::Up || key == gdk4::Key::KP_Up;
+            let is_down = key == gdk4::Key::Down || key == gdk4::Key::KP_Down;
+            let visible = filtered.borrow().len().min(rows.len());
+            if visible == 0 || (!is_up && !is_down) {
+                return Propagation::Proceed;
+            }
+
+            let current = selected.get();
+            let new_idx = wrap_index(current, visible, is_down);
+            rows[current].remove_css_class("selected");
+            rows[new_idx].add_css_class("selected");
+            selected.set(new_idx);
+            scroll_to_child(&scrolled, &rows[new_idx]);
+
+            Propagation::Stop
+        });
+        search_entry.add_controller(key_ctrl);
+    }
+
     VariableWidget::Enum(FuzzySelect {
         entry: search_entry,
         selected,
         filtered,
-        options: options.to_vec(),
+        options,
     })
 }
 
@@ -621,6 +619,16 @@ mod tests {
     }
 
     // --- run_options_command ---
+
+    #[test]
+    fn hidden_matches_hint_only_when_truncated() {
+        assert_eq!(hidden_matches_hint(0), None);
+        assert_eq!(hidden_matches_hint(MAX_VISIBLE_OPTIONS), None);
+        assert_eq!(
+            hidden_matches_hint(MAX_VISIBLE_OPTIONS + 3).as_deref(),
+            Some("\u{2026} and 3 more, keep typing to narrow")
+        );
+    }
 
     #[test]
     fn run_options_command_basic() {

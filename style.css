@@ -228,3 +228,9 @@ window {
     background-color: alpha(@accent_color, 0.15);
     color: @accent_color;
 }
+
+.fuzzy-more {
+    font-size: var(--font-detail);
+    padding: var(--key-pad-v) var(--key-pad-h);
+    opacity: 0.6;
+}

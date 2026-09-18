@@ -680,6 +680,43 @@ fn show_error(ctx: &ActionContext, msg: &str) {
     ctx.error_revealer.set_reveal_child(true);
 }
 
+/// New scroll position that brings the span `top..bottom` into a viewport at
+/// `value` with height `page`, or `None` if it is already fully visible.
+fn scroll_target(top: f64, bottom: f64, value: f64, page: f64) -> Option<f64> {
+    if top < value {
+        Some(top)
+    } else if bottom > value + page {
+        Some(bottom - page)
+    } else {
+        None
+    }
+}
+
+/// Scroll `scrolled` vertically so that `child`, a descendant of its content,
+/// is fully visible.
+fn scroll_to_child(scrolled: &gtk4::ScrolledWindow, child: &impl IsA<gtk4::Widget>) {
+    // Non-scrollable content gets wrapped in a Viewport; bounds relative to
+    // the content itself are in adjustment coordinates.
+    let Some(content) = scrolled
+        .child()
+        .map(|c| match c.downcast::<gtk4::Viewport>() {
+            Ok(viewport) => viewport.child().unwrap_or_else(|| viewport.upcast()),
+            Err(other) => other,
+        })
+    else {
+        return;
+    };
+    let Some(bounds) = child.compute_bounds(&content) else {
+        return;
+    };
+    let adjustment = scrolled.vadjustment();
+    let top = f64::from(bounds.y());
+    let bottom = top + f64::from(bounds.height());
+    if let Some(value) = scroll_target(top, bottom, adjustment.value(), adjustment.page_size()) {
+        adjustment.set_value(value);
+    }
+}
+
 /// Wrap-around index navigation (Up decrements, Down increments).
 fn wrap_index(current: usize, len: usize, forward: bool) -> usize {
     if len == 0 {
@@ -736,6 +773,16 @@ mod tests {
     fn focused_workspace_name_from_returns_none_when_unnamed() {
         let workspaces = vec![test_workspace(1, None, true)];
         assert_eq!(focused_workspace_name_from(&workspaces), None);
+    }
+
+    // --- scroll_target ---
+
+    #[test]
+    fn scroll_target_moves_only_when_out_of_view() {
+        // Viewport shows 100..200.
+        assert_eq!(scroll_target(120.0, 150.0, 100.0, 100.0), None);
+        assert_eq!(scroll_target(80.0, 110.0, 100.0, 100.0), Some(80.0));
+        assert_eq!(scroll_target(190.0, 220.0, 100.0, 100.0), Some(120.0));
     }
 
     // --- wrap_index ---

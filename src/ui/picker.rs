@@ -14,8 +14,8 @@ use super::variables::show_variable_input;
 use super::{
     attach_close_on_backdrop_click, build_hint_footer, create_error_revealer, display_key_char,
     format_workspace_display, matches_close_keybind, new_key_controller, populate_overlay,
-    remove_app_controllers, switch_and_close, wrap_in_backdrop, wrap_index, ActionContext, Mode,
-    ACTION_MODS,
+    remove_app_controllers, scroll_to_child, switch_and_close, wrap_in_backdrop, wrap_index,
+    ActionContext, Mode, ACTION_MODS,
 };
 
 /// An option in the template picker (either "Empty" or a named template).
@@ -241,6 +241,7 @@ pub(super) fn show_template_picker(ch: char, ctx: &ActionContext) {
         &picker_ctx,
         &options,
         &option_widgets_rc,
+        &scrolled,
         &selected_idx,
         option_count,
         ch,
@@ -252,6 +253,7 @@ fn attach_template_key_handler(
     ctx: &ActionContext,
     options: &Rc<Vec<TemplateOption>>,
     option_widgets: &Rc<Vec<GtkBox>>,
+    scrolled: &ScrolledWindow,
     selected_idx: &Rc<Cell<usize>>,
     option_count: usize,
     ws_char: char,
@@ -260,6 +262,7 @@ fn attach_template_key_handler(
     let close_keybinds = ctx.session.config.close_keybinds.clone();
     let options = options.clone();
     let widgets = option_widgets.clone();
+    let scrolled = scrolled.clone();
     let sel = selected_idx.clone();
 
     let key_controller = new_key_controller();
@@ -280,6 +283,7 @@ fn attach_template_key_handler(
             let new_idx = wrap_index(sel.get(), option_count, is_down);
             sel.set(new_idx);
             update_selection(&widgets, new_idx);
+            scroll_to_child(&scrolled, &widgets[new_idx]);
             return Propagation::Stop;
         }
 
