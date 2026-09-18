@@ -257,6 +257,19 @@ cargo clippy           # lint (clippy all + pedantic)
 cargo test             # run unit tests
 ```
 
+### End-to-end tests
+
+`e2e/` runs the overlay inside a nested headless niri and drives it with clicks
+and screenshots, so the IPC choreography is exercised against a real compositor:
+
+```bash
+cargo build
+./e2e/test.sh
+```
+
+See [e2e/README.md](e2e/README.md) for the harness verbs, how to drive a session
+by hand, and the current keyboard-injection limitation.
+
 ### Testing against a running daemon
 
 An invocation is forwarded over D-Bus to whichever process owns the application

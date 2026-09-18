@@ -1,0 +1,23 @@
+hotkey-overlay {
+    skip-at-startup
+}
+
+// Deterministic screenshots.
+animations {
+    off
+}
+
+input {
+    keyboard {
+        xkb {
+            layout "us"
+        }
+    }
+}
+
+// The pointer warps to the origin before each click, which would trip the hot corner.
+gestures {
+    hot-corners {
+        off
+    }
+}

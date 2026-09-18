@@ -1,0 +1,5 @@
+# No programs spawn, so tests assert on workspace state alone.
+[general]
+workspace_prefix = "dyn-"
+default_programs = []
+auto_delete_empty = false

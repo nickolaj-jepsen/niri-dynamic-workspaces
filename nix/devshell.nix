@@ -1,9 +1,9 @@
-{ self, ... }:
+{ self, inputs, ... }:
 {
-  perSystem = { pkgs, ... }: {
+  perSystem = { pkgs, system, ... }: {
     devShells.default = pkgs.mkShell {
       inputsFrom = [
-        self.packages.${pkgs.system}.default
+        self.packages.${system}.default
       ];
 
       nativeBuildInputs = [
@@ -11,6 +11,16 @@
         pkgs.cargo
         pkgs.clippy
         pkgs.rustfmt
+
+        # e2e harness: nested compositor, input injection, screenshots
+        inputs.niri-flake.packages.${system}.niri-unstable
+        pkgs.cage
+        pkgs.wtype
+        pkgs.grim
+        pkgs.wlrctl
+        pkgs.jq
+        pkgs.dbus
+        pkgs.foot
       ];
     };
   };

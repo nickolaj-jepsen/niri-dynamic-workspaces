@@ -23,3 +23,26 @@ jobs:
 
       - name: cargo test
         run: nix develop --command cargo test
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@main
+
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: build
+        run: nix develop --command cargo build
+
+      - name: e2e
+        run: |
+          export XDG_RUNTIME_DIR=$(mktemp -d)
+          nix develop --command ./e2e/test.sh
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: e2e-failures
+          path: e2e/out/
