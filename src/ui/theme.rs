@@ -37,11 +37,11 @@ pub(super) fn apply(theme: &Theme) {
         return;
     };
     let (provider, priority) = match theme {
+        Theme::Builtin(builtin) => (from_data(builtin.css), PRIORITY_BUILTIN_THEME),
         Theme::File(path) => match from_file(path) {
             Some(provider) => (provider, PRIORITY_THEME_FILE),
-            None => (builtin(&Theme::Gtk), PRIORITY_BUILTIN_THEME),
+            None => return apply(&Theme::default()),
         },
-        builtin_theme => (builtin(builtin_theme), PRIORITY_BUILTIN_THEME),
     };
     THEME_PROVIDER.with(|cell| {
         if let Some(old) = cell.borrow_mut().replace(provider.clone()) {
@@ -51,16 +51,7 @@ pub(super) fn apply(theme: &Theme) {
     add(&display, &provider, priority);
 }
 
-fn builtin(theme: &Theme) -> CssProvider {
-    from_data(match theme {
-        Theme::Dark => include_str!("../../themes/dark.css"),
-        Theme::Light => include_str!("../../themes/light.css"),
-        Theme::Gtk | Theme::File(_) => include_str!("../../themes/gtk.css"),
-    })
-}
-
-/// Load a user theme file, reporting CSS errors on stderr. Whatever parsed
-/// still applies; `None` only when the file cannot be read at all.
+/// Load a theme file, reporting CSS errors on stderr; `None` only when it cannot be read.
 fn from_file(path: &Path) -> Option<CssProvider> {
     if let Err(e) = std::fs::metadata(path) {
         eprintln!(

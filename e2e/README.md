@@ -50,8 +50,7 @@ A session by hand:
 `./e2e/render-themes.sh` renders every `themes/<name>.css` as
 `theme = "<name>"` into `docs/themes/<name>.png` and regenerates
 `docs/themes.md`. `gtk` is shown under both GTK variants and `gtk-*.css` are
-support files. It fails if a theme does not load cleanly, which is what happens
-to a file in `themes/` that `config::Theme` does not know yet. Run it after
+support files. It fails if a theme logs a config or CSS warning. Run it after
 changing `style.css`, `themes/` or card layout.
 
 ## Isolation

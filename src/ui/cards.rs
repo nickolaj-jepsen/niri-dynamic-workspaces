@@ -589,7 +589,7 @@ pub(super) mod tests {
             hide_empty_static: false,
             inhibit_compositor_shortcuts: true,
             layout: &LAYOUT_QWERTY,
-            theme: crate::config::Theme::Gtk,
+            theme: crate::config::Theme::default(),
             templates: Vec::new(),
             hooks: crate::config::HookConfig::default(),
         }
