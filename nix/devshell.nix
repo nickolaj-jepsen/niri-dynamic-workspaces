@@ -21,6 +21,10 @@
         pkgs.jq
         pkgs.dbus
         pkgs.foot
+
+        # e2e/render-readme.sh: a bigger output, and a GUI app behind the overlay
+        pkgs.wlr-randr
+        pkgs.gnome-text-editor
       ];
     };
   };

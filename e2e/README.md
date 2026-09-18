@@ -53,6 +53,14 @@ A session by hand:
 support files. It fails if a theme logs a config or CSS warning. Run it after
 changing `style.css`, `themes/` or card layout.
 
+## README screenshot
+
+`./e2e/render-readme.sh` renders `docs/readme.png`: the `fireproof` theme over
+a 1920x1080 workspace holding a `gnome-text-editor` beside two stacked `foot`
+terminals, all three coloured to match. The editor goes dark through its own
+settings (libadwaita ignores `GTK_THEME`), written to a GSettings keyfile in
+the session's config dir. Run it after changing the overlay's look.
+
 ## Isolation
 
 Each session gets its own `XDG_CONFIG_HOME` holding `e2e/fixtures/config.toml`,
@@ -63,6 +71,8 @@ application id and answer the invocation instead.
 `GTK_THEME` is pinned to `Default:dark` so screenshots never show the host
 theme; set `NDW_E2E_GTK_THEME` before `start` to look at another one (empty
 leaves it unset). `NDW_E2E_CONFIG` swaps in another `config.toml`.
+`NDW_E2E_SIZE=1920x1080` resizes cage's output with `wlr-randr`; `key` and
+`mode` only know the default size.
 
 ## Keyboard input does not work yet
 

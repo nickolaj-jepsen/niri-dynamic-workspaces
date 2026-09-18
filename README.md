@@ -1,6 +1,6 @@
 # niri-dynamic-workspaces
 
-![niri-dynamic-workspaces](docs/readme.png)
+![The overlay, in the fireproof theme, over an editor and two terminals](docs/readme.png)
 
 ## Install
 

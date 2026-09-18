@@ -14,44 +14,19 @@ tmp=$(mktemp -d)
 export NDW_E2E_OUT=$tmp/shots
 trap '"$harness" stop; rm -rf "$tmp"' EXIT
 
-# The focused and urgent cards are named after their state, for people comparing themes.
-declare -A names=([w]=web [e]=mail [a]=active [s]=frontend [d]=docs [c]=chat [n]=urgent)
+# shellcheck source=e2e/render-lib.sh
+. "$here/render-lib.sh"
 
 # render <shot> <general.theme value> <GTK_THEME>
 render() {
-    local shot=$1 theme=$2 key
-    {
-        # hide_empty_static drops niri's trailing empty workspace from the row above the keyboard.
-        sed "s|^\[general\]|[general]\ntheme = \"$theme\"\nhide_empty_static = true|" "$here/fixtures/config.toml"
-        for key in "${!names[@]}"; do
-            printf '\n[workspace.%s]\nname = "%s"\n' "$key" "${names[$key]}"
-        done
-    } >"$tmp/config.toml"
-
+    write_config "$2"
     NDW_E2E_CONFIG=$tmp/config.toml NDW_E2E_GTK_THEME=$3 "$harness" start >/dev/null
-    for key in w e s d c n; do
-        "$harness" app switch "$key"
-    done
-    # Urgency belongs to windows, and focusing one clears it: open one on n, leave, then flag it.
-    "$harness" run foot sh -c 'sleep 60' >/dev/null 2>&1 &
-    local window
-    until window=$("$harness" run niri msg -j windows | jq -er '.[0].id'); do
-        sleep 0.1
-    done
-    "$harness" app switch a
-    "$harness" run niri msg action set-window-urgent --id "$window"
+    populate
     "$harness" overlay switch
-    "$harness" shot "$shot" >/dev/null
-    # An unknown name or broken CSS still opens the overlay, just with the wrong colours.
-    local warnings
-    warnings=$("$harness" logs 50 | grep "config warning:\|theme warning:\|Theme pars" | sort -u || true)
-    if [[ -n $warnings ]]; then
-        echo "$warnings" >&2
-        echo "render-themes: '$theme' did not load cleanly" >&2
-        exit 1
-    fi
+    "$harness" shot "$1" >/dev/null
+    check_warnings "$2"
     "$harness" stop
-    echo "rendered $shot" >&2
+    echo "rendered $1" >&2
 }
 
 # section <title> <shot> <theme value as written in config.toml> [css file to show]

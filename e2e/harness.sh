@@ -72,6 +72,8 @@ click_at() {
 }
 
 overlay_open() { [[ $(in_env niri msg -j layers | jq length) -gt 0 ]]; }
+output_width() { in_env niri msg -j outputs | jq '.[].logical.width'; }
+output_resized() { [[ $(output_width) != "$1" ]]; }
 overlay_closed() { ! overlay_open; }
 
 start() {
@@ -79,7 +81,7 @@ start() {
     mkdir -p "$run_dir/config/niri-dynamic-workspaces" "$out_dir"
     cp "${NDW_E2E_CONFIG:-$here/fixtures/config.toml}" "$run_dir/config/niri-dynamic-workspaces/config.toml"
     [[ -x $bin ]] || die "no binary at $bin (cargo build, or set NDW_BIN)"
-    for tool in cage niri grim wtype wlrctl jq dbus-daemon; do
+    for tool in cage niri grim wtype wlrctl jq dbus-daemon ${NDW_E2E_SIZE:+wlr-randr}; do
         command -v "$tool" >/dev/null || die "missing $tool (run inside 'nix develop')"
     done
 
@@ -96,7 +98,8 @@ start() {
         XDG_CONFIG_HOME="$run_dir/config" \
         DBUS_SESSION_BUS_ADDRESS="$dbus_addr" \
         WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 WLR_RENDERER=pixman \
-        cage -- niri -c "$here/fixtures/niri.kdl" >"$run_dir/niri.log" 2>&1 &
+        cage -- sh -c 'echo "$WAYLAND_DISPLAY" >"$0"; exec "$@"' "$run_dir/cage.display" \
+        niri -c "$here/fixtures/niri.kdl" >"$run_dir/niri.log" 2>&1 &
 
     wait_for 30 grep -q "IPC listening on:" "$run_dir/niri.log" || {
         tail -5 "$run_dir/niri.log" >&2
@@ -114,6 +117,14 @@ export GTK_THEME=${NDW_E2E_GTK_THEME-Default:dark}
 export LIBGL_ALWAYS_SOFTWARE=1
 EOF
     wait_for 10 in_env niri msg version || die "nested niri IPC not responding"
+    if [[ -n ${NDW_E2E_SIZE:-} ]]; then
+        # The headless output belongs to cage; niri follows it, less a few pixels of margin.
+        local width
+        width=$(output_width)
+        WAYLAND_DISPLAY=$(cat "$run_dir/cage.display") \
+            wlr-randr --output HEADLESS-1 --custom-mode "$NDW_E2E_SIZE" >/dev/null
+        wait_for 10 output_resized "$width" || die "output did not resize to $NDW_E2E_SIZE"
+    fi
     echo "$run_dir"
 }
 
