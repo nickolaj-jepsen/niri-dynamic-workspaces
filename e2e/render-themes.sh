@@ -14,24 +14,32 @@ tmp=$(mktemp -d)
 export NDW_E2E_OUT=$tmp/shots
 trap '"$harness" stop; rm -rf "$tmp"' EXIT
 
-# Named, created workspaces so the shot shows focused, plain and uncreated cards.
-declare -A names=([w]=web [e]=mail [a]=api [s]=shop [d]=docs [c]=chat)
+# Named, created workspaces so the shot shows focused, urgent, plain and uncreated cards.
+declare -A names=([w]=web [e]=mail [a]=api [s]=frontend [d]=docs [c]=chat)
 
 # render <shot> <general.theme value> <GTK_THEME>
 render() {
     local shot=$1 theme=$2 key
     {
-        sed "s|^\[general\]|[general]\ntheme = \"$theme\"|" "$here/fixtures/config.toml"
+        # hide_empty_static drops niri's trailing empty workspace from the row above the keyboard.
+        sed "s|^\[general\]|[general]\ntheme = \"$theme\"\nhide_empty_static = true|" "$here/fixtures/config.toml"
         for key in "${!names[@]}"; do
             printf '\n[workspace.%s]\nname = "%s"\n' "$key" "${names[$key]}"
         done
     } >"$tmp/config.toml"
 
     NDW_E2E_CONFIG=$tmp/config.toml NDW_E2E_GTK_THEME=$3 "$harness" start >/dev/null
-    # Last one stays focused.
-    for key in w e s d c a; do
+    for key in w e s d c; do
         "$harness" app switch "$key"
     done
+    # Urgency belongs to windows, and focusing one clears it: open one on chat, leave, then flag it.
+    "$harness" run foot sh -c 'sleep 60' >/dev/null 2>&1 &
+    local window
+    until window=$("$harness" run niri msg -j windows | jq -er '.[0].id'); do
+        sleep 0.1
+    done
+    "$harness" app switch a
+    "$harness" run niri msg action set-window-urgent --id "$window"
     "$harness" overlay switch
     "$harness" shot "$shot" >/dev/null
     # An unknown name or broken CSS still opens the overlay, just with the wrong colours.
