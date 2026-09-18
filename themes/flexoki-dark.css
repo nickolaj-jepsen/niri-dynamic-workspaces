@@ -1,0 +1,11 @@
+/* Flexoki dark — https://stephango.com/flexoki */
+
+window {
+    --bg: #100f0f;
+    --fg: #cecdc3;
+    --accent: #3aa99f;
+    --urgent: #da702c;
+    --danger: #d14d41;
+
+    --card-bg: #1c1b1a;
+}

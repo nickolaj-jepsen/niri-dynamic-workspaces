@@ -1,0 +1,11 @@
+/* Everforest dark (medium) — https://github.com/sainnhe/everforest */
+
+window {
+    --bg: #2d353b;
+    --fg: #d3c6aa;
+    --accent: #a7c080;
+    --urgent: #dbbc7f;
+    --danger: #e67e80;
+
+    --card-bg: #343f44;
+}

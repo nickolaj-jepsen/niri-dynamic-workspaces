@@ -1,0 +1,11 @@
+/* Catppuccin Mocha — https://catppuccin.com/palette */
+
+window {
+    --bg: #1e1e2e;
+    --fg: #cdd6f4;
+    --accent: #cba6f7;
+    --urgent: #f9e2af;
+    --danger: #f38ba8;
+
+    --card-bg: #313244;
+}

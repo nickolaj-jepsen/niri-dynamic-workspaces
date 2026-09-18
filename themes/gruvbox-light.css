@@ -1,0 +1,11 @@
+/* Gruvbox light — https://github.com/morhetz/gruvbox */
+
+window {
+    --bg: #fbf1c7;
+    --fg: #3c3836;
+    --accent: #076678;
+    --urgent: #b57614;
+    --danger: #9d0006;
+
+    --card-bg: #ebdbb2;
+}

@@ -1,0 +1,11 @@
+/* Solarized light — https://ethanschoonover.com/solarized */
+
+window {
+    --bg: #fdf6e3;
+    --fg: #586e75;
+    --accent: #268bd2;
+    --urgent: #b58900;
+    --danger: #dc322f;
+
+    --card-bg: #eee8d5;
+}
