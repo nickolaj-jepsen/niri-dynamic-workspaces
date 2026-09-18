@@ -92,10 +92,7 @@ fn build_dyn_workspace_infos(
         .iter()
         .filter_map(|ws| {
             let ws_name = ws.name.as_ref()?;
-            let ch = ws_name.strip_prefix(prefix)?.chars().next()?;
-            if !crate::config::is_workspace_char(ch) {
-                return None;
-            }
+            let (ch, title) = crate::config::parse_dynamic_name(ws_name, prefix)?;
             // Statically mapped keys always show their pinned workspace.
             if config.static_workspaces.contains_key(&ch) {
                 return None;
@@ -110,7 +107,7 @@ fn build_dyn_workspace_infos(
                 .workspace_names
                 .get(&ch)
                 .cloned()
-                .or_else(|| crate::config::extract_workspace_title(ws_name, prefix));
+                .or_else(|| title.map(String::from));
             let is_urgent = ws.is_urgent || urgent_ws_ids.contains(&ws.id);
 
             Some(DynWorkspaceInfo {
@@ -191,7 +188,7 @@ pub(super) fn build_static_workspace_infos(
         .filter(|ws| {
             ws.name
                 .as_ref()
-                .is_none_or(|n| !n.starts_with(prefix.as_str()))
+                .is_none_or(|n| crate::config::parse_dynamic_name(n, prefix).is_none())
         })
         // Workspaces pinned to a key appear on the keyboard, not in this row.
         .filter(|ws| {
@@ -834,6 +831,19 @@ pub(super) mod tests {
         let infos = build_static_workspace_infos(&workspaces, &[], &config);
         assert_eq!(infos.len(), 1);
         assert_eq!(infos[0].name, "browser");
+    }
+
+    #[test]
+    fn lookalike_name_is_static_not_dynamic() {
+        let workspaces = vec![test_workspace(1, Some("dyn-alpha"), true)];
+        let config = default_test_config();
+
+        let static_infos = build_static_workspace_infos(&workspaces, &[], &config);
+        assert_eq!(static_infos.len(), 1);
+        assert_eq!(static_infos[0].name, "dyn-alpha");
+
+        let dyn_infos = build_dyn_workspace_infos(&workspaces, &[], &config);
+        assert!(dyn_infos.is_empty());
     }
 
     #[test]

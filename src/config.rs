@@ -762,22 +762,21 @@ pub fn workspace_name_with_title(prefix: &str, ch: char, title: Option<&str>) ->
     }
 }
 
-/// Extract the title suffix from a full workspace name.
+/// Parse a dynamic workspace name into its key and optional title.
 ///
-/// Given `"dyn-a My Project"` with prefix `"dyn-"`, returns `Some("My Project")`.
-/// Returns `None` if the name doesn't match the prefix or has no title.
-pub fn extract_workspace_title(ws_name: &str, prefix: &str) -> Option<String> {
+/// Accepts `{prefix}{key}` and `{prefix}{key} {title}`; anything else after
+/// the key (as in `dyn-alpha`) is not a dynamic workspace. An empty title
+/// yields `None`.
+pub fn parse_dynamic_name<'a>(ws_name: &'a str, prefix: &str) -> Option<(char, Option<&'a str>)> {
     let rest = ws_name.strip_prefix(prefix)?;
     let mut chars = rest.chars();
-    let ch = chars.next()?;
-    if !is_workspace_char(ch) {
-        return None;
-    }
-    let remaining = chars.as_str().strip_prefix(' ')?;
-    if remaining.is_empty() {
-        None
-    } else {
-        Some(remaining.to_string())
+    let ch = chars.next().filter(|&ch| is_workspace_char(ch))?;
+    match chars.as_str() {
+        "" => Some((ch, None)),
+        tail => {
+            let title = tail.strip_prefix(' ')?;
+            Some((ch, (!title.is_empty()).then_some(title)))
+        }
     }
 }
 
@@ -1643,6 +1642,27 @@ programs = ["firefox"]
         }
     }
 
+    // --- parse_dynamic_name ---
+
+    #[test]
+    fn parse_dynamic_name_accepts_bare_and_titled() {
+        assert_eq!(parse_dynamic_name("dyn-a", "dyn-"), Some(('a', None)));
+        assert_eq!(parse_dynamic_name("dyn-7", "dyn-"), Some(('7', None)));
+        assert_eq!(
+            parse_dynamic_name("dyn-a My Project", "dyn-"),
+            Some(('a', Some("My Project")))
+        );
+        assert_eq!(parse_dynamic_name("dyn-a ", "dyn-"), Some(('a', None)));
+    }
+
+    #[test]
+    fn parse_dynamic_name_rejects_lookalikes() {
+        assert_eq!(parse_dynamic_name("dyn-alpha", "dyn-"), None);
+        assert_eq!(parse_dynamic_name("dyn-A", "dyn-"), None);
+        assert_eq!(parse_dynamic_name("dyn-", "dyn-"), None);
+        assert_eq!(parse_dynamic_name("other-a", "dyn-"), None);
+    }
+
     // --- extract_variable_references ---
 
     #[test]
@@ -2382,32 +2402,6 @@ depth = 2
             workspace_name_with_title("dyn-", 'a', Some("My Project")),
             "dyn-a My Project"
         );
-    }
-
-    // --- extract_workspace_title ---
-
-    #[test]
-    fn extract_workspace_title_basic() {
-        assert_eq!(
-            extract_workspace_title("dyn-a My Project", "dyn-"),
-            Some("My Project".to_string())
-        );
-    }
-
-    #[test]
-    fn extract_workspace_title_no_title() {
-        assert_eq!(extract_workspace_title("dyn-a", "dyn-"), None);
-    }
-
-    #[test]
-    fn extract_workspace_title_wrong_prefix() {
-        assert_eq!(extract_workspace_title("other-a Title", "dyn-"), None);
-    }
-
-    #[test]
-    fn extract_workspace_title_no_space() {
-        // "dyn-abc" — 'a' is the char, "bc" has no leading space
-        assert_eq!(extract_workspace_title("dyn-abc", "dyn-"), None);
     }
 
     // --- resolve_workspace_title ---
