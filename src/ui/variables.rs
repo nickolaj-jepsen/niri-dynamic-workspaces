@@ -459,7 +459,7 @@ pub(super) fn show_variable_input(
     let container = GtkBox::builder()
         .orientation(Orientation::Vertical)
         .spacing(0)
-        .css_classes(["popup-container", "template-picker"])
+        .css_classes(["content", "variable-prompt"])
         .halign(Align::Center)
         .valign(Align::Center)
         .build();

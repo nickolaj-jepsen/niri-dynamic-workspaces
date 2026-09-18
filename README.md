@@ -73,7 +73,7 @@ close = ["Escape", "Ctrl+c", "Ctrl+w", "Ctrl+q"]  # keys to dismiss the overlay
 [workspace.a]                          # key: a-z or 0-9
 name = "Browser"                       # optional display name shown on the key
 programs = ["firefox", "slack"]        # programs launched on create (replaces defaults)
-# Configured workspaces that don't exist yet appear as muted keys with a dashed border.
+# Configured workspaces that don't exist yet appear as muted keys.
 
 [workspace.b]
 programs = ["kitty --title myterm"]    # arguments split with shell quoting rules

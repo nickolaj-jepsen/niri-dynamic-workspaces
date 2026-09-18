@@ -240,6 +240,48 @@ pub(super) fn build_full_keyboard_info(
     map
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "bools represent independent workspace states"
+)]
+struct CardState {
+    is_static: bool,
+    is_focused: bool,
+    is_active: bool,
+    is_urgent: bool,
+    is_uncreated: bool,
+    is_empty: bool,
+    is_disabled: bool,
+}
+
+/// CSS classes for a workspace card; documented in README "Theming", so renaming one is breaking.
+fn card_classes(state: &CardState) -> Vec<&'static str> {
+    let mut classes = vec![
+        "workspace-card",
+        if state.is_static { "static" } else { "dynamic" },
+    ];
+    if state.is_focused {
+        classes.push("focused");
+    }
+    if state.is_focused || state.is_active {
+        classes.push("active");
+    }
+    if state.is_urgent {
+        classes.push("urgent");
+    }
+    if state.is_uncreated {
+        classes.push("uncreated");
+    } else if state.is_empty {
+        classes.push("empty");
+    } else {
+        classes.push("occupied");
+    }
+    if state.is_disabled {
+        classes.push("disabled");
+    }
+    classes
+}
+
 /// Create the outer card box (with CSS classes and fixed size) and an inner centering box.
 fn build_card_shell(classes: Vec<&str>, key_size: i32) -> (GtkBox, GtkBox) {
     let card = GtkBox::builder()
@@ -287,18 +329,6 @@ fn build_key_widget(
     ctx: &ActionContext,
     metrics: &KeyboardMetrics,
 ) -> GtkBox {
-    let mut classes = vec!["keyboard-key"];
-
-    if info.is_static {
-        classes.push("static-workspace");
-    }
-    if info.is_focused || info.is_active {
-        classes.push("active");
-    }
-    if info.is_urgent {
-        classes.push("urgent");
-    }
-
     let is_disabled = match mode {
         Mode::MoveWindow => info.is_uncreated || info.is_focused,
         Mode::Delete => info.is_uncreated || info.is_static,
@@ -306,22 +336,28 @@ fn build_key_widget(
         // key still switches to them.
         Mode::Normal => info.is_uncreated || (info.is_static && info.is_empty),
     };
-    if is_disabled {
-        classes.push("disabled");
-    }
+    let classes = card_classes(&CardState {
+        is_static: info.is_static,
+        is_focused: info.is_focused,
+        is_active: info.is_active,
+        is_urgent: info.is_urgent,
+        is_uncreated: info.is_uncreated,
+        is_empty: info.is_empty,
+        is_disabled,
+    });
 
     let (key_box, inner) = build_card_shell(classes, metrics.key_size);
 
     let char_label = Label::builder()
         .label(display_key_char(info.char_id))
-        .css_classes(["key-char"])
+        .css_classes(["card-title"])
         .build();
     inner.append(&char_label);
 
     if let Some(ref name) = info.name {
         let name_label = Label::builder()
             .label(name)
-            .css_classes(["key-name"])
+            .css_classes(["card-name"])
             .ellipsize(gtk4::pango::EllipsizeMode::End)
             .max_width_chars(8)
             .build();
@@ -393,29 +429,26 @@ fn build_static_card(
     ctx: &ActionContext,
     metrics: &KeyboardMetrics,
 ) -> GtkBox {
-    let mut classes = vec!["keyboard-key", "static-workspace"];
-
-    if info.is_focused || info.is_active {
-        classes.push("active");
-    }
-    if info.is_urgent {
-        classes.push("urgent");
-    }
-
     let is_disabled = match mode {
         Mode::Delete => true,
         Mode::MoveWindow => info.is_empty || info.is_focused,
         Mode::Normal => info.is_empty,
     };
-    if is_disabled {
-        classes.push("disabled");
-    }
+    let classes = card_classes(&CardState {
+        is_static: true,
+        is_focused: info.is_focused,
+        is_active: info.is_active,
+        is_urgent: info.is_urgent,
+        is_uncreated: false,
+        is_empty: info.is_empty,
+        is_disabled,
+    });
 
     let (card, inner) = build_card_shell(classes, metrics.key_size);
 
     let name_label = Label::builder()
         .label(&info.name)
-        .css_classes(["key-char"])
+        .css_classes(["card-title"])
         .ellipsize(gtk4::pango::EllipsizeMode::End)
         .max_width_chars(6)
         .build();
@@ -992,5 +1025,65 @@ pub(super) mod tests {
 
         let infos = build_static_workspace_infos(&workspaces, &[], &config);
         assert!(infos.is_empty());
+    }
+
+    fn card_state() -> CardState {
+        CardState {
+            is_static: false,
+            is_focused: false,
+            is_active: false,
+            is_urgent: false,
+            is_uncreated: false,
+            is_empty: false,
+            is_disabled: false,
+        }
+    }
+
+    #[test]
+    fn card_classes_occupied_dynamic() {
+        assert_eq!(
+            card_classes(&card_state()),
+            ["workspace-card", "dynamic", "occupied"]
+        );
+    }
+
+    #[test]
+    fn card_classes_focused_implies_active() {
+        let state = CardState {
+            is_focused: true,
+            ..card_state()
+        };
+        assert_eq!(
+            card_classes(&state),
+            ["workspace-card", "dynamic", "focused", "active", "occupied"]
+        );
+    }
+
+    #[test]
+    fn card_classes_uncreated_is_not_empty() {
+        let state = CardState {
+            is_uncreated: true,
+            is_empty: true,
+            is_disabled: true,
+            ..card_state()
+        };
+        assert_eq!(
+            card_classes(&state),
+            ["workspace-card", "dynamic", "uncreated", "disabled"]
+        );
+    }
+
+    #[test]
+    fn card_classes_static_empty_urgent() {
+        let state = CardState {
+            is_static: true,
+            is_urgent: true,
+            is_empty: true,
+            ..card_state()
+        };
+        assert_eq!(
+            card_classes(&state),
+            ["workspace-card", "static", "urgent", "empty"]
+        );
     }
 }
