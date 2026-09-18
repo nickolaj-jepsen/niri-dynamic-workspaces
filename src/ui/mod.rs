@@ -155,7 +155,7 @@ struct OverlaySession {
     monitor_width: Cell<i32>,
     /// Original workspace name when overlay opened (for hover-preview restore).
     original_workspace: RefCell<Option<String>>,
-    /// Set to true when the user makes a selection (skip restore on close).
+    /// Set once an action succeeded (skip the hover-preview restore on close).
     selection_made: Cell<bool>,
     /// Armed after the first real mouse movement; prevents hover-preview from
     /// triggering when the cursor is already over a card at overlay open.
@@ -558,11 +558,16 @@ fn switch_and_close(
         show_error(ctx, &format!("Failed: {e:#}"));
         return;
     }
+    finish(ctx);
+}
+
+/// Close the overlay after a successful action, keeping the new focus.
+fn finish(ctx: &ActionContext) {
+    ctx.session.selection_made.set(true);
     ctx.window.close();
 }
 
 fn dispatch_action(ch: char, ctx: &ActionContext) {
-    ctx.session.selection_made.set(true);
     let config = &ctx.session.config;
 
     // Statically mapped key: act on the pinned workspace directly.
@@ -582,7 +587,7 @@ fn dispatch_action(ch: char, ctx: &ActionContext) {
             show_error(ctx, &format!("Failed: {e:#}"));
             return;
         }
-        ctx.window.close();
+        finish(ctx);
         return;
     }
 
@@ -610,7 +615,7 @@ fn dispatch_action(ch: char, ctx: &ActionContext) {
         show_error(ctx, &format!("Failed: {e:#}"));
         return;
     }
-    ctx.window.close();
+    finish(ctx);
 }
 
 fn attach_key_handler(ctx: &ActionContext, close_keybinds: &[crate::config::Keybind]) {

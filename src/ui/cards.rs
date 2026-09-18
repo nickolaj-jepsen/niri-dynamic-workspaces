@@ -8,7 +8,9 @@ use crate::config::ResolvedConfig;
 use crate::niri;
 
 use super::metrics::KeyboardMetrics;
-use super::{dispatch_action, display_key_char, show_error, ActionContext, Mode, OverlaySession};
+use super::{
+    dispatch_action, display_key_char, finish, show_error, ActionContext, Mode, OverlaySession,
+};
 
 #[expect(
     clippy::struct_excessive_bools,
@@ -427,7 +429,6 @@ fn build_static_card(
         let click_ctx = ctx.clone();
         let click = GestureClick::new();
         click.connect_released(move |_, _, _, _| {
-            click_ctx.session.selection_made.set(true);
             let result = match click_ctx.mode {
                 Mode::Normal => niri::focus_workspace_by_name(&name),
                 Mode::MoveWindow => niri::move_window_to_workspace_by_name(&name),
@@ -437,7 +438,7 @@ fn build_static_card(
                 show_error(&click_ctx, &format!("Failed: {e:#}"));
                 return;
             }
-            click_ctx.window.close();
+            finish(&click_ctx);
         });
         card.add_controller(click);
 
