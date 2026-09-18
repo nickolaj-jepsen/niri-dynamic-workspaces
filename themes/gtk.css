@@ -1,0 +1,9 @@
+/* Takes the derived colours from the GTK theme too, instead of computing them from the primaries. */
+
+window {
+    --card-bg: @card_bg_color;
+    --card-fg: @card_fg_color;
+    --accent-fg: @accent_fg_color;
+    --accent-text: @accent_color;
+    --urgent-fg: @warning_fg_color;
+}
