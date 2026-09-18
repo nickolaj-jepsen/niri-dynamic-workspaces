@@ -210,7 +210,9 @@ All layouts contain the same 36 keys (a–z, 0–9) arranged in the physical pos
 
 ### Theming
 
-![gtk, dark, light and a custom theme file](docs/themes.png)
+![the built-in dark theme](docs/themes/dark.png)
+
+Every theme is rendered in the [theme gallery](docs/themes.md).
 
 `general.theme` picks the palette:
 

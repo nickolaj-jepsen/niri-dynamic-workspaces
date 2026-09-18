@@ -45,6 +45,12 @@ A session by hand:
 ./e2e/harness.sh stop
 ```
 
+## Theme gallery
+
+`./e2e/render-themes.sh` renders each built-in theme, and any
+`contrib/themes/*.css`, into `docs/themes/<name>.png` and regenerates
+`docs/themes.md`. Run it after changing `style.css`, `themes/` or card layout.
+
 ## Isolation
 
 Each session gets its own `XDG_CONFIG_HOME` holding `e2e/fixtures/config.toml`,
@@ -54,7 +60,7 @@ application id and answer the invocation instead.
 
 `GTK_THEME` is pinned to `Default:dark` so screenshots never show the host
 theme; set `NDW_E2E_GTK_THEME` before `start` to look at another one (empty
-leaves it unset).
+leaves it unset). `NDW_E2E_CONFIG` swaps in another `config.toml`.
 
 ## Keyboard input does not work yet
 

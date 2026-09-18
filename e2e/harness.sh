@@ -77,7 +77,7 @@ overlay_closed() { ! overlay_open; }
 start() {
     stop
     mkdir -p "$run_dir/config/niri-dynamic-workspaces" "$out_dir"
-    cp "$here/fixtures/config.toml" "$run_dir/config/niri-dynamic-workspaces/config.toml"
+    cp "${NDW_E2E_CONFIG:-$here/fixtures/config.toml}" "$run_dir/config/niri-dynamic-workspaces/config.toml"
     [[ -x $bin ]] || die "no binary at $bin (cargo build, or set NDW_BIN)"
     for tool in cage niri grim wtype wlrctl jq dbus-daemon; do
         command -v "$tool" >/dev/null || die "missing $tool (run inside 'nix develop')"

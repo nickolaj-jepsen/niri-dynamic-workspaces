@@ -34,7 +34,7 @@ Five top-level source files, plus the `ui/` module directory:
 - **niri.rs** — Niri IPC layer over the `NiriClient` transport trait (real `SocketClient` per request; scripted mock in tests). Key functions: `list_workspaces`, `list_windows`, `focus_or_create_workspace`, `delete_workspace`, `move_window_to_workspace`, `run_event_cleanup` (daemon event stream), `reorder_workspace_columns`, `run_hooks`.
 - **ui/** — Builds the full-screen layer-shell overlay with `gtk4-layer-shell`. `mod.rs` (overlay construction, modes, key handling), `metrics.rs` (sizing + scaled CSS), `theme.rs` (stylesheet + theme providers), `cards.rs` (workspace info + card widgets), `picker.rs` (template picker), `variables.rs` (variable form + fuzzy select).
 - **test_helpers.rs** — constructors for `niri_ipc::Workspace`/`Window` test fixtures.
-- **e2e/** — end-to-end harness: `harness.sh` boots a nested headless niri (cage) and drives the overlay with pointer clicks and screenshots, `test.sh` is the suite. See `e2e/README.md`.
+- **e2e/** — end-to-end harness: `harness.sh` boots a nested headless niri (cage) and drives the overlay with pointer clicks and screenshots, `test.sh` is the suite, `render-themes.sh` regenerates the theme gallery (`docs/themes.md` + `docs/themes/*.png`) — rerun it when `style.css` or `themes/` change. See `e2e/README.md`.
 
 Data flow: `main` → `config::load_config()` → `ui::build_ui(app, config, mode)` → `niri::*` IPC calls on user interaction.
 
