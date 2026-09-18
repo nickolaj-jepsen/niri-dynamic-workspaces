@@ -1,9 +1,22 @@
+/* Colours and sizes are custom properties on `window`: themes/ set the primaries (--bg, --fg,
+   --accent, --urgent, --danger), the rest derive below; sizes come from ui/metrics.rs. */
+
 window {
     background-color: transparent;
+    color: var(--fg);
+
+    --backdrop-bg: color-mix(in srgb, var(--bg) 85%, transparent);
+    --card-bg: color-mix(in srgb, var(--bg) 94%, var(--fg));
+    --card-fg: var(--fg);
+    --card-border: color-mix(in srgb, var(--card-fg) 15%, transparent);
+    --card-border-hover: color-mix(in srgb, var(--card-fg) 30%, transparent);
+    --accent-fg: var(--bg);
+    --accent-text: var(--accent);
+    --urgent-fg: var(--bg);
 }
 
 .backdrop {
-    background-color: alpha(@window_bg_color, 0.85);
+    background-color: var(--backdrop-bg);
 }
 
 .popup-container {
@@ -23,28 +36,28 @@ window {
 }
 
 .keyboard-key {
-    background-color: @card_bg_color;
-    color: @card_fg_color;
-    border: 1px solid alpha(@card_fg_color, 0.15);
+    background-color: var(--card-bg);
+    color: var(--card-fg);
+    border: 1px solid var(--card-border);
     border-radius: var(--key-radius);
     padding: var(--key-pad-v) var(--key-pad-h);
     transition: 200ms ease;
 }
 
 .keyboard-key:hover {
-    border-color: alpha(@card_fg_color, 0.3);
+    border-color: var(--card-border-hover);
 }
 
 .keyboard-key.active {
-    background-color: @accent_bg_color;
-    color: @accent_fg_color;
-    border: 2px solid @accent_color;
+    background-color: var(--accent);
+    color: var(--accent-fg);
+    border: 2px solid var(--accent-text);
 }
 
 .keyboard-key.urgent {
-    background-color: @warning_bg_color;
-    color: @warning_fg_color;
-    border: 2px solid @warning_color;
+    background-color: var(--urgent);
+    color: var(--urgent-fg);
+    border: 2px solid var(--urgent);
 }
 
 .keyboard-key.disabled {
@@ -75,8 +88,8 @@ window {
 /* --- Mode tabs (bottom bar) --- */
 
 .mode-tabs {
-    background-color: @card_bg_color;
-    border: 1px solid alpha(@card_fg_color, 0.15);
+    background-color: var(--card-bg);
+    border: 1px solid var(--card-border);
     margin-top: var(--section-gap);
     border-radius: var(--tab-radius);
     padding: var(--key-pad-v);
@@ -87,18 +100,18 @@ window {
     font-size: var(--font-tab);
     padding: var(--key-pad-v) var(--tab-pad-h);
     border-radius: var(--tab-radius);
-    color: alpha(@card_fg_color, 0.5);
+    color: color-mix(in srgb, var(--card-fg) 50%, transparent);
 }
 
 .mode-tab.active.switch,
 .mode-tab.active.move-window {
-    background-color: alpha(@accent_color, 0.15);
-    color: @accent_color;
+    background-color: color-mix(in srgb, var(--accent-text) 15%, transparent);
+    color: var(--accent-text);
 }
 
 .mode-tab.active.delete {
-    background-color: alpha(@error_color, 0.15);
-    color: @error_color;
+    background-color: color-mix(in srgb, var(--danger) 15%, transparent);
+    color: var(--danger);
 }
 
 /* --- Hints & errors --- */
@@ -109,14 +122,14 @@ window {
 
 .hint-footer-item {
     font-size: var(--font-footer);
-    color: @card_fg_color;
+    color: var(--card-fg);
     opacity: 0.5;
 }
 
 .error-message {
     font-size: var(--font-footer);
     margin-top: var(--key-margin);
-    color: @error_color;
+    color: var(--danger);
 }
 
 /* --- Template picker --- */
@@ -136,27 +149,27 @@ window {
 }
 
 .template-option {
-    background-color: @card_bg_color;
-    color: @card_fg_color;
-    border: 2px solid alpha(@card_fg_color, 0.15);
+    background-color: var(--card-bg);
+    color: var(--card-fg);
+    border: 2px solid var(--card-border);
     border-radius: var(--key-radius);
     padding: var(--key-pad-v) var(--key-pad-h);
-    min-width: 250px;
+    min-width: var(--option-min-width);
     transition: 200ms ease;
 }
 
 .template-option:hover {
-    border-color: alpha(@card_fg_color, 0.3);
+    border-color: var(--card-border-hover);
 }
 
 .template-option.selected {
-    background-color: @accent_bg_color;
-    color: @accent_fg_color;
-    border-color: @accent_color;
+    background-color: var(--accent);
+    color: var(--accent-fg);
+    border-color: var(--accent-text);
 }
 
 .template-key {
-    background-color: alpha(@card_fg_color, 0.1);
+    background-color: color-mix(in srgb, var(--card-fg) 10%, transparent);
     border-radius: var(--key-radius);
     font-weight: bold;
     font-size: var(--font-char);
@@ -165,7 +178,7 @@ window {
 }
 
 .template-option.selected .template-key {
-    background-color: alpha(@accent_fg_color, 0.15);
+    background-color: color-mix(in srgb, var(--accent-fg) 15%, transparent);
 }
 
 .template-name {
@@ -193,9 +206,9 @@ window {
 }
 
 .variable-row {
-    background-color: @card_bg_color;
-    color: @card_fg_color;
-    border: 1px solid alpha(@card_fg_color, 0.15);
+    background-color: var(--card-bg);
+    color: var(--card-fg);
+    border: 1px solid var(--card-border);
     border-radius: var(--key-radius);
     padding: var(--key-pad-v) var(--key-pad-h);
 }
@@ -225,8 +238,8 @@ window {
 }
 
 .fuzzy-option.selected {
-    background-color: alpha(@accent_color, 0.15);
-    color: @accent_color;
+    background-color: color-mix(in srgb, var(--accent-text) 15%, transparent);
+    color: var(--accent-text);
 }
 
 .fuzzy-more {

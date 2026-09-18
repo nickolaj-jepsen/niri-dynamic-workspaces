@@ -10,9 +10,9 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use clap::{Parser, Subcommand};
+use gtk4::gdk;
 use gtk4::gio::{ApplicationFlags, ApplicationHoldGuard};
 use gtk4::prelude::*;
-use gtk4::{gdk, CssProvider};
 
 /// D-Bus name owned by the running instance.
 const APP_ID: &str = "dev.nickolaj.niri-dynamic-workspaces";
@@ -149,13 +149,7 @@ fn main() {
         .build();
 
     app.connect_startup(|_| {
-        let provider = CssProvider::new();
-        provider.load_from_data(include_str!("../style.css"));
-        gtk4::style_context_add_provider_for_display(
-            &gdk::Display::default().expect("Could not get default display"),
-            &provider,
-            gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
-        );
+        ui::install_base_styles(&gdk::Display::default().expect("Could not get default display"));
     });
 
     let hold_guard: RefCell<Option<ApplicationHoldGuard>> = RefCell::default();

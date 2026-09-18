@@ -51,6 +51,7 @@ impl KeyboardMetrics {
              \x20 --tab-pad-h: {tph}px;\n\
              \x20 --tab-radius: {tr}px;\n\
              \x20 --font-footer: {ff}px;\n\
+             \x20 --option-min-width: {omw}px;\n\
              }}",
             km = ks / 8,
             kr = ks / 8,
@@ -64,6 +65,7 @@ impl KeyboardMetrics {
             tph = ks / 6,
             tr = ks / 12,
             ff = ks * 15 / 100,
+            omw = ks * 19 / 10,
         )
     }
 }
@@ -107,7 +109,7 @@ pub(super) fn apply_scaled_css(css: &str) {
         gtk4::style_context_add_provider_for_display(
             &display,
             &provider,
-            gtk4::STYLE_PROVIDER_PRIORITY_USER,
+            gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
         );
         *opt = Some(provider);
     });

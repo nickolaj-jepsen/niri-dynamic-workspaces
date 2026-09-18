@@ -1,6 +1,7 @@
 mod cards;
 mod metrics;
 mod picker;
+mod theme;
 mod variables;
 
 use std::cell::{Cell, RefCell};
@@ -27,6 +28,7 @@ use cards::{
 };
 use metrics::{apply_scaled_css, find_monitor_for_output, get_monitor_width, KeyboardMetrics};
 use picker::show_template_picker;
+pub use theme::install_base as install_base_styles;
 
 /// Modifier mask for matching keybinds (includes Super to detect compositor keybind hold).
 const RELEVANT_MODS: gdk4::ModifierType = gdk4::ModifierType::from_bits_retain(

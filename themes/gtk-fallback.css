@@ -1,0 +1,13 @@
+/* Loaded below the GTK theme: themes that lack the libadwaita colour names
+   (GTK's own Default theme among them) get them derived from the core names. */
+
+@define-color window_bg_color @theme_bg_color;
+@define-color window_fg_color @theme_fg_color;
+@define-color card_bg_color mix(@theme_bg_color, @theme_fg_color, 0.06);
+@define-color card_fg_color @theme_fg_color;
+@define-color accent_bg_color @theme_selected_bg_color;
+@define-color accent_fg_color @theme_selected_fg_color;
+/* Used as text on the background: pull it towards the foreground for contrast. */
+@define-color accent_color mix(@theme_selected_bg_color, @theme_fg_color, 0.4);
+@define-color warning_bg_color @warning_color;
+@define-color warning_fg_color rgba(0, 0, 0, 0.8);

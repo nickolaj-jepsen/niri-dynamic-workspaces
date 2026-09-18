@@ -18,6 +18,7 @@ in
             relPath = lib.removePrefix (toString self + "/") (toString path);
           in
           lib.hasPrefix "src" relPath
+          || lib.hasPrefix "themes" relPath
           || name == "Cargo.toml"
           || name == "Cargo.lock"
           || name == "style.css";

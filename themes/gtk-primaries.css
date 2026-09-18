@@ -1,0 +1,11 @@
+/* Loaded beneath every theme, so one that sets only some primaries inherits the rest from GTK.
+   Named colours are deprecated but are the only way GTK themes and gtk.css publish a palette;
+   keep them inside themes/gtk*.css. */
+
+window {
+    --bg: @window_bg_color;
+    --fg: @window_fg_color;
+    --accent: @accent_bg_color;
+    --urgent: @warning_bg_color;
+    --danger: @error_color;
+}
