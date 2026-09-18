@@ -331,6 +331,18 @@ fn inhibit_compositor_shortcuts(window: &ApplicationWindow) {
             toplevel.inhibit_system_shortcuts(gdk4::Event::NONE);
         }
     });
+    // GTK never destroys the inhibitor itself, and niri keeps the dead surface (and its
+    // fullscreen buffer) alive for as long as the inhibitor exists. Must run before the
+    // window hides: restore_system_shortcuts() is a no-op once the toplevel is torn down.
+    window.connect_close_request(|window| {
+        if let Some(toplevel) = window
+            .surface()
+            .and_then(|s| s.downcast::<gdk4::Toplevel>().ok())
+        {
+            toplevel.restore_system_shortcuts();
+        }
+        Propagation::Proceed
+    });
 }
 
 /// Remove controllers we previously attached (identified by "ndw-" name prefix).
