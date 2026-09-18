@@ -179,46 +179,40 @@ pub fn switch_workspace(
     prefix: &str,
     ch: char,
     full_name: &str,
-    programs: &[String],
+    commands: &[Vec<String>],
 ) -> anyhow::Result<(bool, Option<ReorderRequest>)> {
     let created = focus_or_create_workspace(prefix, ch, full_name)?;
     if created {
-        return Ok((true, spawn_workspace_programs(full_name, programs)?));
+        return Ok((true, spawn_workspace_programs(full_name, commands)?));
     }
     Ok((false, None))
 }
 
-/// Spawn programs for a newly created workspace.
+/// Spawn programs (as argument vectors) for a newly created workspace via niri IPC.
 ///
-/// Splits each command string with shell quoting rules (no shell is invoked)
-/// and spawns via niri IPC.
 /// If two or more programs are launched, returns a [`ReorderRequest`] that the
 /// caller should pass to [`reorder_workspace_columns`] (either synchronously
 /// or in a background thread).
 pub fn spawn_workspace_programs(
     workspace_name: &str,
-    programs: &[String],
+    commands: &[Vec<String>],
 ) -> anyhow::Result<Option<ReorderRequest>> {
-    let needs_reorder = programs.len() >= 2;
+    let commands: Vec<Vec<String>> = commands.iter().filter(|c| !c.is_empty()).cloned().collect();
+    let needs_reorder = commands.len() >= 2;
     let existing_ids = if needs_reorder {
         snapshot_workspace_window_ids(workspace_name)
     } else {
         HashSet::new()
     };
 
-    for cmd_str in programs {
-        let parts = shell_words::split(cmd_str)
-            .with_context(|| format!("failed to parse command '{cmd_str}'"))?;
-        if parts.is_empty() {
-            continue;
-        }
-        spawn_program(&parts).with_context(|| format!("failed to spawn '{cmd_str}'"))?;
+    for command in &commands {
+        spawn_program(command).with_context(|| format!("failed to spawn '{}'", command[0]))?;
     }
 
     if needs_reorder {
         Ok(Some(ReorderRequest {
             workspace_name: workspace_name.to_string(),
-            commands: programs.to_vec(),
+            commands,
             existing_window_ids: existing_ids,
         }))
     } else {
@@ -235,30 +229,14 @@ pub fn spawn_program(command: &[String]) -> anyhow::Result<()> {
 #[derive(Debug)]
 pub struct ReorderRequest {
     pub workspace_name: String,
-    pub commands: Vec<String>,
+    /// Non-empty argument vectors, in the desired column order.
+    pub commands: Vec<Vec<String>>,
     pub existing_window_ids: HashSet<u64>,
 }
 
-/// Extract the executable name from a command string.
-///
-/// Takes the first shell-word (falling back to whitespace splitting when the
-/// command doesn't parse) and strips any leading path.
-fn executable_name(command: &str) -> String {
-    let first_token = shell_words::split(command)
-        .ok()
-        .and_then(|words| words.into_iter().next())
-        .unwrap_or_else(|| {
-            command
-                .split_whitespace()
-                .next()
-                .unwrap_or(command)
-                .to_string()
-        });
-    first_token
-        .rsplit('/')
-        .next()
-        .unwrap_or(&first_token)
-        .to_string()
+/// The executable name of a command: its first argument without any leading path.
+fn executable_name(program: &str) -> &str {
+    program.rsplit('/').next().unwrap_or(program)
 }
 
 /// Check whether a window's `app_id` matches an executable name.
@@ -355,10 +333,10 @@ fn reorder_workspace_columns_inner(request: &ReorderRequest) -> anyhow::Result<(
     }
 
     // Match each command to a new window by executable name / app_id
-    let exe_names: Vec<String> = request
+    let exe_names: Vec<&str> = request
         .commands
         .iter()
-        .map(|c| executable_name(c))
+        .map(|c| executable_name(&c[0]))
         .collect();
 
     let mut used_window_ids: HashSet<u64> = HashSet::new();
@@ -1068,31 +1046,10 @@ mod tests {
     }
 
     #[test]
-    fn executable_name_variants() {
+    fn executable_name_strips_leading_path() {
         assert_eq!(executable_name("firefox"), "firefox");
-        assert_eq!(executable_name("firefox --private-window"), "firefox");
         assert_eq!(executable_name("/usr/bin/firefox"), "firefox");
-        assert_eq!(
-            executable_name("/usr/bin/firefox --private-window"),
-            "firefox"
-        );
-    }
-
-    #[test]
-    fn executable_name_quoted_paths() {
-        assert_eq!(
-            executable_name("'/opt/my apps/firefox' --private-window"),
-            "firefox"
-        );
-        assert_eq!(executable_name("code '/home/me/my project'"), "code");
-        // Unparseable input falls back to whitespace splitting
-        assert_eq!(executable_name("foo 'unclosed"), "foo");
-    }
-
-    #[test]
-    fn spawn_workspace_programs_rejects_malformed_quoting() {
-        let err = spawn_workspace_programs("dyn-a", &["code 'unclosed".to_string()]).unwrap_err();
-        assert!(err.to_string().contains("failed to parse"));
+        assert_eq!(executable_name("/opt/my apps/firefox"), "firefox");
     }
 
     #[test]
