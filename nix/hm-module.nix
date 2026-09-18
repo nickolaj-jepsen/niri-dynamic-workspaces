@@ -60,6 +60,26 @@
             }
           '';
         };
+
+        themeCss = lib.mkOption {
+          type = lib.types.nullOr lib.types.lines;
+          default = null;
+          description = ''
+            CSS written to
+            {file}`$XDG_CONFIG_HOME/niri-dynamic-workspaces/theme.css` and
+            selected as `settings.general.theme`. See Theming in README.md
+            for the variables and classes.
+          '';
+          example = ''
+            window {
+              --bg: #1e1e2e;
+              --fg: #cdd6f4;
+              --accent: #89b4fa;
+              --urgent: #f9e2af;
+              --danger: #f38ba8;
+            }
+          '';
+        };
       };
 
       config = lib.mkIf cfg.enable {
@@ -96,6 +116,12 @@
             hotkey-overlay.title = "Move Window to Workspace";
           };
         };
+
+        programs.niri-dynamic-workspaces.settings.general.theme =
+          lib.mkIf (cfg.themeCss != null) (lib.mkDefault "theme.css");
+
+        xdg.configFile."niri-dynamic-workspaces/theme.css" =
+          lib.mkIf (cfg.themeCss != null) { text = cfg.themeCss; };
 
         xdg.configFile."niri-dynamic-workspaces/config.toml" =
           lib.mkIf (cfg.settings != { }) {
