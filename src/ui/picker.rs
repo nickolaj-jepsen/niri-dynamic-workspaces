@@ -21,7 +21,10 @@ use super::{
 /// An option in the template picker (either "Empty" or a named template).
 pub(super) struct TemplateOption {
     pub(super) key: Option<char>,
+    /// Display name.
     pub(super) name: String,
+    /// Config template this option came from; `None` for the built-in "Empty".
+    pub(super) template_name: Option<String>,
     pub(super) programs: Vec<String>,
     pub(super) variables: Vec<TemplateVariable>,
     pub(super) title: Option<String>,
@@ -34,6 +37,7 @@ fn build_template_options(config: &ResolvedConfig) -> Vec<TemplateOption> {
     options.push(TemplateOption {
         key: Some('1'),
         name: "Empty".to_string(),
+        template_name: None,
         programs: config.default_programs.clone(),
         variables: Vec::new(),
         title: None,
@@ -43,6 +47,7 @@ fn build_template_options(config: &ResolvedConfig) -> Vec<TemplateOption> {
         options.push(TemplateOption {
             key: tmpl.key,
             name: tmpl.name.clone(),
+            template_name: Some(tmpl.name.clone()),
             programs: tmpl.programs.clone(),
             variables: tmpl.variables.clone(),
             title: tmpl.title.clone(),
@@ -118,11 +123,7 @@ fn update_selection(option_widgets: &[GtkBox], selected: usize) {
 }
 
 fn select_template_option(option: &TemplateOption, ch: char, ctx: &ActionContext) {
-    let template_name = if option.name == "Empty" {
-        None
-    } else {
-        Some(option.name.clone())
-    };
+    let template_name = option.template_name.clone();
     if option.variables.is_empty() {
         let hook_info = HookInfo {
             template_name,
@@ -354,6 +355,26 @@ mod tests {
         assert_eq!(opts[1].key, Some('d'));
         assert_eq!(opts[2].name, "browser");
         assert_eq!(opts[2].key, Some('2'));
+    }
+
+    #[test]
+    fn user_template_named_empty_keeps_its_identity() {
+        use crate::config::Template;
+
+        let mut config = default_test_config();
+        config.templates = vec![Template {
+            name: "Empty".to_string(),
+            programs: vec!["code".to_string()],
+            key: Some('2'),
+            variables: Vec::new(),
+            on_create: vec!["notify-send hi".to_string()],
+            title: None,
+        }];
+
+        let opts = build_template_options(&config);
+
+        assert_eq!(opts[0].template_name, None);
+        assert_eq!(opts[1].template_name.as_deref(), Some("Empty"));
     }
 
     #[test]
