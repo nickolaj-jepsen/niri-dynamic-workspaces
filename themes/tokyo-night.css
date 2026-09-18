@@ -1,0 +1,11 @@
+/* Tokyo Night — https://github.com/folke/tokyonight.nvim */
+
+window {
+    --bg: #1a1b26;
+    --fg: #c0caf5;
+    --accent: #7aa2f7;
+    --urgent: #e0af68;
+    --danger: #f7768e;
+
+    --card-bg: #292e42;
+}

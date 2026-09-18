@@ -1,0 +1,12 @@
+/* Catppuccin Latte — https://catppuccin.com/palette */
+
+window {
+    --bg: #eff1f5;
+    --fg: #4c4f69;
+    --accent: #8839ef;
+    --urgent: #df8e1d;
+    --danger: #d20f39;
+
+    --card-bg: #e6e9ef;
+    --urgent-fg: #4c4f69;
+}

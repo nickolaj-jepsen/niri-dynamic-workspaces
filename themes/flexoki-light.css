@@ -1,0 +1,11 @@
+/* Flexoki light — https://stephango.com/flexoki */
+
+window {
+    --bg: #fffcf0;
+    --fg: #100f0f;
+    --accent: #24837b;
+    --urgent: #bc5215;
+    --danger: #af3029;
+
+    --card-bg: #f2f0e5;
+}

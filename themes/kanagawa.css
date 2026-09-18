@@ -1,0 +1,11 @@
+/* Kanagawa Wave — https://github.com/rebelot/kanagawa.nvim */
+
+window {
+    --bg: #1f1f28;
+    --fg: #dcd7ba;
+    --accent: #7e9cd8;
+    --urgent: #ff9e3b;
+    --danger: #e82424;
+
+    --card-bg: #2a2a37;
+}

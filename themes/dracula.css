@@ -1,0 +1,11 @@
+/* Dracula — https://draculatheme.com */
+
+window {
+    --bg: #282a36;
+    --fg: #f8f8f2;
+    --accent: #bd93f9;
+    --urgent: #ffb86c;
+    --danger: #ff5555;
+
+    --card-bg: #343746;
+}

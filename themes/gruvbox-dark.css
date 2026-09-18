@@ -1,0 +1,11 @@
+/* Gruvbox dark — https://github.com/morhetz/gruvbox */
+
+window {
+    --bg: #282828;
+    --fg: #ebdbb2;
+    --accent: #83a598;
+    --urgent: #fabd2f;
+    --danger: #fb4934;
+
+    --card-bg: #3c3836;
+}

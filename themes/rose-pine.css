@@ -1,0 +1,11 @@
+/* Rosé Pine — https://rosepinetheme.com */
+
+window {
+    --bg: #191724;
+    --fg: #e0def4;
+    --accent: #c4a7e7;
+    --urgent: #f6c177;
+    --danger: #eb6f92;
+
+    --card-bg: #26233a;
+}
