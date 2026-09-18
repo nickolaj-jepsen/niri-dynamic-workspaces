@@ -47,9 +47,12 @@ A session by hand:
 
 ## Theme gallery
 
-`./e2e/render-themes.sh` renders each built-in theme, and any
-`contrib/themes/*.css`, into `docs/themes/<name>.png` and regenerates
-`docs/themes.md`. Run it after changing `style.css`, `themes/` or card layout.
+`./e2e/render-themes.sh` renders every `themes/<name>.css` as
+`theme = "<name>"` into `docs/themes/<name>.png` and regenerates
+`docs/themes.md`. `gtk` is shown under both GTK variants and `gtk-*.css` are
+support files. It fails if a theme does not load cleanly, which is what happens
+to a file in `themes/` that `config::Theme` does not know yet. Run it after
+changing `style.css`, `themes/` or card layout.
 
 ## Isolation
 
