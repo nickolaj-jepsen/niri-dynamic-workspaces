@@ -112,6 +112,8 @@
               Description = "Niri dynamic workspaces daemon";
               PartOf = [ "graphical-session.target" ];
               After = [ "graphical-session.target" ];
+              # Set by `niri --session`; keeps the daemon out of other sessions.
+              ConditionEnvironment = "NIRI_SOCKET";
             };
             Service = {
               ExecStart = "${cfg.package}/bin/niri-dynamic-workspaces daemon";

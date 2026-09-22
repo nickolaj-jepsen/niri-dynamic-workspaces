@@ -362,7 +362,11 @@ The daemon keeps GTK initialized and subsequent `switch`/`delete`/`move-window` 
 
 Config changes are picked up automatically: the daemon re-reads the config file when it changes, so no restart is needed after editing it.
 
-The Home Manager module enables daemon mode by default. To disable it:
+The Home Manager module enables daemon mode by default, as a user service that
+starts with `graphical-session.target`. The service is skipped unless niri has
+exported `NIRI_SOCKET` to the systemd user environment, as `niri --session`
+does under niri-session or uwsm, so other desktop sessions don't start it. To
+disable it:
 
 ```nix
 programs.niri-dynamic-workspaces.daemon = false;
