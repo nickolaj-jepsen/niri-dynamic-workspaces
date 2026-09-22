@@ -2,12 +2,24 @@
 {
   imports = [
     inputs.home-manager.flakeModules.home-manager
+    ./hm-module-checks.nix
   ];
 
-  flake.homeModules.default = { pkgs, lib, config, ... }:
+  flake.homeModules.default = { pkgs, lib, config, options, ... }:
     let
       cfg = config.programs.niri-dynamic-workspaces;
       tomlFormat = pkgs.formats.toml { };
+
+      niriBinds = lib.listToAttrs (map
+        ({ key, args, title }: lib.nameValuePair key {
+          action.spawn = [ "${cfg.package}/bin/niri-dynamic-workspaces" ] ++ args;
+          hotkey-overlay.title = title;
+        })
+        (lib.filter (b: b.key != null) [
+          { key = cfg.keybind; args = [ ]; title = "Open Workspace Switcher"; }
+          { key = cfg.deleteKeybind; args = [ "delete" ]; title = "Delete Workspace"; }
+          { key = cfg.moveWindowKeybind; args = [ "move-window" ]; title = "Move Window to Workspace"; }
+        ]));
     in
     {
       options.programs.niri-dynamic-workspaces = {
@@ -20,21 +32,30 @@
         };
 
         keybind = lib.mkOption {
-          type = lib.types.str;
+          type = lib.types.nullOr lib.types.str;
           default = "Mod+D";
-          description = "Keybind to open the workspace switcher overlay.";
+          description = ''
+            Keybind to open the workspace switcher overlay, added to
+            niri-flake's `programs.niri.settings.binds`. `null` leaves it out.
+          '';
         };
 
         deleteKeybind = lib.mkOption {
-          type = lib.types.str;
+          type = lib.types.nullOr lib.types.str;
           default = "Mod+Ctrl+D";
-          description = "Keybind to open the workspace delete overlay.";
+          description = ''
+            Keybind to open the workspace delete overlay, added to
+            niri-flake's `programs.niri.settings.binds`. `null` leaves it out.
+          '';
         };
 
         moveWindowKeybind = lib.mkOption {
-          type = lib.types.str;
+          type = lib.types.nullOr lib.types.str;
           default = "Mod+Shift+D";
-          description = "Keybind to open the move-window overlay.";
+          description = ''
+            Keybind to open the move-window overlay, added to niri-flake's
+            `programs.niri.settings.binds`. `null` leaves it out.
+          '';
         };
 
         daemon = lib.mkOption {
@@ -82,51 +103,43 @@
         };
       };
 
-      config = lib.mkIf cfg.enable {
-        home.packages = [ cfg.package ];
+      config = lib.mkIf cfg.enable (lib.mkMerge [
+        {
+          home.packages = [ cfg.package ];
 
-        systemd.user.services.niri-dynamic-workspaces = lib.mkIf cfg.daemon {
-          Unit = {
-            Description = "Niri dynamic workspaces daemon";
-            PartOf = [ "graphical-session.target" ];
-            After = [ "graphical-session.target" ];
+          systemd.user.services.niri-dynamic-workspaces = lib.mkIf cfg.daemon {
+            Unit = {
+              Description = "Niri dynamic workspaces daemon";
+              PartOf = [ "graphical-session.target" ];
+              After = [ "graphical-session.target" ];
+            };
+            Service = {
+              ExecStart = "${cfg.package}/bin/niri-dynamic-workspaces daemon";
+              Restart = "on-failure";
+              RestartSec = 5;
+            };
+            Install.WantedBy = [ "graphical-session.target" ];
           };
-          Service = {
-            ExecStart = "${cfg.package}/bin/niri-dynamic-workspaces daemon";
-            Restart = "on-failure";
-            RestartSec = 5;
-          };
-          Install.WantedBy = [ "graphical-session.target" ];
-        };
 
-        programs.niri.settings.binds = {
-          "${cfg.keybind}" = {
-            action.spawn =
-              [ "${cfg.package}/bin/niri-dynamic-workspaces" ];
-            hotkey-overlay.title = "Open Workspace Switcher";
-          };
-          "${cfg.deleteKeybind}" = {
-            action.spawn =
-              [ "${cfg.package}/bin/niri-dynamic-workspaces" "delete" ];
-            hotkey-overlay.title = "Delete Workspace";
-          };
-          "${cfg.moveWindowKeybind}" = {
-            action.spawn =
-              [ "${cfg.package}/bin/niri-dynamic-workspaces" "move-window" ];
-            hotkey-overlay.title = "Move Window to Workspace";
-          };
-        };
+          programs.niri-dynamic-workspaces.settings.general.theme =
+            lib.mkIf (cfg.themeCss != null) (lib.mkDefault "theme.css");
 
-        programs.niri-dynamic-workspaces.settings.general.theme =
-          lib.mkIf (cfg.themeCss != null) (lib.mkDefault "theme.css");
+          xdg.configFile."niri-dynamic-workspaces/theme.css" =
+            lib.mkIf (cfg.themeCss != null) { text = cfg.themeCss; };
 
-        xdg.configFile."niri-dynamic-workspaces/theme.css" =
-          lib.mkIf (cfg.themeCss != null) { text = cfg.themeCss; };
-
-        xdg.configFile."niri-dynamic-workspaces/config.toml" =
-          lib.mkIf (cfg.settings != { }) {
-            source = tomlFormat.generate "config.toml" cfg.settings;
-          };
-      };
+          xdg.configFile."niri-dynamic-workspaces/config.toml" =
+            lib.mkIf (cfg.settings != { }) {
+              source = tomlFormat.generate "config.toml" cfg.settings;
+            };
+        }
+        # programs.niri.settings exists only with niri-flake, and any definition makes it
+        # generate config.kdl, which Home Manager's own niri module would also write.
+        (lib.optionalAttrs (options ? programs.niri.settings) {
+          programs.niri.settings =
+            lib.mkIf (niriBinds != { } && !(config.wayland.windowManager.niri.enable or false)) {
+              binds = niriBinds;
+            };
+        })
+      ]);
     };
 }

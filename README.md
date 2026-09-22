@@ -32,9 +32,9 @@ imports = [ inputs.niri-dynamic-workspaces.homeModules.default ];
 # Enable
 programs.niri-dynamic-workspaces = {
   enable = true;
-  keybind = "Mod+D";              # default — open switcher
-  deleteKeybind = "Mod+Ctrl+D";  # default — open delete overlay
-  moveWindowKeybind = "Mod+Shift+D"; # default — open move-window overlay
+  keybind = "Mod+D";              # default — open switcher (null to skip)
+  deleteKeybind = "Mod+Ctrl+D";  # default — open delete overlay (null to skip)
+  moveWindowKeybind = "Mod+Shift+D"; # default — open move-window overlay (null to skip)
   daemon = true;                  # default — start daemon at login
   settings = {
     general.workspace_prefix = "dyn-";
@@ -46,7 +46,17 @@ programs.niri-dynamic-workspaces = {
 };
 ```
 
-This installs the package, adds a niri keybind, and writes the config file.
+The module installs the package, writes the config file and runs the daemon.
+
+The keybinds go into `programs.niri.settings.binds` when the Home Manager module
+from [sodiboo/niri-flake](https://github.com/sodiboo/niri-flake) is loaded
+(niri-flake's NixOS module loads it for you). Set a keybind to `null` to skip
+it. If niri-flake is loaded but you write `config.kdl` yourself, set all three
+to `null`: any bind makes niri-flake generate the whole file.
+
+Without niri-flake, with Home Manager's own `wayland.windowManager.niri`, or
+with niri-flake's raw `programs.niri.config` (which overrides `settings`), the
+binds never reach niri; add the ones from [Keybinds](#keybinds) yourself.
 
 ### Cargo
 
@@ -373,6 +383,7 @@ Lint and test:
 cargo fmt -- --check   # check formatting
 cargo clippy           # lint (clippy all + pedantic)
 cargo test             # run unit tests
+nix flake check        # evaluate the Home Manager module
 ```
 
 ### End-to-end tests
