@@ -1,5 +1,10 @@
 # niri-dynamic-workspaces
 
+A keyboard-driven workspace switcher for the [niri](https://github.com/YaLTeR/niri)
+Wayland compositor. A keybind shows your workspaces on a keyboard-shaped grid;
+press a letter or digit to switch to that workspace, or to create it and launch
+its programs. The same overlay deletes workspaces and moves the focused window.
+
 ![The overlay, in the fireproof theme, over an editor and two terminals](docs/readme.png)
 
 ## Install
@@ -50,6 +55,22 @@ Requires GTK4, gtk4-layer-shell, and pkg-config development headers.
 ```bash
 cargo install --git https://github.com/nickolaj-jepsen/niri-dynamic-workspaces
 ```
+
+### Keybinds
+
+Add the three modes to the `binds` block of niri's `config.kdl`:
+
+```kdl
+binds {
+    Mod+D hotkey-overlay-title="Open Workspace Switcher" { spawn "niri-dynamic-workspaces"; }
+    Mod+Ctrl+D hotkey-overlay-title="Delete Workspace" { spawn "niri-dynamic-workspaces" "delete"; }
+    Mod+Shift+D hotkey-overlay-title="Move Window to Workspace" { spawn "niri-dynamic-workspaces" "move-window"; }
+}
+```
+
+niri's default config already binds Mod+D to fuzzel, and niri refuses a config
+with duplicate keybinds, so remove that line or pick another key. For a faster
+overlay, also start the daemon at login (see [Daemon mode](#daemon-mode)).
 
 ## Configuration
 
@@ -301,7 +322,11 @@ Variable and class names are covered by semver. The widget tree between them is 
 - **`niri-dynamic-workspaces move-window`** — opens the move-window overlay (press key to move the focused window)
 - **`niri-dynamic-workspaces daemon`** — starts as a background daemon (no overlay shown)
 
-All modes support toggle behavior: running the same command again closes the overlay.
+Running the same command while its overlay is open closes the overlay, and
+running another mode's command switches the open overlay to that mode. Keybinds
+behave differently: with `inhibit_compositor_shortcuts` (on by default) the open
+overlay receives niri's keybinds as plain keys, so pressing Mod+D again selects
+workspace d. Press Escape to close the overlay.
 
 While open, the overlay tracks the compositor live: it follows the focused output across monitors and refreshes its cards when workspaces or windows change.
 
