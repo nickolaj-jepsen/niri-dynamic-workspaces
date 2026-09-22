@@ -32,6 +32,9 @@ jobs:
       - name: cargo test
         run: nix develop --command cargo test
 
+      - name: cargo package
+        run: nix develop --command cargo package --locked
+
   e2e:
     runs-on: ubuntu-latest
     steps:
