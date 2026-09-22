@@ -40,7 +40,7 @@ edit() {
 term() {
     # Output printed before niri resizes the window reflows badly, so the command waits a moment.
     spawn foot -D "$repo" -o csd.preferred=none -o font=monospace:size=10 -o pad=12x12 \
-        -o colors.background=1c1b1a -o colors.foreground=dad8ce \
+        -o colors-dark.background=1c1b1a -o colors-dark.foreground=dad8ce \
         sh -c "sleep 1; printf '\$ %s\n' \"\$1\"; PATH=${bin%/*}:\$PATH; eval \"\$1\"; printf '\$ '; sleep 60" sh "$1"
 }
 

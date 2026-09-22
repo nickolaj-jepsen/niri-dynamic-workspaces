@@ -52,6 +52,9 @@
                   inputs.niri-flake.homeModules.config
                 ];
 
+                # niri-flake's default niri-stable no longer evaluates against current nixpkgs.
+                programs.niri.package = pkgs.niri;
+
                 programs.niri-dynamic-workspaces = {
                   enable = true;
                   keybind = "Alt+D";
