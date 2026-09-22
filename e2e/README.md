@@ -22,6 +22,9 @@ Screenshots go to `e2e/out/`.
 | --- | --- |
 | `start` / `stop` | boot or tear down the nested session |
 | `app <args...>` | run the overlay binary in it and wait for exit |
+| `daemon` | start the daemon in it, wait until it owns its D-Bus name |
+| `serving` | does the daemon still own its D-Bus name |
+| `config [file]` | replace its `config.toml` with a file, or stdin |
 | `overlay [mode]` | open the overlay in the background, wait until it is mapped |
 | `key <char>` | click the card for `a`-`z` / `0`-`9` |
 | `mode <name>` | click `switch`, `delete` or `move` |
@@ -76,7 +79,10 @@ leaves its logs in `e2e/out/fail-<name>.log`.
 
 `GTK_THEME` is pinned to `Default:dark` so screenshots never show the host
 theme; set `NDW_E2E_GTK_THEME` before `start` to look at another one (empty
-leaves it unset). `NDW_E2E_CONFIG` swaps in another `config.toml`.
+leaves it unset). `NDW_E2E_CONFIG` swaps in another `config.toml` at `start`,
+and `config` replaces it in a running session. `test.sh` builds per-test
+settings on that with `add_config` (appends TOML from stdin) and
+`general <key> <value>`.
 `NDW_E2E_SIZE=1920x1080` resizes cage's output with `wlr-randr`; `key` and
 `mode` only know the default size.
 

@@ -7,6 +7,8 @@ repo=$(dirname "$here")
 run_dir=${NDW_E2E_DIR:-${XDG_RUNTIME_DIR:-/tmp}/ndw-e2e}
 out_dir=${NDW_E2E_OUT:-$repo/e2e/out}
 env_file=$run_dir/env
+config_file=$run_dir/config/niri-dynamic-workspaces/config.toml
+app_id=dev.nickolaj.niri-dynamic-workspaces.E2e
 bin=${NDW_BIN:-$repo/target/debug/niri-dynamic-workspaces}
 
 die() { echo "harness: $*" >&2; exit 1; }
@@ -75,11 +77,15 @@ overlay_open() { [[ $(in_env niri msg -j layers | jq length) -gt 0 ]]; }
 output_width() { in_env niri msg -j outputs | jq '.[].logical.width'; }
 output_resized() { [[ $(output_width) != "$1" ]]; }
 overlay_closed() { ! overlay_open; }
+daemon_running() {
+    [[ $(in_env dbus-send --session --print-reply=literal --dest=org.freedesktop.DBus \
+        /org/freedesktop/DBus org.freedesktop.DBus.NameHasOwner "string:$app_id") == *true* ]]
+}
 
 start() {
     stop
-    mkdir -p "$run_dir/config/niri-dynamic-workspaces" "$out_dir"
-    cp "${NDW_E2E_CONFIG:-$here/fixtures/config.toml}" "$run_dir/config/niri-dynamic-workspaces/config.toml"
+    mkdir -p "$(dirname "$config_file")" "$out_dir"
+    cp "${NDW_E2E_CONFIG:-$here/fixtures/config.toml}" "$config_file"
     [[ -x $bin ]] || die "no binary at $bin (cargo build, or set NDW_BIN)"
     for tool in cage niri grim wtype wlrctl jq dbus-daemon ${NDW_E2E_SIZE:+wlr-randr}; do
         command -v "$tool" >/dev/null || die "missing $tool (run inside 'nix develop')"
@@ -135,7 +141,7 @@ export XDG_CONFIG_HOME=$run_dir/config
 export DBUS_SESSION_BUS_ADDRESS=$dbus_addr
 export WAYLAND_DISPLAY=$(log_value "listening on Wayland socket: ")
 export NIRI_SOCKET=$(log_value "IPC listening on: ")
-export NDW_APP_ID=dev.nickolaj.niri-dynamic-workspaces.E2e
+export NDW_APP_ID=$app_id
 export GSK_RENDERER=cairo
 export GDK_DEBUG=no-portals
 export GTK_THEME=${NDW_E2E_GTK_THEME-Default:dark}
@@ -157,8 +163,9 @@ stop() {
     local pid
     # Matches cage and the niri it wraps; cage does not reap niri, and a leak holds its wayland socket.
     pkill -f "niri -c $here/fixtures/niri.kdl" 2>/dev/null || true
-    pid=$(cat "$run_dir/dbus.pid" 2>/dev/null || true)
-    [[ -n $pid ]] && kill "$pid" 2>/dev/null || true
+    for pid in "$run_dir"/*.pid; do
+        [[ -f $pid ]] && kill "$(cat "$pid")" 2>/dev/null || true
+    done
     rm -rf "$run_dir"
 }
 
@@ -169,6 +176,9 @@ usage: harness.sh <command>
   start            boot a nested headless niri with an isolated config
   stop             tear it down
   app <args...>    run the overlay binary in it, wait for exit
+  daemon           start the daemon in it, wait until it owns its D-Bus name
+  serving          does the daemon still own its D-Bus name
+  config [file]    replace its config.toml with file, or stdin
   overlay [mode]   open the overlay in the background, wait until it is mapped
   key <char>       click the card for a-z / 0-9
   mode <name>      click switch | delete | move
@@ -189,6 +199,13 @@ start)   start ;;
 stop)    stop ;;
 run)     in_env "$@" ;;
 app)     in_env "$bin" "$@" ;;
+daemon)  # The sh -c records the daemon's own pid for stop; $! would be in_env's subshell.
+         in_env sh -c 'echo $$ >"$0"; exec "$@"' "$run_dir/daemon.pid" "$bin" daemon >>"$run_dir/app.log" 2>&1 &
+         wait_for 15 daemon_running || die "daemon did not start" ;;
+serving) daemon_running ;;
+config)  [[ -f $env_file ]] || die "not started (run '$0 start')"
+         # Written aside and renamed, so a running daemon never reads half a file.
+         cat "${1:--}" >"$config_file.new" && mv "$config_file.new" "$config_file" ;;
 overlay) in_env "$bin" "${1:-switch}" >>"$run_dir/app.log" 2>&1 &
          wait_for 15 overlay_open || die "overlay did not open"
          # Mapped is not yet laid out; an early click can miss the widget it aims at.

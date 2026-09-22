@@ -25,9 +25,39 @@ has_ws() { [[ -n $(ws_id "$1") ]]; }
 no_ws() { [[ -z $(ws_id "$1") ]]; }
 
 windows() { "$h" run niri msg -j windows; }
-# move-window acts on the focused window, so a mapped one is not enough.
-has_focused_window() { windows | jq -e 'any(.[]; .is_focused)' >/dev/null; }
-window_on() { [[ $(windows | jq -r '.[0].workspace_id') == "$(ws_id "$1")" ]]; }
+# has_focused_window [app-id]: move-window acts on the focused window, so a mapped one is not enough.
+has_focused_window() {
+    windows | jq -e --arg app "${1:-}" 'any(.[]; .is_focused and ($app == "" or .app_id == $app))' >/dev/null
+}
+# window_on <ws-name> [app-id]: a window (with that app id) is on the workspace.
+window_on() {
+    windows | jq -e --arg ws "$(ws_id "$1")" --arg app "${2:-}" \
+        'any(.[]; (.workspace_id | tostring) == $ws and ($app == "" or .app_id == $app))' >/dev/null
+}
+# windows_on <ws-name>: how many windows the workspace holds.
+windows_on() {
+    windows | jq --arg ws "$(ws_id "$1")" '[.[] | select((.workspace_id | tostring) == $ws)] | length'
+}
+# spawn_window [app-id]: open a foot on the focused workspace and wait until it has focus.
+spawn_window() {
+    "$h" run foot --app-id "${1:-foot}" sh -c 'sleep 60' >/dev/null 2>&1 &
+    until_true has_focused_window "${1:-foot}"
+}
+
+# The app re-reads its config on every invocation; these rewrite it through the `config` verb.
+config_toml() { echo "$("$h" run printenv XDG_CONFIG_HOME)/niri-dynamic-workspaces/config.toml"; }
+# add_config: append stdin (TOML tables, usually a heredoc) to the session's config.
+add_config() { cat "$(config_toml)" - | "$h" config; }
+# general <key> <toml-value>: set a [general] key, replacing any earlier value.
+general() {
+    K=$1 V=$2 awk '
+        /^\[/ { in_general = ($0 == "[general]") }
+        in_general && $0 ~ "^" ENVIRON["K"] "[ \t]*=" { next }
+        { print }
+        $0 == "[general]" { print ENVIRON["K"] " = " ENVIRON["V"]; seen = 1 }
+        END { if (!seen) print "[general]\n" ENVIRON["K"] " = " ENVIRON["V"] }
+    ' "$(config_toml)" | "$h" config
+}
 
 test_switch_creates_workspace() {
     "$h" app switch a || return 1
@@ -42,9 +72,7 @@ test_delete_removes_workspace() {
 }
 
 test_move_window_moves_it() {
-    "$h" app switch a || return 1
-    "$h" run foot sh -c 'sleep 60' &
-    until_true has_focused_window || return 1
+    "$h" app switch a && spawn_window || return 1
     "$h" app move-window b || return 1
     until_true window_on dyn-b
 }
@@ -70,6 +98,25 @@ test_overlay_delete_mode() {
     until_true no_ws dyn-d
 }
 
+test_daemon_serves_invocations() {
+    "$h" daemon || return 1
+    "$h" app switch a || return 1
+    until_true has_ws dyn-a || return 1
+    "$h" overlay switch && "$h" key c || return 1
+    until_true has_ws dyn-c && "$h" closed || return 1
+    # A repeat in the same mode closes the overlay, and the hold keeps the daemon up after it.
+    "$h" overlay switch && "$h" app switch && "$h" closed && "$h" serving
+}
+
+test_daemon_deletes_empty_workspaces() {
+    general auto_delete_empty true || return 1
+    "$h" daemon || return 1
+    "$h" app switch a && spawn_window || return 1
+    "$h" app switch b && "$h" app switch c || return 1
+    # Covers the debounce (0.5 s quiet, 2 s at most) and the 0.5 s confirming pass.
+    until_true_for 15 no_ws dyn-b && has_ws dyn-a && has_ws dyn-c
+}
+
 tests=(
     switch_creates_workspace
     delete_removes_workspace
@@ -77,6 +124,8 @@ tests=(
     overlay_card_click_switches
     overlay_escape_closes
     overlay_delete_mode
+    daemon_serves_invocations
+    daemon_deletes_empty_workspaces
 )
 
 [[ ${1:-} ]] && tests=("$@")
