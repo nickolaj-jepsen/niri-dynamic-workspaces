@@ -1,3 +1,4 @@
+# release.yml runs after this workflow passes on main: keep its name, and keep gating jobs here.
 name: CI
 
 on:
