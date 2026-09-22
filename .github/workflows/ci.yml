@@ -35,6 +35,17 @@ jobs:
       - name: cargo package
         run: nix develop --command cargo package --locked
 
+  flake:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: DeterminateSystems/nix-installer-action@main
+
+      # Builds the package (with its cargo test) and evaluates the HM module and VM.
+      - name: nix flake check
+        run: nix flake check -L
+
   e2e:
     runs-on: ubuntu-latest
     steps:
