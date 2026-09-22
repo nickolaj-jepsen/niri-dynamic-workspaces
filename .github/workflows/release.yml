@@ -1,71 +1,100 @@
 name: Release
 
 on:
-  push:
+  # Only green push runs on main get past the version job's if.
+  workflow_run: # zizmor: ignore[dangerous-triggers]
+    workflows: [CI]
+    types: [completed]
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  # Under workflow_run, github.sha is main's tip, not the commit CI tested.
+  SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+
 jobs:
-  check-version:
+  version:
+    # Dispatch only from main; event == push keeps out fork PRs whose branch is also named main.
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
     runs-on: ubuntu-latest
     outputs:
-      should_release: ${{ steps.check.outputs.should_release }}
-      version: ${{ steps.check.outputs.version }}
+      version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
+          ref: ${{ env.SHA }}
+          persist-credentials: false
 
-      - name: Check if version changed
-        id: check
+      - name: Read version
+        id: version
         run: |
-          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml)
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+          test -n "$version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-          latest_tag=$(git tag -l 'v*' --sort=-v:refname | head -n1 || true)
-          if [ -z "$latest_tag" ] || [ "$latest_tag" != "v$version" ]; then
-            echo "should_release=true" >> "$GITHUB_OUTPUT"
-            echo "New release needed: v$version (latest tag: ${latest_tag:-none})"
-          else
-            echo "should_release=false" >> "$GITHUB_OUTPUT"
-            echo "No release needed: v$version already tagged"
-          fi
+  publish-crate:
+    needs: version
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - name: Check crates.io
+        id: check
+        run: |
+          status=$(curl -sS -o /dev/null -w '%{http_code}' \
+            -A "niri-dynamic-workspaces release (github.com/$GITHUB_REPOSITORY)" \
+            "https://crates.io/api/v1/crates/niri-dynamic-workspaces/$VERSION")
+          case $status in
+            200) echo "$VERSION is already on crates.io"; published=true ;;
+            404) published=false ;;
+            *) echo "::error::crates.io answered HTTP $status"; exit 1 ;;
+          esac
+          echo "published=$published" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.check.outputs.published == 'false'
+        with:
+          ref: ${{ env.SHA }}
+          persist-credentials: false
+
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+        if: steps.check.outputs.published == 'false'
+
+      - name: Publish to crates.io
+        if: steps.check.outputs.published == 'false'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_TOKEN }}
+        run: nix develop --command cargo publish --locked
 
   create-release:
-    needs: check-version
-    if: needs.check-version.outputs.should_release == 'true'
+    needs: [version, publish-crate]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: v${{ needs.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Create release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ needs.check-version.outputs.version }}
+      - name: Check release
+        id: check
         run: |
-          tag="v$VERSION"
-          if gh release view "$tag" > /dev/null 2>&1; then
-            echo "Release $tag already exists, skipping"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
           else
-            gh release create "$tag" \
-              --title "$tag" \
-              --generate-notes
+            echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
-  publish-crate:
-    needs: check-version
-    if: needs.check-version.outputs.should_release == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: DeterminateSystems/nix-installer-action@main
-
-      - uses: DeterminateSystems/magic-nix-cache-action@main
-
-      - name: Publish to crates.io
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_TOKEN }}
-        run: nix develop --command cargo publish
+      - name: Create release
+        if: steps.check.outputs.exists == 'false'
+        run: gh release create "$TAG" --target "$SHA" --title "$TAG" --generate-notes
