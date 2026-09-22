@@ -41,6 +41,12 @@
           (map (lib.hasSuffix "/bin/niri-dynamic-workspaces daemon")
             (lib.toList standalone.config.systemd.user.services.niri-dynamic-workspaces.Service.ExecStart))
           [ true ];
+        assert expect "daemon unit condition"
+          standalone.config.systemd.user.services.niri-dynamic-workspaces.Unit.ConditionEnvironment
+          "NIRI_SOCKET";
+        assert expect "daemon unit WantedBy"
+          standalone.config.systemd.user.services.niri-dynamic-workspaces.Install.WantedBy
+          [ "graphical-session.target" ];
         assert expect "niri-flake binds"
           (bindKeys (withNiriFlake [ ])) [ "Mod+Ctrl+D" "Mod+D" "Mod+Shift+D" ];
         assert expect "null deleteKeybind"
