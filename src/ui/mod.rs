@@ -218,6 +218,7 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
     }
 
     populate_overlay(&window, &session, mode, Some(workspaces));
+    free_on_close(&window);
 
     // Restore original workspace on close if no selection was made.
     {
@@ -267,12 +268,10 @@ fn follow_compositor(
         Propagation::Proceed
     });
 
-    let track_window = window.clone();
+    // Weak: the future must not keep a closed window alive.
+    let weak_window = window.downgrade();
     glib::spawn_future_local(async move {
         while let Ok(event) = event_rx.recv().await {
-            if !track_window.is_visible() {
-                break;
-            }
             let mut structural = event == niri::OverlayEvent::Structural;
             if structural {
                 // Debounce: coalesce event bursts into one refresh.
@@ -281,18 +280,23 @@ fn follow_compositor(
             while let Ok(more) = event_rx.try_recv() {
                 structural |= more == niri::OverlayEvent::Structural;
             }
+            // Checked after the await: repopulating a closed window rebuilds
+            // what free_on_close tore down.
+            let Some(window) = weak_window.upgrade().filter(WidgetExt::is_visible) else {
+                break;
+            };
 
             let fresh_workspaces = niri::list_workspaces().unwrap_or_default();
             let current = focused_output_from(&fresh_workspaces);
-            let mode = Mode::from_window(&track_window.clone().upcast()).unwrap_or(Mode::Normal);
+            let mode = Mode::from_window(window.upcast_ref()).unwrap_or(Mode::Normal);
 
             // Focused output changed → move the overlay to that monitor.
             if current != tracked_output {
                 tracked_output.clone_from(&current);
                 if let Some(monitor) = current.as_deref().and_then(find_monitor_for_output) {
-                    track_window.set_monitor(Some(&monitor));
+                    window.set_monitor(Some(&monitor));
                     session.monitor_width.set(get_monitor_width(Some(&monitor)));
-                    populate_overlay(&track_window, &session, mode, Some(fresh_workspaces));
+                    populate_overlay(&window, &session, mode, Some(fresh_workspaces));
                     continue;
                 }
             }
@@ -300,9 +304,25 @@ fn follow_compositor(
             // Workspaces/windows changed → refresh the cards, but never while
             // a sub-view (picker or variable form) is up.
             if structural && !session.in_subview.get() {
-                populate_overlay(&track_window, &session, mode, Some(fresh_workspaces));
+                populate_overlay(&window, &session, mode, Some(fresh_workspaces));
             }
         }
+    });
+}
+
+/// Drop the widget tree and `ndw-*` controllers once the window closes.
+///
+/// Those closures hold [`ActionContext`], whose strong window reference would
+/// otherwise keep every closed overlay alive in the daemon. Runs on idle
+/// because close usually fires from inside the `ndw-key` handler.
+fn free_on_close(window: &ApplicationWindow) {
+    window.connect_close_request(|window| {
+        let window = window.clone();
+        glib::idle_add_local_once(move || {
+            remove_app_controllers(&window);
+            window.set_child(None::<&gtk4::Widget>);
+        });
+        Propagation::Proceed
     });
 }
 
@@ -345,6 +365,9 @@ fn inhibit_compositor_shortcuts(window: &ApplicationWindow) {
 }
 
 /// Remove controllers we previously attached (identified by "ndw-" name prefix).
+///
+/// Any window controller that captures an [`ActionContext`] must carry that
+/// prefix, or [`free_on_close`] cannot break its cycle and the window leaks.
 fn remove_app_controllers(window: &ApplicationWindow) {
     let controllers = window.observe_controllers();
     let mut to_remove = Vec::new();
