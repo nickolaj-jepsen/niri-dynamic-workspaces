@@ -1,0 +1,21 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      # These only compile when bumped together.
+      gtk-rs:
+        patterns: [gtk4, gdk4, glib, gtk4-layer-shell]
+    ignore:
+      # Pinned to the IPC protocol of the niri in flake.lock, and bumped with it.
+      - dependency-name: niri-ipc
