@@ -1,4 +1,4 @@
-{ self, inputs, ... }:
+{ self, ... }:
 {
   perSystem = { pkgs, system, ... }: {
     devShells.default = pkgs.mkShell {
@@ -13,7 +13,7 @@
         pkgs.rustfmt
 
         # e2e harness: nested compositor, input injection, screenshots
-        inputs.niri-flake.packages.${system}.niri-unstable
+        pkgs.niri
         pkgs.cage
         pkgs.wtype
         pkgs.grim
