@@ -31,7 +31,7 @@ Screenshots go to `e2e/out/`.
 | `state` | workspaces as JSON |
 | `shot [name]` | screenshot to `e2e/out/<name>.png` |
 | `run <cmd...>` | run any command against the nested session |
-| `logs [n]` | tail the overlay and compositor logs |
+| `logs [n]` | tail the bus, compositor and overlay logs |
 
 A session by hand:
 
@@ -66,7 +66,13 @@ the session's config dir. Run it after changing the overlay's look.
 Each session gets its own `XDG_CONFIG_HOME` holding `e2e/fixtures/config.toml`,
 its own D-Bus session bus, and `NDW_APP_ID=dev.nickolaj.niri-dynamic-workspaces.E2e`.
 Without the private bus an installed daemon on the host bus would own the
-application id and answer the invocation instead.
+application id and answer the invocation instead. The bus runs from a config
+written to the run dir, not the host's `/etc/dbus-1`, and `GDK_DEBUG=no-portals`
+keeps GTK from waiting on a settings portal it activates there.
+
+The nested niri loads EGL from the dev shell's mesa (`NDW_E2E_EGL_VENDOR`), so
+it runs without `/run/opengl-driver`, as on CI. A session that fails to start
+leaves its logs in `e2e/out/fail-<name>.log`.
 
 `GTK_THEME` is pinned to `Default:dark` so screenshots never show the host
 theme; set `NDW_E2E_GTK_THEME` before `start` to look at another one (empty

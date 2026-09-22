@@ -87,16 +87,39 @@ start() {
 
     # The overlay forwards invocations over D-Bus; a private bus keeps a host daemon from answering.
     local dbus_addr
+    # nixpkgs' dbus-daemon --session reads /etc/dbus-1/session.conf, which only NixOS has.
+    # unix:dir=$run_dir would overflow the socket path limit for a long NDW_E2E_DIR.
+    cat >"$run_dir/dbus.conf" <<'CONF'
+<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
+<busconfig>
+  <type>session</type>
+  <listen>unix:tmpdir=/tmp</listen>
+  <auth>EXTERNAL</auth>
+  <standard_session_servicedirs/>
+  <policy context="default">
+    <allow send_destination="*" eavesdrop="true"/>
+    <allow eavesdrop="true"/>
+    <allow own="*"/>
+  </policy>
+</busconfig>
+CONF
     # Activated services (the settings portal) inherit this environment; the host config would leak its GTK theme.
     XDG_CONFIG_HOME="$run_dir/config" \
-        dbus-daemon --session --nofork --print-address >"$run_dir/dbus.addr" 2>/dev/null &
+        dbus-daemon --config-file="$run_dir/dbus.conf" --nofork --print-address \
+        >"$run_dir/dbus.addr" 2>"$run_dir/dbus.log" &
     echo $! >"$run_dir/dbus.pid"
-    wait_for 10 test -s "$run_dir/dbus.addr" || die "session bus did not start"
+    wait_for 10 test -s "$run_dir/dbus.addr" || {
+        cat "$run_dir/dbus.log" >&2
+        die "session bus did not start"
+    }
     dbus_addr=$(cat "$run_dir/dbus.addr")
 
+    # nixpkgs' libglvnd only finds EGL vendors under /run/opengl-driver, which only NixOS has.
     env -u WAYLAND_DISPLAY -u NIRI_SOCKET \
         XDG_CONFIG_HOME="$run_dir/config" \
         DBUS_SESSION_BUS_ADDRESS="$dbus_addr" \
+        ${NDW_E2E_EGL_VENDOR:+__EGL_VENDOR_LIBRARY_FILENAMES=$NDW_E2E_EGL_VENDOR} \
         WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 WLR_RENDERER=pixman \
         cage -- sh -c 'echo "$WAYLAND_DISPLAY" >"$0"; exec "$@"' "$run_dir/cage.display" \
         niri -c "$here/fixtures/niri.kdl" >"$run_dir/niri.log" 2>&1 &
@@ -106,6 +129,7 @@ start() {
         die "nested niri did not start"
     }
 
+    # no-portals: on the private bus GTK's settings-portal lookup can stall startup for 25 s.
     cat >"$env_file" <<EOF
 export XDG_CONFIG_HOME=$run_dir/config
 export DBUS_SESSION_BUS_ADDRESS=$dbus_addr
@@ -113,6 +137,7 @@ export WAYLAND_DISPLAY=$(log_value "listening on Wayland socket: ")
 export NIRI_SOCKET=$(log_value "IPC listening on: ")
 export NDW_APP_ID=dev.nickolaj.niri-dynamic-workspaces.E2e
 export GSK_RENDERER=cairo
+export GDK_DEBUG=no-portals
 export GTK_THEME=${NDW_E2E_GTK_THEME-Default:dark}
 export LIBGL_ALWAYS_SOFTWARE=1
 EOF
@@ -153,7 +178,7 @@ usage: harness.sh <command>
   state            workspaces as JSON
   shot [name]      screenshot to e2e/out/<name>.png
   run <cmd...>     run any command against the nested session
-  logs [n]         tail the overlay and compositor logs
+  logs [n]         tail the bus, compositor and overlay logs
 EOF
 }
 
@@ -176,6 +201,6 @@ shot)    in_env grim "$out_dir/${1:-shot}.png" && echo "$out_dir/${1:-shot}.png"
 state)   in_env niri msg -j workspaces ;;
 open)    overlay_open ;;
 closed)  wait_for "${1:-10}" overlay_closed || die "overlay stayed open" ;;
-logs)    tail -n "${1:-20}" "$run_dir/app.log" "$run_dir/niri.log" ;;
+logs)    tail -n "${1:-20}" "$run_dir"/{dbus,niri,app}.log ;;
 *)       usage ;;
 esac
