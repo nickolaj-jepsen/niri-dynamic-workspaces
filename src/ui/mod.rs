@@ -232,9 +232,23 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
         });
     }
 
-    // Follow compositor state while the overlay is open: a background thread
-    // forwards niri events; focus events move the overlay between outputs,
-    // structural events refresh the cards.
+    follow_compositor(&window, session, focused_output);
+
+    if config.inhibit_compositor_shortcuts {
+        inhibit_compositor_shortcuts(&window);
+    }
+
+    window.present();
+}
+
+/// Follow compositor state while the overlay is open: a background thread
+/// forwards niri events; focus events move the overlay between outputs,
+/// structural events refresh the cards.
+fn follow_compositor(
+    window: &ApplicationWindow,
+    session: Rc<OverlaySession>,
+    mut tracked_output: Option<String>,
+) {
     let (event_tx, event_rx) = async_channel::unbounded();
     let stream_alive = Arc::new(AtomicBool::new(true));
     {
@@ -253,9 +267,7 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
         Propagation::Proceed
     });
 
-    let tracked_output = Rc::new(RefCell::new(focused_output));
     let track_window = window.clone();
-    let track_session = session;
     glib::spawn_future_local(async move {
         while let Ok(event) = event_rx.recv().await {
             if !track_window.is_visible() {
@@ -275,31 +287,23 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
             let mode = Mode::from_window(&track_window.clone().upcast()).unwrap_or(Mode::Normal);
 
             // Focused output changed → move the overlay to that monitor.
-            if current != *tracked_output.borrow() {
-                tracked_output.borrow_mut().clone_from(&current);
+            if current != tracked_output {
+                tracked_output.clone_from(&current);
                 if let Some(monitor) = current.as_deref().and_then(find_monitor_for_output) {
                     track_window.set_monitor(Some(&monitor));
-                    track_session
-                        .monitor_width
-                        .set(get_monitor_width(Some(&monitor)));
-                    populate_overlay(&track_window, &track_session, mode, Some(fresh_workspaces));
+                    session.monitor_width.set(get_monitor_width(Some(&monitor)));
+                    populate_overlay(&track_window, &session, mode, Some(fresh_workspaces));
                     continue;
                 }
             }
 
             // Workspaces/windows changed → refresh the cards, but never while
             // a sub-view (picker or variable form) is up.
-            if structural && !track_session.in_subview.get() {
-                populate_overlay(&track_window, &track_session, mode, Some(fresh_workspaces));
+            if structural && !session.in_subview.get() {
+                populate_overlay(&track_window, &session, mode, Some(fresh_workspaces));
             }
         }
     });
-
-    if config.inhibit_compositor_shortcuts {
-        inhibit_compositor_shortcuts(&window);
-    }
-
-    window.present();
 }
 
 /// Anchor the window to all edges as an exclusive-keyboard overlay layer surface.
