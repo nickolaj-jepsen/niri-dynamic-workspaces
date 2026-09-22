@@ -17,6 +17,7 @@
         ./nix/devshell.nix
         ./nix/hm-module.nix
         ./nix/vm.nix
+        ./nix/checks.nix
       ];
     };
 }

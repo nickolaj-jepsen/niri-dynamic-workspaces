@@ -387,7 +387,7 @@ Lint and test:
 cargo fmt -- --check   # check formatting
 cargo clippy           # lint (clippy all + pedantic)
 cargo test             # run unit tests
-nix flake check        # evaluate the Home Manager module
+nix flake check        # build the Nix package, check the Home Manager module
 ```
 
 ### End-to-end tests
