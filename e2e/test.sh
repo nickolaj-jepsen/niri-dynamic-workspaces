@@ -9,6 +9,7 @@ failed=0
 
 focused_ws() { "$h" state | jq -r '.[] | select(.is_focused).name // empty'; }
 ws_id() { "$h" state | jq -r --arg n "$1" '.[] | select(.name == $n) | .id'; }
+focused_is() { [[ $(focused_ws) == "$1" ]]; }
 
 # Actions run over IPC, so poll rather than assume the next call sees them.
 until_true_for() {
@@ -61,7 +62,7 @@ general() {
 
 test_switch_creates_workspace() {
     "$h" app switch a || return 1
-    until_true has_ws dyn-a && [[ $(focused_ws) == dyn-a ]]
+    until_true has_ws dyn-a && focused_is dyn-a
 }
 
 test_delete_removes_workspace() {
@@ -81,6 +82,14 @@ test_overlay_card_click_switches() {
     "$h" overlay switch || return 1
     "$h" key c || return 1
     until_true has_ws dyn-c && "$h" closed
+}
+
+test_overlay_key_press_switches() {
+    "$h" overlay switch && "$h" type c || return 1
+    until_true has_ws dyn-c && "$h" closed || return 1
+    # Now an existing workspace, with the same keys as the last call.
+    "$h" app switch a && "$h" overlay switch && "$h" type c || return 1
+    until_true focused_is dyn-c && "$h" closed
 }
 
 test_overlay_escape_closes() {
@@ -122,6 +131,7 @@ tests=(
     delete_removes_workspace
     move_window_moves_it
     overlay_card_click_switches
+    overlay_key_press_switches
     overlay_escape_closes
     overlay_delete_mode
     daemon_serves_invocations

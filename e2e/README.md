@@ -2,8 +2,8 @@
 
 Runs the overlay inside a nested, headless niri (cage with
 `WLR_BACKENDS=headless`) so tests and agents can drive it without touching your
-session. Clicks and Escape go in; screenshots and niri IPC state come out. No
-GPU, TTY or seat required, so it also runs in CI.
+session. Clicks and key presses go in; screenshots and niri IPC state come out.
+No GPU, TTY or seat required, so it also runs in CI.
 
 ## Quick start
 
@@ -29,6 +29,7 @@ Screenshots go to `e2e/out/`.
 | `key <char>` | click the card for `a`-`z` / `0`-`9` |
 | `mode <name>` | click `switch`, `delete` or `move` |
 | `click <x> <y>` | click anywhere |
+| `type <args...>` | press keys with `wtype`, e.g. `type c` |
 | `escape` | dismiss the overlay |
 | `open` / `closed` | is the overlay mapped, or wait until it is not |
 | `state` | workspaces as JSON |
@@ -86,15 +87,15 @@ settings on that with `add_config` (appends TOML from stdin) and
 `NDW_E2E_SIZE=1920x1080` resizes cage's output with `wlr-randr`; `key` and
 `mode` only know the default size.
 
-## Keyboard input does not work yet
+## Key presses
 
-niri mistranslates keycodes coming from the virtual-keyboard protocol, so a key
-sent with `wtype` arrives as whatever sits at that evdev code in the
-compositor's own layout: `wtype -k c` reaches the overlay as Escape. See
-[niri#3394](https://github.com/niri-wm/niri/issues/3394); the fix is still open
-in [niri#4548](https://github.com/niri-wm/niri/pull/4548). Until it lands the
-tests click cards, which goes through the same `dispatch_action` path as a key
-press. The `escape` verb is correct either way.
+`type` passes its arguments to `wtype`, so it can also hold modifiers
+(`-M ctrl -k c -m ctrl`) or keys (`-P c -s 1500 -p c`). niri applies `wtype`'s
+keymap to the keys it sends, but resends that keymap only when it differs from
+the last one. A new overlay then reads a repeat of the previous call's keycodes
+with the compositor's layout, where the first keycode `wtype` hands out is
+Escape, so `type` sends a throwaway F24 first, which the overlay ignores.
+`escape` is correct either way.
 
 ## Click coordinates
 

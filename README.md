@@ -392,8 +392,9 @@ nix flake check        # evaluate the Home Manager module
 
 ### End-to-end tests
 
-`e2e/` runs the overlay inside a nested headless niri and drives it with clicks
-and screenshots, so the IPC choreography is exercised against a real compositor:
+`e2e/` runs the overlay inside a nested headless niri and drives it with clicks,
+key presses and screenshots, so the IPC choreography is exercised against a real
+compositor:
 
 ```bash
 cargo build
@@ -401,7 +402,7 @@ cargo build
 ```
 
 See [e2e/README.md](e2e/README.md) for the harness verbs, how to drive a session
-by hand, and the current keyboard-injection limitation.
+by hand, and how key presses are injected.
 
 ### Testing against a running daemon
 

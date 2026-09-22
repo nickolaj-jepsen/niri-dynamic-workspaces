@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Drive the overlay inside a nested, headless niri: clicks in, screenshots and state out.
+# Drive the overlay inside a nested, headless niri: clicks and keys in, screenshots and state out.
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -183,6 +183,7 @@ usage: harness.sh <command>
   key <char>       click the card for a-z / 0-9
   mode <name>      click switch | delete | move
   click <x> <y>    click anywhere
+  type <args...>   press keys with wtype (c, -M ctrl -k c, ...)
   escape           dismiss the overlay
   open | closed    is the overlay mapped / wait until it is not
   state            workspaces as JSON
@@ -210,6 +211,9 @@ overlay) in_env "$bin" "${1:-switch}" >>"$run_dir/app.log" 2>&1 &
          wait_for 15 overlay_open || die "overlay did not open"
          # Mapped is not yet laid out; an early click can miss the widget it aims at.
          sleep 0.5 ;;
+type)    # niri resends a virtual keyboard's keymap only when it changes, so a new client would read a
+         # repeated call's keycodes with the compositor's keymap; an F24 first, which the overlay ignores, changes it.
+         in_env wtype -k F24 && in_env wtype "$@" ;;
 escape)  in_env wtype -k Escape ;;
 click)   click_at "$1" "$2" ;;
 key)     click_at $(key_position "$1") ;;
