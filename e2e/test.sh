@@ -11,16 +11,23 @@ focused_ws() { "$h" state | jq -r '.[] | select(.is_focused).name // empty'; }
 ws_id() { "$h" state | jq -r --arg n "$1" '.[] | select(.name == $n) | .id'; }
 
 # Actions run over IPC, so poll rather than assume the next call sees them.
-until_true() {
-    local deadline=$((SECONDS + 5))
+until_true_for() {
+    local deadline=$((SECONDS + $1))
+    shift
     until "$@"; do
         ((SECONDS < deadline)) || return 1
         sleep 0.2
     done
 }
+until_true() { until_true_for 5 "$@"; }
 
 has_ws() { [[ -n $(ws_id "$1") ]]; }
 no_ws() { [[ -z $(ws_id "$1") ]]; }
+
+windows() { "$h" run niri msg -j windows; }
+# move-window acts on the focused window, so a mapped one is not enough.
+has_focused_window() { windows | jq -e 'any(.[]; .is_focused)' >/dev/null; }
+window_on() { [[ $(windows | jq -r '.[0].workspace_id') == "$(ws_id "$1")" ]]; }
 
 test_switch_creates_workspace() {
     "$h" app switch a || return 1
@@ -37,12 +44,9 @@ test_delete_removes_workspace() {
 test_move_window_moves_it() {
     "$h" app switch a || return 1
     "$h" run foot sh -c 'sleep 60' &
-    until_true test -n "$("$h" run niri msg -j windows | jq -r '.[0].id')" || return 1
+    until_true has_focused_window || return 1
     "$h" app move-window b || return 1
-    until_true has_ws dyn-b || return 1
-    local window_ws
-    window_ws=$("$h" run niri msg -j windows | jq -r '.[0].workspace_id')
-    [[ $window_ws == "$(ws_id dyn-b)" ]]
+    until_true window_on dyn-b
 }
 
 test_overlay_card_click_switches() {
