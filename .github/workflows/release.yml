@@ -31,64 +31,14 @@ jobs:
             echo "No release needed: v$version already tagged"
           fi
 
-  build-binaries:
-    needs: check-version
-    if: needs.check-version.outputs.should_release == 'true'
-    strategy:
-      matrix:
-        include:
-          - system: x86_64-linux
-            runner: ubuntu-latest
-          - system: aarch64-linux
-            runner: ubuntu-latest
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: DeterminateSystems/nix-installer-action@main
-        with:
-          extra-conf: |
-            ${{ matrix.system == 'aarch64-linux' && 'extra-platforms = aarch64-linux' || '' }}
-
-      - uses: DeterminateSystems/magic-nix-cache-action@main
-
-      - name: Install QEMU for aarch64
-        if: matrix.system == 'aarch64-linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y qemu-user-static
-
-      - name: Build binary
-        run: nix build .#packages.${{ matrix.system }}.default
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: niri-dynamic-workspaces-${{ matrix.system }}
-          path: result/bin/niri-dynamic-workspaces
-
   create-release:
-    needs: [check-version, build-binaries]
+    needs: check-version
     if: needs.check-version.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
-
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Prepare release assets
-        run: |
-          mkdir -p release
-          for dir in artifacts/niri-dynamic-workspaces-*/; do
-            name=$(basename "$dir")
-            cp "$dir/niri-dynamic-workspaces" "release/$name"
-            chmod +x "release/$name"
-          done
 
       - name: Create release
         env:
@@ -101,12 +51,11 @@ jobs:
           else
             gh release create "$tag" \
               --title "$tag" \
-              --generate-notes \
-              release/*
+              --generate-notes
           fi
 
   publish-crate:
-    needs: [check-version, build-binaries]
+    needs: check-version
     if: needs.check-version.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     steps:
