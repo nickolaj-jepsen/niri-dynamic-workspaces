@@ -36,6 +36,14 @@ in
         pkgs.gtk4-layer-shell
         pkgs.glib
       ];
+
+      meta = {
+        inherit (cargoToml.package) description;
+        homepage = cargoToml.package.repository;
+        license = lib.licenses.gpl3Only;
+        mainProgram = cargoToml.package.name;
+        platforms = lib.platforms.linux;
+      };
     };
   };
 }
