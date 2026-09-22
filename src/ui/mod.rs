@@ -316,6 +316,9 @@ fn follow_compositor(
 /// otherwise keep every closed overlay alive in the daemon. Runs on idle
 /// because close usually fires from inside the `ndw-key` handler.
 fn free_on_close(window: &ApplicationWindow) {
+    // e2e counts these lines to catch the leak coming back.
+    #[cfg(debug_assertions)]
+    window.add_weak_ref_notify_local(|| eprintln!("debug: overlay window freed"));
     window.connect_close_request(|window| {
         let window = window.clone();
         glib::idle_add_local_once(move || {

@@ -16,6 +16,10 @@ nix develop --command ./e2e/harness.sh start   # a session to poke at by hand
 One session at a time lives in `$XDG_RUNTIME_DIR/ndw-e2e`; `stop` tears it down.
 Screenshots go to `e2e/out/`.
 
+The suite drives `target/debug/niri-dynamic-workspaces` (`NDW_BIN` picks
+another binary). Keep it a debug build: `daemon_frees_closed_overlays` counts
+the `debug: overlay window freed` lines only debug builds log.
+
 ## Verbs
 
 | Command | What it does |
