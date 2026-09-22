@@ -77,10 +77,15 @@ tests=(
 
 [[ ${1:-} ]] && tests=("$@")
 
+mkdir -p "$out"
 for name in "${tests[@]}"; do
     if ! "$h" start >/dev/null; then
         echo "not ok - $name (session did not start)"
+        "$h" logs 40 >"$out/fail-$name.log" 2>&1
+        echo "    see $out/fail-$name.log"
         failed=1
+        # A failed start can leave the bus and compositor running.
+        "$h" stop
         continue
     fi
     if "test_$name" >/dev/null 2>&1; then

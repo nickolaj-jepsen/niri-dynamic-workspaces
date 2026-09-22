@@ -26,6 +26,9 @@
         pkgs.wlr-randr
         pkgs.gnome-text-editor
       ];
+
+      # e2e/harness.sh hands this to the nested niri only; exporting the libglvnd variable would override host GL.
+      NDW_E2E_EGL_VENDOR = "${pkgs.mesa}/share/glvnd/egl_vendor.d/50_mesa.json";
     };
   };
 }
