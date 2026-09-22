@@ -126,6 +126,17 @@ test_daemon_deletes_empty_workspaces() {
     until_true_for 15 no_ws dyn-b && has_ws dyn-a && has_ws dyn-c
 }
 
+# overlays_freed <n>: debug builds log a line each time an overlay window is disposed.
+overlays_freed() { [[ $("$h" logs 1000 | grep -c "debug: overlay window freed") -eq $1 ]]; }
+
+test_daemon_frees_closed_overlays() {
+    "$h" daemon || return 1
+    for _ in 1 2 3; do
+        "$h" overlay switch && "$h" escape && "$h" closed || return 1
+    done
+    until_true overlays_freed 3
+}
+
 tests=(
     switch_creates_workspace
     delete_removes_workspace
@@ -136,6 +147,7 @@ tests=(
     overlay_delete_mode
     daemon_serves_invocations
     daemon_deletes_empty_workspaces
+    daemon_frees_closed_overlays
 )
 
 [[ ${1:-} ]] && tests=("$@")
