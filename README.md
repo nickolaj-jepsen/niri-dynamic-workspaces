@@ -39,6 +39,7 @@ programs.niri-dynamic-workspaces = {
   settings = {
     general.workspace_prefix = "dyn-";
   };
+  checkConfig = true;             # default — fail the build on config problems
   # Optional: a theme file, written next to the config and selected for you
   themeCss = ''
     window { --accent: #89b4fa; }
@@ -48,7 +49,10 @@ programs.niri-dynamic-workspaces = {
 
 The module installs the package (`package` picks another build), writes the
 config file from `settings` (the keys under [Configuration](#configuration)) and
-runs the daemon.
+runs the daemon. Building the config file runs `niri-dynamic-workspaces check`
+on it, so a config error or warning, such as a misspelled key, fails
+`home-manager switch` and names the problem. `checkConfig = false` skips the
+check, for example to keep a config that a newer version warns about.
 
 The keybinds go into `programs.niri.settings.binds` when the Home Manager module
 from [sodiboo/niri-flake](https://github.com/sodiboo/niri-flake) is loaded
@@ -538,8 +542,9 @@ programs.niri-dynamic-workspaces.daemon = false;
 
 Config problems are shown on a line under the overlay's hints and printed in
 the invoking terminal; a file that does not parse falls back to the defaults.
-`niri-dynamic-workspaces check` lists every problem. The daemon logs to stderr,
-which for the Home Manager service is
+`niri-dynamic-workspaces check` lists every problem. With the Home Manager
+module, the same problems fail the build (see `checkConfig`). The daemon logs to
+stderr, which for the Home Manager service is
 `journalctl --user -u niri-dynamic-workspaces`.
 
 ## Development

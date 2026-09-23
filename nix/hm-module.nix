@@ -10,6 +10,13 @@
       cfg = config.programs.niri-dynamic-workspaces;
       tomlFormat = pkgs.formats.toml { };
 
+      configToml = tomlFormat.generate "config.toml" cfg.settings;
+      # `check` exits non-zero on any config error or warning, failing the build.
+      checkedConfigToml = pkgs.runCommandLocal "niri-dynamic-workspaces-config.toml" { } ''
+        ${cfg.package}/bin/niri-dynamic-workspaces check --config ${configToml}
+        cp ${configToml} $out
+      '';
+
       niriBinds = lib.listToAttrs (map
         ({ key, args, title }: lib.nameValuePair key {
           action.spawn = [ "${cfg.package}/bin/niri-dynamic-workspaces" ] ++ args;
@@ -70,14 +77,27 @@
           description = ''
             Configuration written to
             {file}`$XDG_CONFIG_HOME/niri-dynamic-workspaces/config.toml`.
-            See Configuration in README.md for the options;
-            `niri-dynamic-workspaces check` lists any problems.
+            See Configuration in README.md for the options, and
+            {option}`programs.niri-dynamic-workspaces.checkConfig` for how
+            they are validated.
           '';
           example = lib.literalExpression ''
             {
               general.workspace_prefix = "ws-";
               general.layout = "dvorak";
             }
+          '';
+        };
+
+        checkConfig = lib.mkOption {
+          type = lib.types.bool;
+          default = true;
+          description = ''
+            Run `niri-dynamic-workspaces check` on the generated config when
+            it is built, so any config error or warning, such as a misspelled
+            key, fails the build. Turn it off to accept a config that a newer
+            version warns about, or when the package cannot run on the build
+            machine (cross-compiling).
           '';
         };
 
@@ -130,7 +150,7 @@
 
           xdg.configFile."niri-dynamic-workspaces/config.toml" =
             lib.mkIf (cfg.settings != { }) {
-              source = tomlFormat.generate "config.toml" cfg.settings;
+              source = if cfg.checkConfig then checkedConfigToml else configToml;
             };
         }
         # programs.niri.settings exists only with niri-flake, and any definition makes it
