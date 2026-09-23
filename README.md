@@ -424,7 +424,19 @@ Pass a workspace key to act immediately without opening the overlay:
 niri-dynamic-workspaces switch a        # switch to / create dyn-a
 niri-dynamic-workspaces delete a        # close dyn-a's windows, then delete it
 niri-dynamic-workspaces move-window a   # move focused window to dyn-a
+
+# create dyn-p from a template "code" whose variables are project and branch
+niri-dynamic-workspaces switch p --template code --var project=~/dev/app --var branch=main
+niri-dynamic-workspaces switch t --title Notes   # create dyn-t titled "Notes"
 ```
+
+A direct `switch` never shows the template picker. `--template NAME` creates
+the workspace from a template, and every variable it declares must be given
+with `--var NAME=VALUE`; a `dir` variable's value may start with `~/`. The title
+comes from the template (see [Templates](#templates)) unless `--title` sets one,
+also without a template; `--title ""` leaves the workspace untitled. The flags
+only apply when the workspace is created: when it exists, `switch` focuses it
+and says so.
 
 Errors and config warnings are printed in the invoking terminal, and a failed
 action exits non-zero, also when a daemon handles the call. A relative

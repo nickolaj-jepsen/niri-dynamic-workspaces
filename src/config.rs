@@ -1425,6 +1425,14 @@ pub fn load_config(path_override: Option<&Path>) -> ResolvedConfig {
     from_contents(&path, &read_config(&path, path_override.is_some()))
 }
 
+/// Resolve config `text`, which must parse: the config and its warnings.
+#[cfg(test)]
+pub(crate) fn resolve_toml(text: &str) -> (ResolvedConfig, Vec<String>) {
+    toml::from_str::<Config>(text)
+        .expect("test config parses")
+        .resolve()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

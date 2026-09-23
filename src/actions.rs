@@ -9,14 +9,102 @@ use anyhow::Context as _;
 use gtk4::gio;
 use gtk4::prelude::*;
 
-use crate::config::{self, ResolvedConfig};
+use crate::config::{self, ResolvedConfig, Select, VariableType};
 use crate::niri;
 
 /// Template context passed to on-create hooks.
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct HookInfo {
     pub template_name: Option<String>,
     pub variables: HashMap<String, String>,
+}
+
+/// How to create a workspace: the arguments of [`switch_workspace`].
+#[derive(Debug)]
+pub struct CreateRequest {
+    pub ws_name: String,
+    pub programs: Vec<String>,
+    pub hook_info: HookInfo,
+}
+
+/// Resolve how the CLI creates the workspace for `ch`: from `template`
+/// filled with `vars` (`NAME`, `VALUE` pairs, the last one winning), or
+/// from the key's own programs.
+///
+/// `title` replaces the template's title, and a blank one leaves the
+/// workspace untitled.
+///
+/// # Errors
+/// When `template` does not exist, when `vars` are given without a
+/// template, name a variable the template lacks, or miss one it declares.
+pub fn resolve_create_request(
+    config: &ResolvedConfig,
+    ch: char,
+    template: Option<&str>,
+    vars: &[(String, String)],
+    title: Option<&str>,
+) -> anyhow::Result<CreateRequest> {
+    let title = title.map(str::trim);
+    let Some(name) = template else {
+        anyhow::ensure!(vars.is_empty(), "--var needs a template");
+        return Ok(CreateRequest {
+            ws_name: config::workspace_name_with_title(&config.workspace_prefix, ch, title),
+            programs: config.programs_for(ch).to_vec(),
+            hook_info: HookInfo::default(),
+        });
+    };
+    let Some(template) = config.templates.iter().find(|t| t.name == name) else {
+        let known: Vec<&str> = config.templates.iter().map(|t| t.name.as_str()).collect();
+        if known.is_empty() {
+            anyhow::bail!("unknown template '{name}': no templates are configured");
+        }
+        anyhow::bail!("unknown template '{name}' (known: {})", known.join(", "));
+    };
+
+    let declared: Vec<&str> = template.variables.iter().map(|v| v.name.as_str()).collect();
+    let mut values: HashMap<String, String> = HashMap::new();
+    for (var, value) in vars {
+        let Some(declared) = template.variables.iter().find(|v| v.name == *var) else {
+            anyhow::bail!(
+                "template '{name}' has no variable '{var}' (it has: {})",
+                if declared.is_empty() {
+                    "none".to_string()
+                } else {
+                    declared.join(", ")
+                }
+            );
+        };
+        let value = match declared.var_type {
+            VariableType::Select(Select::Dirs { .. }) => config::expand_tilde(value),
+            _ => value.clone(),
+        };
+        values.insert(var.clone(), value);
+    }
+    let missing: Vec<&str> = declared
+        .iter()
+        .copied()
+        .filter(|v| !values.contains_key(*v))
+        .collect();
+    anyhow::ensure!(
+        missing.is_empty(),
+        "template '{name}' needs --var for: {}",
+        missing.join(", ")
+    );
+
+    let title = match title {
+        Some(title) => Some(title.to_string()),
+        None => {
+            config::resolve_workspace_title(template.title.as_deref(), &template.variables, &values)
+        }
+    };
+    Ok(CreateRequest {
+        ws_name: config::workspace_name_with_title(&config.workspace_prefix, ch, title.as_deref()),
+        programs: template.programs.clone(),
+        hook_info: HookInfo {
+            template_name: Some(template.name.clone()),
+            variables: values,
+        },
+    })
 }
 
 /// Switch to a workspace (creating it if needed), spawn its programs, and run
@@ -138,4 +226,178 @@ fn spawn_reorder(app: &gtk4::Application, request: niri::ReorderRequest) {
         let _ = gio::spawn_blocking(move || niri::reorder_workspace_columns(&request)).await;
         drop(guard);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Templates for [`resolve_create_request`]: `dev` with a dir variable and
+    /// a title, `note` with one text variable, `beta` with none.
+    const TEMPLATES: &str = r#"
+[workspace.a]
+programs = ["firefox"]
+
+[template.dev]
+programs = ["code {{project}}", "kitty {{branch}}"]
+title = "dev: {{project|basename}}"
+
+[template.dev.variables.project]
+name = "Project"
+type = "dir"
+dirs = ["~/dev"]
+
+[template.dev.variables.branch]
+name = "Branch"
+
+[template.note]
+programs = ["gnome-text-editor {{topic}}"]
+
+[template.note.variables.topic]
+name = "Topic"
+
+[template.beta]
+programs = ["true"]
+title = "BETA"
+"#;
+
+    fn request(
+        ch: char,
+        template: Option<&str>,
+        vars: &[(&str, &str)],
+        title: Option<&str>,
+    ) -> anyhow::Result<CreateRequest> {
+        let (config, warnings) = config::resolve_toml(TEMPLATES);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let vars: Vec<(String, String)> = vars
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        resolve_create_request(&config, ch, template, &vars, title)
+    }
+
+    fn error(result: anyhow::Result<CreateRequest>) -> String {
+        result.unwrap_err().to_string()
+    }
+
+    #[test]
+    fn create_request_plain_key_uses_key_programs_and_title() {
+        let req = request('a', None, &[], None).unwrap();
+        assert_eq!(req.ws_name, "dyn-a");
+        assert_eq!(req.programs, ["firefox"]);
+        assert_eq!(req.hook_info, HookInfo::default());
+
+        let req = request('a', None, &[], Some(" Notes ")).unwrap();
+        assert_eq!(req.ws_name, "dyn-a Notes");
+        assert!(request('b', None, &[], None).unwrap().programs.is_empty());
+    }
+
+    #[test]
+    fn create_request_template_resolves_title_programs_and_hook_info() {
+        let req = request(
+            'p',
+            Some("dev"),
+            &[
+                ("project", "/home/u/old"),
+                ("branch", "main"),
+                ("project", "/home/u/proj"),
+            ],
+            None,
+        )
+        .unwrap();
+        assert_eq!(req.ws_name, "dyn-p dev: proj");
+        // Placeholders are filled in by switch_workspace.
+        assert_eq!(req.programs, ["code {{project}}", "kitty {{branch}}"]);
+        assert_eq!(req.hook_info.template_name.as_deref(), Some("dev"));
+        assert_eq!(
+            req.hook_info.variables,
+            HashMap::from([
+                ("project".to_string(), "/home/u/proj".to_string()),
+                ("branch".to_string(), "main".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn create_request_auto_title_from_first_variable() {
+        let req = request('n', Some("note"), &[("topic", "groceries")], None).unwrap();
+        assert_eq!(req.ws_name, "dyn-n groceries");
+    }
+
+    #[test]
+    fn create_request_title_override_wins_and_empty_clears() {
+        let vars = [("topic", "groceries")];
+        let req = request('n', Some("note"), &vars, Some("Shopping")).unwrap();
+        assert_eq!(req.ws_name, "dyn-n Shopping");
+        let req = request('n', Some("note"), &vars, Some(" ")).unwrap();
+        assert_eq!(req.ws_name, "dyn-n");
+    }
+
+    #[test]
+    fn create_request_template_without_variables_uses_raw_title() {
+        let req = request('b', Some("beta"), &[], None).unwrap();
+        assert_eq!(req.ws_name, "dyn-b BETA");
+        assert_eq!(req.programs, ["true"]);
+        assert!(req.hook_info.variables.is_empty());
+    }
+
+    #[test]
+    fn create_request_unknown_template_lists_known() {
+        assert_eq!(
+            error(request('a', Some("Dev"), &[], None)),
+            "unknown template 'Dev' (known: dev, note, beta)"
+        );
+        let (config, _) = config::resolve_toml("");
+        assert_eq!(
+            error(resolve_create_request(&config, 'a', Some("dev"), &[], None)),
+            "unknown template 'dev': no templates are configured"
+        );
+    }
+
+    #[test]
+    fn create_request_missing_variable_errors() {
+        assert_eq!(
+            error(request('p', Some("dev"), &[], None)),
+            "template 'dev' needs --var for: project, branch"
+        );
+        assert_eq!(
+            error(request('p', Some("dev"), &[("branch", "main")], None)),
+            "template 'dev' needs --var for: project"
+        );
+    }
+
+    #[test]
+    fn create_request_undeclared_variable_errors() {
+        assert_eq!(
+            error(request('p', Some("note"), &[("project", "x")], None)),
+            "template 'note' has no variable 'project' (it has: topic)"
+        );
+        assert_eq!(
+            error(request('b', Some("beta"), &[("x", "y")], None)),
+            "template 'beta' has no variable 'x' (it has: none)"
+        );
+    }
+
+    #[test]
+    fn create_request_var_without_template_errors() {
+        assert_eq!(
+            error(request('a', None, &[("topic", "x")], None)),
+            "--var needs a template"
+        );
+    }
+
+    #[test]
+    fn create_request_dir_value_expands_tilde() {
+        let req = request(
+            'p',
+            Some("dev"),
+            &[("project", "~/dev/app"), ("branch", "~/x")],
+            None,
+        )
+        .unwrap();
+        let vars = &req.hook_info.variables;
+        assert_eq!(vars["project"], config::expand_tilde("~/dev/app"));
+        // Only dir variables name paths.
+        assert_eq!(vars["branch"], "~/x");
+    }
 }
