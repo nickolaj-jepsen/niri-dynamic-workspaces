@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use gdk4::{Key, ModifierType};
 use serde::Deserialize;
@@ -142,6 +143,49 @@ pub struct ResolvedConfig {
     pub theme: Theme,
     pub templates: Vec<Template>,
     pub hooks: HookConfig,
+    /// Problems found while loading; the config falls back to defaults where they apply.
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Severity {
+    /// The file could not be used; the whole config fell back to defaults.
+    Error,
+    /// One setting was ignored or replaced by its default.
+    Warning,
+}
+
+/// A config problem to show the user.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Diagnostic {
+    pub severity: Severity,
+    pub message: String,
+}
+
+impl Diagnostic {
+    fn error(message: impl Into<String>) -> Self {
+        Self {
+            severity: Severity::Error,
+            message: message.into(),
+        }
+    }
+
+    fn warning(message: impl Into<String>) -> Self {
+        Self {
+            severity: Severity::Warning,
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for Diagnostic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let label = match self.severity {
+            Severity::Error => "config error",
+            Severity::Warning => "config warning",
+        };
+        write!(f, "{label}: {}", self.message)
+    }
 }
 
 /// A palette compiled into the binary from `themes/<name>.css`.
@@ -676,6 +720,7 @@ impl Config {
                 on_create: self.hooks.on_create,
                 on_delete: self.hooks.on_delete,
             },
+            diagnostics: Vec::new(),
         };
 
         (resolved, warnings)
@@ -909,13 +954,77 @@ fn default_config() -> ResolvedConfig {
 }
 
 /// Resolve the config file location: the override if given, else the XDG default.
-fn config_path(path_override: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
-    path_override.map(std::path::Path::to_path_buf).or_else(|| {
+fn config_path(path_override: Option<&Path>) -> Option<PathBuf> {
+    path_override.map(Path::to_path_buf).or_else(|| {
         dirs::config_dir().map(|dir| dir.join("niri-dynamic-workspaces").join("config.toml"))
     })
 }
 
-fn file_mtime(path: &std::path::Path) -> Option<std::time::SystemTime> {
+/// Read the config file: `Ok(None)` when it does not exist, `Err` with a
+/// user-facing message on any other I/O failure.
+fn read_config(path: &Path) -> Result<Option<String>, String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!(
+            "could not read {}: {e}, using defaults",
+            path.display()
+        )),
+    }
+}
+
+/// Resolve the result of [`read_config`] for `path`.
+fn from_contents(path: &Path, read: &Result<Option<String>, String>) -> ResolvedConfig {
+    match read {
+        Ok(Some(text)) => parse_config(text, path),
+        Ok(None) => default_config(),
+        Err(message) => {
+            let mut config = default_config();
+            config.diagnostics.push(Diagnostic::error(message.as_str()));
+            config
+        }
+    }
+}
+
+/// Parse and resolve config text read from `path`, which anchors relative theme paths.
+///
+/// Text that does not parse yields the defaults plus one error diagnostic.
+fn parse_config(text: &str, path: &Path) -> ResolvedConfig {
+    let config: Config = match toml::from_str(text) {
+        Ok(config) => config,
+        Err(e) => {
+            let mut config = default_config();
+            config.diagnostics.push(Diagnostic::error(format!(
+                "could not parse {}: {}, using defaults",
+                path.display(),
+                toml_error_summary(&e, text)
+            )));
+            return config;
+        }
+    };
+    let (mut resolved, warnings) = config.resolve();
+    resolved
+        .diagnostics
+        .extend(warnings.into_iter().map(Diagnostic::warning));
+    if let (Theme::File(theme), Some(dir)) = (&mut resolved.theme, path.parent()) {
+        *theme = dir.join(&*theme);
+    }
+    resolved
+}
+
+/// `line L, column C: <message>` for a TOML error in `text`; just the message
+/// when the error has no position.
+fn toml_error_summary(e: &toml::de::Error, text: &str) -> String {
+    let Some(span) = e.span() else {
+        return e.message().to_string();
+    };
+    let before = text.get(..span.start).unwrap_or("");
+    let line = before.matches('\n').count() + 1;
+    let column = before.rsplit('\n').next().unwrap_or("").chars().count() + 1;
+    format!("line {line}, column {column}: {}", e.message())
+}
+
+fn file_mtime(path: &Path) -> Option<std::time::SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
@@ -926,9 +1035,12 @@ fn file_mtime(path: &std::path::Path) -> Option<std::time::SystemTime> {
 /// is reloaded whenever its mtime changes, so daemon behavior follows config
 /// edits without a restart.
 pub fn cleanup_prefix_source(
-    path_override: Option<&std::path::Path>,
+    path_override: Option<&Path>,
 ) -> impl FnMut() -> Option<String> + Send + 'static {
     let mut current = load_config(path_override);
+    for d in &current.diagnostics {
+        eprintln!("{d}");
+    }
     let path = config_path(path_override);
     let mut last_mtime = path.as_deref().and_then(file_mtime);
     move || {
@@ -937,6 +1049,9 @@ pub fn cleanup_prefix_source(
             if mtime != last_mtime {
                 last_mtime = mtime;
                 current = load_config(Some(p));
+                for d in &current.diagnostics {
+                    eprintln!("{d}");
+                }
             }
         }
         current
@@ -945,45 +1060,20 @@ pub fn cleanup_prefix_source(
     }
 }
 
-pub fn load_config(path_override: Option<&std::path::Path>) -> ResolvedConfig {
-    let Some(config_path) = config_path(path_override) else {
-        eprintln!("warning: could not determine config directory, using defaults");
-        return default_config();
+/// Load the config from `path_override` or the default location.
+///
+/// Never fails and prints nothing: problems land in
+/// [`ResolvedConfig::diagnostics`], and whatever they affect falls back to
+/// the defaults.
+pub fn load_config(path_override: Option<&Path>) -> ResolvedConfig {
+    let Some(path) = config_path(path_override) else {
+        let mut config = default_config();
+        config.diagnostics.push(Diagnostic::warning(
+            "could not determine the config directory, using defaults",
+        ));
+        return config;
     };
-
-    let contents = match std::fs::read_to_string(&config_path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return default_config();
-        }
-        Err(e) => {
-            eprintln!(
-                "warning: could not read {}: {e}, using defaults",
-                config_path.display()
-            );
-            return default_config();
-        }
-    };
-
-    let config: Config = match toml::from_str(&contents) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!(
-                "warning: could not parse {}: {e}, using defaults",
-                config_path.display()
-            );
-            return default_config();
-        }
-    };
-
-    let (mut resolved, warnings) = config.resolve();
-    for w in &warnings {
-        eprintln!("config warning: {w}");
-    }
-    if let (Theme::File(path), Some(dir)) = (&mut resolved.theme, config_path.parent()) {
-        *path = dir.join(&*path);
-    }
-    resolved
+    from_contents(&path, &read_config(&path))
 }
 
 #[cfg(test)]
@@ -1834,6 +1924,125 @@ programs = ["firefox"]
         assert!(build_argv("code 'unclosed", &HashMap::new()).is_err());
     }
 
+    // --- load_config and diagnostics ---
+
+    /// Write `contents` to a per-process temp file named after `tag`.
+    fn temp_config(tag: &str, contents: &str) -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("ndw-config-test-{}-{tag}.toml", std::process::id()));
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    #[test]
+    fn parse_config_syntax_error_is_error() {
+        let config = parse_config("[general\n", Path::new("/cfg/config.toml"));
+        assert_eq!(config.workspace_prefix, "dyn-");
+        assert_eq!(config.diagnostics.len(), 1, "{:?}", config.diagnostics);
+        let d = &config.diagnostics[0];
+        assert_eq!(d.severity, Severity::Error);
+        assert!(d.message.contains("/cfg/config.toml"), "{}", d.message);
+        assert!(d.message.contains("line 1, column 9"), "{}", d.message);
+    }
+
+    #[test]
+    fn parse_config_type_error_reports_position() {
+        let config = parse_config(
+            "[general]\nauto_delete_empty = \"no\"\n",
+            Path::new("config.toml"),
+        );
+        assert!(config.auto_delete_empty);
+        assert_eq!(config.diagnostics.len(), 1, "{:?}", config.diagnostics);
+        let d = &config.diagnostics[0];
+        assert_eq!(d.severity, Severity::Error);
+        assert!(d.message.contains("line 2, column 21"), "{}", d.message);
+        assert!(d.message.contains("expected a boolean"), "{}", d.message);
+    }
+
+    #[test]
+    fn parse_config_resolve_warnings_become_diagnostics() {
+        let config = parse_config("[general]\nlayout = \"workman\"\n", Path::new("c.toml"));
+        assert_eq!(
+            config.diagnostics,
+            vec![Diagnostic::warning(
+                "unknown layout 'workman', defaulting to qwerty"
+            )]
+        );
+    }
+
+    #[test]
+    fn parse_config_clean_file_has_no_diagnostics() {
+        let config = parse_config(
+            "[general]\nworkspace_prefix = \"ws-\"\n",
+            Path::new("c.toml"),
+        );
+        assert_eq!(config.workspace_prefix, "ws-");
+        assert!(config.diagnostics.is_empty(), "{:?}", config.diagnostics);
+    }
+
+    #[test]
+    fn parse_config_anchors_theme_file_at_config_dir() {
+        let config = parse_config(
+            "[general]\ntheme = \"mine.css\"\n",
+            Path::new("/cfg/c.toml"),
+        );
+        assert_eq!(config.theme, Theme::File("/cfg/mine.css".into()));
+    }
+
+    #[test]
+    fn toml_error_summary_without_span_uses_message() {
+        let e = <toml::de::Error as serde::de::Error>::custom("boom");
+        assert_eq!(toml_error_summary(&e, "anything"), "boom");
+    }
+
+    #[test]
+    fn toml_error_summary_counts_characters_not_bytes() {
+        let text = "[general]\nlayout = \"æøå\" x\n";
+        let e = toml::from_str::<Config>(text).err().unwrap();
+        assert!(
+            toml_error_summary(&e, text).starts_with("line 2, column 16:"),
+            "{}",
+            toml_error_summary(&e, text)
+        );
+    }
+
+    #[test]
+    fn diagnostic_display_prefixes() {
+        assert_eq!(
+            Diagnostic::error("bad").to_string(),
+            "config error: bad".to_string()
+        );
+        assert_eq!(
+            Diagnostic::warning("odd").to_string(),
+            "config warning: odd".to_string()
+        );
+    }
+
+    #[test]
+    fn read_config_missing_file_is_none() {
+        let path = temp_config("missing", "");
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(read_config(&path), Ok(None));
+    }
+
+    #[test]
+    fn read_config_unreadable_path_is_error() {
+        // A directory exists but cannot be read as a file.
+        let err = read_config(&std::env::temp_dir()).unwrap_err();
+        assert!(err.contains("could not read"), "{err}");
+        let config = from_contents(Path::new("dir"), &Err(err));
+        assert_eq!(config.diagnostics[0].severity, Severity::Error);
+    }
+
+    #[test]
+    fn load_config_reads_file() {
+        let path = temp_config("reads", "[general]\nworkspace_prefix = \"rd-\"\n");
+        let config = load_config(Some(&path));
+        std::fs::remove_file(&path).ok();
+        assert_eq!(config.workspace_prefix, "rd-");
+        assert!(config.diagnostics.is_empty(), "{:?}", config.diagnostics);
+    }
+
     // --- cleanup_prefix_source ---
 
     #[test]
@@ -2206,6 +2415,7 @@ type = "text"
                 on_create: global_hooks,
                 on_delete: Vec::new(),
             },
+            diagnostics: Vec::new(),
         }
     }
 

@@ -77,6 +77,9 @@ fn handle_direct_action(app: &gtk4::Application, cli: &Cli, mode: ui::Mode, key:
     };
 
     let cfg = config::load_config(cli.config.as_deref());
+    for d in &cfg.diagnostics {
+        eprintln!("{d}");
+    }
 
     // Statically mapped key: act on the pinned workspace directly.
     if let Some(target) = cfg.static_workspaces.get(&ch) {
@@ -123,6 +126,9 @@ fn handle_direct_action(app: &gtk4::Application, cli: &Cli, mode: ui::Mode, key:
 
 fn handle_overlay(app: &gtk4::Application, cli: &Cli, mode: ui::Mode) -> i32 {
     let cfg = Rc::new(config::load_config(cli.config.as_deref()));
+    for d in &cfg.diagnostics {
+        eprintln!("{d}");
+    }
 
     if let Some(window) = app.active_window() {
         let same_mode = ui::Mode::from_window(&window) == Some(mode);
