@@ -128,6 +128,15 @@ test_move_window_moves_it() {
     until_true window_on dyn-b
 }
 
+# Once to an existing workspace (moved by name), once to a new one (by id).
+test_move_window_no_follow() {
+    "$h" app switch b && "$h" app switch a && spawn_window one && spawn_window two || return 1
+    "$h" app move-window b --no-follow && until_true window_on dyn-b two || return 1
+    # The second move takes the focused window from niri's state, which trails the first move.
+    until_true has_focused_window one && "$h" app move-window c --no-follow || return 1
+    until_true window_on dyn-c one && stays_focused dyn-a 1
+}
+
 test_move_window_without_window_creates_nothing() {
     local err status
     "$h" app switch a || return 1
@@ -725,6 +734,7 @@ tests=(
     delete_closes_windows_before_unnaming
     delete_keeps_workspace_with_open_window
     move_window_moves_it
+    move_window_no_follow
     move_window_without_window_creates_nothing
     hooks_outlive_the_process
     move_window_runs_create_hooks

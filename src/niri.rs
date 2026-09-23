@@ -510,17 +510,23 @@ fn match_windows(commands: &[Vec<String>], windows: &[Window]) -> Vec<Option<u64
     slots
 }
 
-/// Move a window to an existing workspace by id; `None` moves the focused window.
-pub fn move_window_to_workspace_by_id(id: u64, window_id: Option<u64>) -> anyhow::Result<()> {
+/// Move a window to an existing workspace by id; `None` moves the focused
+/// window. With `follow`, focus goes along with a focused window.
+pub fn move_window_to_workspace_by_id(
+    id: u64,
+    window_id: Option<u64>,
+    follow: bool,
+) -> anyhow::Result<()> {
     send_action(Action::MoveWindowToWorkspace {
         window_id,
         reference: WorkspaceReferenceArg::Id(id),
-        focus: true,
+        focus: follow,
     })
 }
 
 /// Move a window to a workspace, creating it as `full_name` if it doesn't
-/// exist; `None` moves the focused window.
+/// exist; `None` moves the focused window. With `follow`, focus goes along
+/// with a focused window; otherwise it stays on the current workspace.
 ///
 /// Returns whether a new workspace was named.
 ///
@@ -531,8 +537,9 @@ pub fn move_window_to_workspace(
     ch: char,
     full_name: &str,
     window_id: Option<u64>,
+    follow: bool,
 ) -> anyhow::Result<bool> {
-    move_window_impl(&mut SocketClient, prefix, ch, full_name, window_id)
+    move_window_impl(&mut SocketClient, prefix, ch, full_name, window_id, follow)
 }
 
 fn move_window_impl(
@@ -541,6 +548,7 @@ fn move_window_impl(
     ch: char,
     full_name: &str,
     window_id: Option<u64>,
+    follow: bool,
 ) -> anyhow::Result<bool> {
     let workspaces = list_workspaces_with(client)?;
     let window_id = match window_id {
@@ -567,10 +575,46 @@ fn move_window_impl(
         Action::MoveWindowToWorkspace {
             window_id: Some(window_id),
             reference,
-            focus: true,
+            focus: follow,
         },
     )?;
     Ok(created)
+}
+
+/// Move the dynamic workspace for `ch` onto the focused output, unless it is
+/// already there or does not exist. niri places it after that output's
+/// active workspace without focusing it, and keeps it there when its old
+/// output reconnects.
+pub fn move_workspace_to_focused_output(prefix: &str, ch: char) -> anyhow::Result<()> {
+    move_workspace_to_focused_output_impl(&mut SocketClient, prefix, ch)
+}
+
+fn move_workspace_to_focused_output_impl(
+    client: &mut impl NiriClient,
+    prefix: &str,
+    ch: char,
+) -> anyhow::Result<()> {
+    let workspaces = list_workspaces_with(client)?;
+    let focused_output = workspaces
+        .iter()
+        .find(|w| w.is_focused)
+        .and_then(|w| w.output.as_deref());
+    let (Some(output), Some(ws)) = (
+        focused_output,
+        find_workspace_by_char(&workspaces, prefix, ch),
+    ) else {
+        return Ok(());
+    };
+    if ws.output.as_deref() == Some(output) {
+        return Ok(());
+    }
+    send_action_with(
+        client,
+        Action::MoveWorkspaceToMonitor {
+            output: output.to_string(),
+            reference: Some(WorkspaceReferenceArg::Id(ws.id)),
+        },
+    )
 }
 
 /// The workspace a command acts on.
@@ -1704,7 +1748,7 @@ mod tests {
             Response::Handled,
         ]);
 
-        let created = move_window_impl(&mut client, "dyn-", 'a', "dyn-a", None).unwrap();
+        let created = move_window_impl(&mut client, "dyn-", 'a', "dyn-a", None, true).unwrap();
 
         assert!(!created);
         assert_eq!(client.sent.len(), 2);
@@ -1726,7 +1770,7 @@ mod tests {
             Response::Handled,
         ]);
 
-        let created = move_window_impl(&mut client, "dyn-", 'a', "dyn-a", None).unwrap();
+        let created = move_window_impl(&mut client, "dyn-", 'a', "dyn-a", None, true).unwrap();
 
         assert!(created);
         assert_eq!(client.sent.len(), 3);
@@ -1759,7 +1803,7 @@ mod tests {
         workspaces[0].active_window_id = None;
         let mut client = MockClient::new(vec![Response::Workspaces(workspaces)]);
 
-        let err = move_window_impl(&mut client, "dyn-", 'x', "dyn-x", None).unwrap_err();
+        let err = move_window_impl(&mut client, "dyn-", 'x', "dyn-x", None, true).unwrap_err();
 
         assert!(err.to_string().contains("no focused window"), "{err}");
         assert_eq!(client.sent.len(), 1);
@@ -1773,7 +1817,7 @@ mod tests {
             Response::Handled,
         ]);
 
-        move_window_impl(&mut client, "dyn-", 'a', "dyn-a", Some(7)).unwrap();
+        move_window_impl(&mut client, "dyn-", 'a', "dyn-a", Some(7), true).unwrap();
 
         assert_eq!(client.sent.len(), 3);
         assert!(matches!(
@@ -1796,9 +1840,93 @@ mod tests {
             Response::Handled,
         ]);
 
-        move_window_impl(&mut client, "dyn-", 'a', "dyn-a", Some(7)).unwrap();
+        move_window_impl(&mut client, "dyn-", 'a', "dyn-a", Some(7), true).unwrap();
 
         assert_eq!(client.sent.len(), 3);
+    }
+
+    #[test]
+    fn move_window_no_follow_sends_focus_false() {
+        for (workspaces, reference) in [
+            (
+                vec![
+                    test_workspace(1, Some("dyn-a"), false),
+                    workspaces_with_trailing_empty().remove(0),
+                ],
+                WorkspaceReferenceArg::Name("dyn-a".to_string()),
+            ),
+            (
+                workspaces_with_trailing_empty(),
+                WorkspaceReferenceArg::Id(2),
+            ),
+        ] {
+            let mut client = MockClient::new(vec![
+                Response::Workspaces(workspaces),
+                Response::Handled,
+                Response::Handled,
+            ]);
+
+            move_window_impl(&mut client, "dyn-", 'a', "dyn-a", None, false).unwrap();
+
+            let last = client.sent.last().unwrap();
+            assert!(
+                matches!(
+                    last,
+                    Request::Action(Action::MoveWindowToWorkspace {
+                        window_id: Some(100),
+                        reference: r,
+                        focus: false,
+                    }) if *r == reference
+                ),
+                "{last:?}"
+            );
+        }
+    }
+
+    /// Focused workspace 1 on DP-1 and `dyn-a` (id 2) on `output`.
+    fn dyn_a_on(output: &str) -> Vec<Workspace> {
+        let mut dyn_a = test_workspace(2, Some("dyn-a Notes"), false);
+        dyn_a.output = Some(output.to_string());
+        vec![test_workspace(1, Some("browser"), true), dyn_a]
+    }
+
+    fn bring_here(workspaces: Vec<Workspace>, ch: char) -> Vec<Request> {
+        let mut client = MockClient::new(vec![Response::Workspaces(workspaces), Response::Handled]);
+        move_workspace_to_focused_output_impl(&mut client, "dyn-", ch).unwrap();
+        client.sent
+    }
+
+    #[test]
+    fn bring_here_moves_workspace_from_other_output() {
+        let sent = bring_here(dyn_a_on("HDMI-A-1"), 'a');
+        assert_eq!(sent.len(), 2);
+        assert!(
+            matches!(
+                &sent[1],
+                Request::Action(Action::MoveWorkspaceToMonitor {
+                    output,
+                    reference: Some(WorkspaceReferenceArg::Id(2)),
+                }) if output == "DP-1"
+            ),
+            "{sent:?}"
+        );
+    }
+
+    #[test]
+    fn bring_here_noop_when_already_on_focused_output() {
+        assert_eq!(bring_here(dyn_a_on("DP-1"), 'a').len(), 1);
+    }
+
+    #[test]
+    fn bring_here_noop_when_missing() {
+        assert_eq!(bring_here(dyn_a_on("HDMI-A-1"), 'b').len(), 1);
+    }
+
+    #[test]
+    fn bring_here_noop_without_focused_workspace() {
+        let mut workspaces = dyn_a_on("HDMI-A-1");
+        workspaces[0].is_focused = false;
+        assert_eq!(bring_here(workspaces, 'a').len(), 1);
     }
 
     #[test]
