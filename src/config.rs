@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use gdk4::{Key, ModifierType};
 use serde::Deserialize;
 
+use crate::niri::CleanupConfig;
+
 // --- Serde structs (TOML representation) ---
 
 #[derive(Default, Deserialize)]
@@ -1134,16 +1136,16 @@ fn print_diagnostics(config: &ResolvedConfig) {
     }
 }
 
-/// Build the cleanup-prefix source for the daemon's cleanup loop.
+/// Build the config source for the daemon's cleanup loop.
 ///
-/// The returned closure yields the current workspace prefix while
-/// `auto_delete_empty` is enabled, or `None` to skip cleanup. Each call goes
-/// through a [`ConfigWatcher`], so daemon behavior follows config edits
-/// without a restart, a broken edit keeps the last config that loaded, and a
-/// config broken from the start skips cleanup until it loads.
-pub fn cleanup_prefix_source(
+/// The returned closure yields the current workspace prefix and on-delete
+/// hooks while `auto_delete_empty` is enabled, or `None` to skip cleanup.
+/// Each call goes through a [`ConfigWatcher`], so daemon behavior follows
+/// config edits without a restart, a broken edit keeps the last config that
+/// loaded, and a config broken from the start skips cleanup until it loads.
+pub fn cleanup_source(
     path_override: Option<&Path>,
-) -> impl FnMut() -> Option<String> + Send + 'static {
+) -> impl FnMut() -> Option<CleanupConfig> + Send + 'static {
     let mut watcher = ConfigWatcher::new(path_override);
     // Report startup problems now rather than at the first cleanup pass.
     watcher.poll();
@@ -1151,7 +1153,10 @@ pub fn cleanup_prefix_source(
         watcher
             .poll()
             .filter(|config| config.auto_delete_empty)
-            .map(|config| config.workspace_prefix.clone())
+            .map(|config| CleanupConfig {
+                prefix: config.workspace_prefix.clone(),
+                on_delete: config.hooks.on_delete.clone(),
+            })
     }
 }
 
@@ -2163,30 +2168,30 @@ programs = ["firefox"]
         assert!(config.diagnostics.is_empty(), "{:?}", config.diagnostics);
     }
 
-    // --- cleanup_prefix_source ---
+    // --- cleanup_source ---
 
     #[test]
-    fn cleanup_prefix_source_reloads_on_content_change() {
+    fn cleanup_source_reloads_on_content_change() {
         let path = temp_config("reload", "[general]\nworkspace_prefix = \"aaa-\"\n");
 
-        let mut source = cleanup_prefix_source(Some(&path));
-        assert_eq!(source(), Some("aaa-".to_string()));
+        let mut source = cleanup_source(Some(&path));
+        assert_eq!(source().map(|c| c.prefix), Some("aaa-".to_string()));
 
         std::fs::write(
             &path,
             "[general]\nworkspace_prefix = \"bbb-\"\nauto_delete_empty = false\n",
         )
         .unwrap();
-        assert_eq!(source(), None);
+        assert_eq!(source().map(|c| c.prefix), None);
 
         std::fs::write(&path, "[general]\nworkspace_prefix = \"ccc-\"\n").unwrap();
-        assert_eq!(source(), Some("ccc-".to_string()));
+        assert_eq!(source().map(|c| c.prefix), Some("ccc-".to_string()));
 
         std::fs::remove_file(&path).ok();
     }
 
     #[test]
-    fn cleanup_prefix_source_follows_symlink_swap_with_same_mtime() {
+    fn cleanup_source_follows_symlink_swap_with_same_mtime() {
         let dir = std::env::temp_dir().join(format!("ndw-config-test-{}-swap", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let (a, b, link) = (dir.join("a.toml"), dir.join("b.toml"), dir.join("cfg.toml"));
@@ -2209,38 +2214,38 @@ programs = ["firefox"]
         std::fs::remove_file(&link).ok();
         std::os::unix::fs::symlink(&a, &link).unwrap();
 
-        let mut source = cleanup_prefix_source(Some(&link));
-        assert_eq!(source(), Some("aaa-".to_string()));
+        let mut source = cleanup_source(Some(&link));
+        assert_eq!(source().map(|c| c.prefix), Some("aaa-".to_string()));
 
         std::fs::remove_file(&link).unwrap();
         std::os::unix::fs::symlink(&b, &link).unwrap();
-        assert_eq!(source(), None);
+        assert_eq!(source().map(|c| c.prefix), None);
 
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn cleanup_prefix_source_keeps_last_good_config_on_parse_error() {
+    fn cleanup_source_keeps_last_good_config_on_parse_error() {
         let path = temp_config("keep", "[general]\nauto_delete_empty = false\n");
 
-        let mut source = cleanup_prefix_source(Some(&path));
-        assert_eq!(source(), None);
+        let mut source = cleanup_source(Some(&path));
+        assert_eq!(source().map(|c| c.prefix), None);
 
         // Falling back to the defaults would turn auto-delete back on.
         std::fs::write(&path, "[general\n").unwrap();
-        assert_eq!(source(), None);
+        assert_eq!(source().map(|c| c.prefix), None);
 
         std::fs::write(&path, "[general]\nworkspace_prefix = \"ccc-\"\n").unwrap();
-        assert_eq!(source(), Some("ccc-".to_string()));
+        assert_eq!(source().map(|c| c.prefix), Some("ccc-".to_string()));
 
         std::fs::remove_file(&path).ok();
     }
 
     #[test]
-    fn cleanup_prefix_source_broken_at_startup_skips_cleanup() {
+    fn cleanup_source_broken_at_startup_skips_cleanup() {
         let path = temp_config("broken", "[general\n");
-        let mut source = cleanup_prefix_source(Some(&path));
-        assert_eq!(source(), None);
+        let mut source = cleanup_source(Some(&path));
+        assert_eq!(source().map(|c| c.prefix), None);
         std::fs::remove_file(&path).ok();
     }
 
@@ -2254,16 +2259,29 @@ programs = ["firefox"]
     }
 
     #[test]
-    fn cleanup_prefix_source_missing_explicit_file_skips_cleanup() {
+    fn cleanup_source_missing_explicit_file_skips_cleanup() {
         let path = temp_config("later", "");
         std::fs::remove_file(&path).unwrap();
 
         // A mistyped --config must not clean up with the default settings.
-        let mut source = cleanup_prefix_source(Some(&path));
-        assert_eq!(source(), None);
+        let mut source = cleanup_source(Some(&path));
+        assert_eq!(source().map(|c| c.prefix), None);
 
         std::fs::write(&path, "[general]\nworkspace_prefix = \"ddd-\"\n").unwrap();
-        assert_eq!(source(), Some("ddd-".to_string()));
+        assert_eq!(source().map(|c| c.prefix), Some("ddd-".to_string()));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn cleanup_source_carries_on_delete_hooks() {
+        let path = temp_config("cleanup-hooks", "[hooks]\non_delete = [\"x\"]\n");
+
+        let mut source = cleanup_source(Some(&path));
+        assert_eq!(source().map(|c| c.on_delete), Some(vec!["x".to_string()]));
+
+        std::fs::write(&path, "[hooks]\non_delete = [\"y\"]\n").unwrap();
+        assert_eq!(source().map(|c| c.on_delete), Some(vec!["y".to_string()]));
+
         std::fs::remove_file(&path).ok();
     }
 

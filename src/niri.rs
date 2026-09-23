@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write as _};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -641,15 +641,23 @@ pub fn set_overlay_origin(id: Option<u64>) {
     }
 }
 
-/// Remove empty, unfocused dynamic workspaces matching the given prefix,
-/// except spared ones.
+/// What one cleanup pass needs from the config.
+#[derive(Debug)]
+pub struct CleanupConfig {
+    pub prefix: String,
+    /// Hooks run for each workspace the pass removes.
+    pub on_delete: Vec<String>,
+}
+
+/// Remove empty, unfocused dynamic workspaces, except spared ones, and run
+/// the on-delete hooks for each.
 ///
 /// Best-effort: logs errors to stderr since this runs in the background daemon.
-pub fn cleanup_empty_workspaces(prefix: &str) {
+pub fn cleanup_empty_workspaces(cleanup: &CleanupConfig) {
     let is_spared = |id| spared().is_spared(id, Instant::now());
     if let Err(e) = cleanup_empty_workspaces_impl(
         &mut SocketClient,
-        prefix,
+        cleanup,
         Duration::from_millis(500),
         &is_spared,
     ) {
@@ -657,13 +665,13 @@ pub fn cleanup_empty_workspaces(prefix: &str) {
     }
 }
 
-/// Collect prefix-matching workspaces that are empty, unfocused, inactive and
-/// not spared.
+/// Collect the id, name and key of prefix-matching workspaces that are
+/// empty, unfocused, inactive and not spared.
 fn removable_workspaces(
     client: &mut impl NiriClient,
     prefix: &str,
     is_spared: &impl Fn(u64) -> bool,
-) -> anyhow::Result<Vec<(u64, String)>> {
+) -> anyhow::Result<Vec<(u64, String, char)>> {
     let workspaces = list_workspaces_with(client)?;
     let windows = list_windows_with(client)?;
 
@@ -673,15 +681,11 @@ fn removable_workspaces(
         .iter()
         .filter_map(|ws| {
             let name = ws.name.as_ref()?;
-            if crate::config::parse_dynamic_name(name, prefix).is_none()
-                || ws.is_focused
-                || ws.is_active
-                || window_ws_ids.contains(&ws.id)
-                || is_spared(ws.id)
-            {
+            let (key, _) = crate::config::parse_dynamic_name(name, prefix)?;
+            if ws.is_focused || ws.is_active || window_ws_ids.contains(&ws.id) || is_spared(ws.id) {
                 return None;
             }
-            Some((ws.id, name.clone()))
+            Some((ws.id, name.clone(), key))
         })
         .collect())
 }
@@ -690,15 +694,15 @@ fn removable_workspaces(
 /// between the passes still counts.
 fn cleanup_empty_workspaces_impl(
     client: &mut impl NiriClient,
-    prefix: &str,
+    cleanup: &CleanupConfig,
     confirm_delay: Duration,
     is_spared: &impl Fn(u64) -> bool,
 ) -> anyhow::Result<()> {
     // Two passes: a workspace mid-creation is briefly named but still empty
     // and unfocused, so only unset names that qualify again after a delay.
-    let candidates: HashSet<u64> = removable_workspaces(client, prefix, is_spared)?
+    let candidates: HashSet<u64> = removable_workspaces(client, &cleanup.prefix, is_spared)?
         .into_iter()
-        .map(|(id, _)| id)
+        .map(|(id, _, _)| id)
         .collect();
     if candidates.is_empty() {
         return Ok(());
@@ -706,16 +710,18 @@ fn cleanup_empty_workspaces_impl(
 
     thread::sleep(confirm_delay);
 
-    for (id, name) in removable_workspaces(client, prefix, is_spared)? {
+    for (id, name, key) in removable_workspaces(client, &cleanup.prefix, is_spared)? {
         if !candidates.contains(&id) {
             continue;
         }
         send_action_with(
             client,
             Action::UnsetWorkspaceName {
-                reference: Some(WorkspaceReferenceArg::Name(name)),
+                reference: Some(WorkspaceReferenceArg::Name(name.clone())),
             },
         )?;
+        let env = crate::config::build_hook_env(&name, key, None, &HashMap::new());
+        run_hooks_with(client, &cleanup.on_delete, &env);
     }
 
     Ok(())
@@ -723,13 +729,13 @@ fn cleanup_empty_workspaces_impl(
 
 /// Subscribe to niri's event stream and run cleanup when workspaces may become empty.
 ///
-/// `prefix_source` is consulted before each cleanup pass; it returns the
-/// current workspace prefix, or `None` to skip cleanup (auto-delete disabled).
+/// `source` is consulted before each cleanup pass; it returns what the pass
+/// needs, or `None` to skip cleanup (auto-delete disabled).
 ///
 /// Reconnects automatically if the socket drops (e.g. niri restarts).
-pub fn run_event_cleanup(mut prefix_source: impl FnMut() -> Option<String>) {
+pub fn run_event_cleanup(mut source: impl FnMut() -> Option<CleanupConfig>) {
     loop {
-        if let Err(e) = event_cleanup_loop(&mut prefix_source) {
+        if let Err(e) = event_cleanup_loop(&mut source) {
             eprintln!("warning: event cleanup failed: {e:#}, reconnecting in 5s\u{2026}");
             thread::sleep(Duration::from_secs(5));
         }
@@ -843,7 +849,7 @@ fn read_event(reader: &mut impl BufRead, buf: &mut Vec<u8>) -> anyhow::Result<Op
     }
 }
 
-fn event_cleanup_loop(prefix_source: &mut impl FnMut() -> Option<String>) -> anyhow::Result<()> {
+fn event_cleanup_loop(source: &mut impl FnMut() -> Option<CleanupConfig>) -> anyhow::Result<()> {
     let mut reader = connect_event_stream()?;
     // The timeout lets a pending cleanup fire when no further event arrives.
     reader
@@ -864,8 +870,8 @@ fn event_cleanup_loop(prefix_source: &mut impl FnMut() -> Option<String>) -> any
 
         if debouncer.due(Instant::now()) {
             debouncer.clear();
-            if let Some(prefix) = prefix_source() {
-                cleanup_empty_workspaces(&prefix);
+            if let Some(cleanup) = source() {
+                cleanup_empty_workspaces(&cleanup);
             }
             // A spared workspace can be removable once its spare runs out,
             // with no event to say so.
@@ -1822,6 +1828,19 @@ mod tests {
         assert_eq!(client.sent.len(), 1);
     }
 
+    /// Clean up `dyn-` workspaces with `on_delete` hooks and no confirm delay.
+    fn clean_up(
+        client: &mut MockClient,
+        on_delete: &[&str],
+        is_spared: &impl Fn(u64) -> bool,
+    ) -> anyhow::Result<()> {
+        let cleanup = CleanupConfig {
+            prefix: "dyn-".to_string(),
+            on_delete: strings(on_delete),
+        };
+        cleanup_empty_workspaces_impl(client, &cleanup, Duration::ZERO, is_spared)
+    }
+
     #[test]
     fn cleanup_skips_focused_active_and_occupied() {
         let mut occupied = test_workspace(1, Some("dyn-a"), false);
@@ -1842,7 +1861,7 @@ mod tests {
             Response::Handled,
         ]);
 
-        cleanup_empty_workspaces_impl(&mut client, "dyn-", Duration::ZERO, &|_| false).unwrap();
+        clean_up(&mut client, &[], &|_| false).unwrap();
 
         assert_eq!(client.sent.len(), 5);
         assert!(matches!(
@@ -1862,7 +1881,7 @@ mod tests {
             Response::Windows(vec![test_window(100, 1, "firefox")]),
         ]);
 
-        cleanup_empty_workspaces_impl(&mut client, "dyn-", Duration::ZERO, &|_| false).unwrap();
+        clean_up(&mut client, &[], &|_| false).unwrap();
 
         assert_eq!(client.sent.len(), 2);
     }
@@ -1883,7 +1902,7 @@ mod tests {
             Response::Windows(vec![test_window(100, 1, "kitty")]),
         ]);
 
-        cleanup_empty_workspaces_impl(&mut client, "dyn-", Duration::ZERO, &|_| false).unwrap();
+        clean_up(&mut client, &[], &|_| false).unwrap();
 
         assert_eq!(client.sent.len(), 4);
         assert!(!client
@@ -1906,7 +1925,7 @@ mod tests {
             Response::Handled,
         ]);
 
-        cleanup_empty_workspaces_impl(&mut client, "dyn-", Duration::ZERO, &|id| id == 5).unwrap();
+        clean_up(&mut client, &[], &|id| id == 5).unwrap();
 
         assert_eq!(client.sent.len(), 5);
         assert!(matches!(
@@ -1924,7 +1943,7 @@ mod tests {
             Response::Windows(vec![]),
         ]);
 
-        cleanup_empty_workspaces_impl(&mut client, "dyn-", Duration::ZERO, &|_| true).unwrap();
+        clean_up(&mut client, &[], &|_| true).unwrap();
 
         assert_eq!(client.sent.len(), 2);
     }
@@ -1945,10 +1964,65 @@ mod tests {
             asked.get() > 1
         };
 
-        cleanup_empty_workspaces_impl(&mut client, "dyn-", Duration::ZERO, &is_spared).unwrap();
+        clean_up(&mut client, &[], &is_spared).unwrap();
 
         assert_eq!(asked.get(), 2);
         assert_eq!(client.sent.len(), 4);
+    }
+
+    fn spawned_command(request: &Request) -> Option<&[String]> {
+        match request {
+            Request::Action(Action::Spawn { command }) => Some(command),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn cleanup_runs_on_delete_hooks_after_each_unset() {
+        let empty = vec![
+            test_workspace(4, Some("dyn-d"), false),
+            test_workspace(5, Some("dyn-e Notes"), false),
+        ];
+        let mut client = MockClient::new(vec![
+            Response::Workspaces(empty.clone()),
+            Response::Windows(vec![]),
+            Response::Workspaces(empty),
+            Response::Windows(vec![]),
+            Response::Handled,
+            Response::Handled,
+            Response::Handled,
+            Response::Handled,
+        ]);
+
+        clean_up(&mut client, &["h"], &|_| false).unwrap();
+
+        assert_eq!(client.sent.len(), 8);
+        for (unset, spawn, name, key) in [(4, 5, "dyn-d", "d"), (6, 7, "dyn-e Notes", "e")] {
+            assert!(matches!(
+                &client.sent[unset],
+                Request::Action(Action::UnsetWorkspaceName {
+                    reference: Some(WorkspaceReferenceArg::Name(n)),
+                }) if n == name
+            ));
+            let command = spawned_command(&client.sent[spawn]).unwrap();
+            assert!(command.contains(&format!("NDW_WORKSPACE_NAME={name}")));
+            assert!(command.contains(&format!("NDW_WORKSPACE_KEY={key}")));
+            assert_eq!(command.last().map(String::as_str), Some("h"));
+        }
+    }
+
+    #[test]
+    fn cleanup_failed_unset_runs_no_hooks() {
+        let empty = vec![test_workspace(4, Some("dyn-d"), false)];
+        let mut client = MockClient::new(vec![
+            Response::Workspaces(empty.clone()),
+            Response::Windows(vec![]),
+            Response::Workspaces(empty),
+            Response::Windows(vec![]),
+        ]);
+
+        assert!(clean_up(&mut client, &["h"], &|_| false).is_err());
+        assert!(!client.sent.iter().any(is_spawn));
     }
 
     #[test]

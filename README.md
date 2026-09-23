@@ -223,6 +223,9 @@ on_delete = ["cleanup-workspace.sh"]
 
 - `on_create` / `on_delete` are arrays of shell commands, each run with `sh -c`
 - `on_create` runs whenever a workspace is created, also by `move-window`
+- `on_delete` runs whenever a workspace is deleted, also when the daemon
+  removes an empty one (`auto_delete_empty`); `NDW_TEMPLATE` is empty and no
+  `NDW_VAR_*` are set for it
 - niri launches them, like `programs`: they get niri's environment and
   working directory, keep running after the overlay closes, and are not part
   of the daemon's service
@@ -399,7 +402,7 @@ spawn-at-startup "niri-dynamic-workspaces" "daemon"
 
 The daemon keeps GTK initialized and subsequent `switch`/`delete`/`move-window` invocations are forwarded to it over D-Bus, skipping startup overhead.
 
-With `auto_delete_empty`, the daemon also removes dynamic workspaces that are empty and unfocused. A workspace created with programs is left alone for its first 15 seconds, so switching away while they start does not remove it. The workspace the overlay was opened from is left alone until the overlay closes, so a hover preview can still return to it.
+With `auto_delete_empty`, the daemon also removes dynamic workspaces that are empty and unfocused, running the `on_delete` hooks for each. A workspace created with programs is left alone for its first 15 seconds, so switching away while they start does not remove it. The workspace the overlay was opened from is left alone until the overlay closes, so a hover preview can still return to it.
 
 Config changes are picked up automatically: the daemon reloads the config file whenever its contents change, including on a Home Manager switch, so no restart is needed. If an edit breaks the file, auto-delete keeps following the last config that loaded, while the overlay opens with the defaults and names the problem.
 
