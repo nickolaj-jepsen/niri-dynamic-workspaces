@@ -399,12 +399,13 @@ test_daemon_forwards_errors_to_caller() {
 }
 
 test_daemon_deletes_empty_workspaces() {
-    general auto_delete_empty true || return 1
+    general auto_delete_empty true && add_hooks || return 1
     "$h" daemon || return 1
     "$h" app switch a && spawn_window || return 1
     "$h" app switch b && "$h" app switch c || return 1
     # Covers the debounce (0.5 s quiet, 2 s at most) and the 0.5 s confirming pass.
-    until_true_for 15 no_ws dyn-b && has_ws dyn-a && has_ws dyn-c
+    until_true_for 15 no_ws dyn-b && has_ws dyn-a && has_ws dyn-c || return 1
+    until_true has_mark deleted-dyn-b
 }
 
 # The new workspace stays empty until its program maps, and must outlive the user leaving it.

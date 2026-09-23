@@ -258,13 +258,13 @@ fn main() -> glib::ExitCode {
                 if hold_guard.borrow().is_some() {
                     return 0;
                 }
-                // Always spawn: the prefix source re-reads the config on
-                // change, so auto_delete_empty can be toggled without a
-                // daemon restart.
-                let prefix_source = config::cleanup_prefix_source(cli.config.as_deref());
+                // Always spawn: the source re-reads the config on change, so
+                // auto_delete_empty and on_delete change without a daemon
+                // restart.
+                let cleanup_source = config::cleanup_source(cli.config.as_deref());
                 std::thread::Builder::new()
                     .name("cleanup".into())
-                    .spawn(move || niri::run_event_cleanup(prefix_source))
+                    .spawn(move || niri::run_event_cleanup(cleanup_source))
                     .ok();
                 *hold_guard.borrow_mut() = Some(app.hold());
                 return 0;
