@@ -9,10 +9,11 @@ use crate::niri;
 
 use super::metrics::KeyboardMetrics;
 use super::{
-    dispatch_action, display_key_char, finish, focus_selected, show_error, window_to_move,
-    ActionContext, Mode, OverlaySession,
+    dispatch_action, display_key_char, finish, focus_selected, focused_output_from, show_error,
+    window_to_move, ActionContext, Mode, OverlaySession,
 };
 
+#[derive(Debug, PartialEq)]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "four bools represent independent workspace states"
@@ -27,6 +28,7 @@ pub(super) struct StaticWorkspaceInfo {
     is_empty: bool,
 }
 
+#[derive(Debug, PartialEq)]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "bools represent independent workspace states"
@@ -187,7 +189,7 @@ fn build_dyn_workspace_infos(
     infos
 }
 
-pub(super) fn build_static_workspace_infos(
+fn build_static_workspace_infos(
     workspaces: &[niri_ipc::Workspace],
     windows: &[niri_ipc::Window],
     config: &ResolvedConfig,
@@ -242,7 +244,7 @@ pub(super) fn build_static_workspace_infos(
 
 /// Build a map of all keyboard keys to their workspace info.
 /// Keys without a live or configured workspace get a default empty entry.
-pub(super) fn build_full_keyboard_info(
+fn build_full_keyboard_info(
     workspaces: &[niri_ipc::Workspace],
     windows: &[niri_ipc::Window],
     config: &ResolvedConfig,
@@ -262,6 +264,36 @@ pub(super) fn build_full_keyboard_info(
     }
 
     map
+}
+
+/// Everything the grid view renders from niri's state, compared to skip
+/// refreshes that change no card. Window titles are not part of it.
+#[derive(Debug, PartialEq)]
+pub(super) struct GridModel {
+    pub(super) keyboard: Rc<HashMap<char, DynWorkspaceInfo>>,
+    pub(super) static_row: Vec<StaticWorkspaceInfo>,
+    /// Output the grid shows, for hover-preview gating.
+    pub(super) focused_output: Option<String>,
+    /// Whether the workspaces span more than one output.
+    pub(super) multi_output: bool,
+}
+
+impl GridModel {
+    pub(super) fn new(
+        workspaces: &[niri_ipc::Workspace],
+        windows: &[niri_ipc::Window],
+        config: &ResolvedConfig,
+    ) -> Self {
+        let mut outputs = workspaces.iter().map(|ws| &ws.output);
+        Self {
+            keyboard: Rc::new(build_full_keyboard_info(workspaces, windows, config)),
+            static_row: build_static_workspace_infos(workspaces, windows, config),
+            focused_output: focused_output_from(workspaces),
+            multi_output: outputs
+                .next()
+                .is_some_and(|first| outputs.any(|o| o != first)),
+        }
+    }
 }
 
 #[expect(
@@ -1110,6 +1142,43 @@ pub(super) mod tests {
 
         let infos = build_static_workspace_infos(&workspaces, &[], &config);
         assert!(infos.is_empty());
+    }
+
+    // --- GridModel ---
+
+    #[test]
+    fn grid_model_ignores_window_titles() {
+        let workspaces = vec![test_workspace(10, Some("dyn-a"), true)];
+        let config = default_test_config();
+        let titled = |title: &str| {
+            let mut window = test_window(1, 10, "kitty");
+            window.title = Some(title.to_string());
+            GridModel::new(&workspaces, &[window], &config)
+        };
+        assert_eq!(titled("~"), titled("~/src"));
+    }
+
+    #[test]
+    fn grid_model_tracks_window_moves() {
+        let workspaces = vec![
+            test_workspace(10, Some("dyn-a"), true),
+            test_workspace(20, Some("dyn-b"), false),
+        ];
+        let config = default_test_config();
+        let on = |ws_id| GridModel::new(&workspaces, &[test_window(1, ws_id, "kitty")], &config);
+        assert_ne!(on(10), on(20));
+    }
+
+    #[test]
+    fn grid_model_notes_multiple_outputs() {
+        let config = default_test_config();
+        let mut other = test_workspace(20, Some("dyn-b"), false);
+        let workspaces = vec![test_workspace(10, Some("dyn-a"), true), other.clone()];
+        assert!(!GridModel::new(&workspaces, &[], &config).multi_output);
+        other.output = Some("HDMI-A-1".to_string());
+        let workspaces = vec![test_workspace(10, Some("dyn-a"), true), other];
+        assert!(GridModel::new(&workspaces, &[], &config).multi_output);
+        assert!(!GridModel::new(&[], &[], &config).multi_output);
     }
 
     fn card_state() -> CardState {

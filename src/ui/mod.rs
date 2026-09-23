@@ -5,7 +5,7 @@ mod picker;
 mod theme;
 mod variables;
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,10 +24,7 @@ use crate::actions::HookInfo;
 use crate::config::ResolvedConfig;
 use crate::niri;
 
-use cards::{
-    build_full_keyboard_info, build_keyboard, build_static_workspace_infos,
-    build_static_workspace_row, DynWorkspaceInfo,
-};
+use cards::{build_keyboard, build_static_workspace_row, DynWorkspaceInfo, GridModel};
 use metrics::{apply_scaled_css, find_monitor_for_output, KeyboardMetrics};
 use picker::show_template_picker;
 pub use theme::install_base as install_base_styles;
@@ -196,6 +193,8 @@ struct OverlaySession {
     config: Rc<ResolvedConfig>,
     /// Sizes for the monitor the overlay currently occupies.
     metrics: Cell<KeyboardMetrics>,
+    /// What the grid view last rendered.
+    grid: RefCell<Option<GridModel>>,
     preview: HoverPreview,
     /// The window Move Window moves: focused at open, or after the last output change.
     origin_window: Cell<Option<u64>>,
@@ -250,6 +249,7 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
             focused_monitor.as_ref(),
             config.layout,
         )),
+        grid: RefCell::new(None),
         preview: HoverPreview::new(focused_workspace_id_from(&workspaces)),
         origin_window: Cell::new(focused_window_from(&workspaces)),
         selection_made: Cell::new(false),
@@ -280,7 +280,12 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
         window.add_controller(motion);
     }
 
-    populate_overlay(&window, &session, mode, Some(workspaces));
+    populate_overlay(
+        &window,
+        &session,
+        mode,
+        fetch_grid(config, Some(workspaces)).ok(),
+    );
     free_on_close(&window);
     connect_session_close(&window, &session);
     follow_compositor(&window, session, focused_output);
@@ -360,16 +365,25 @@ fn follow_compositor(
                     // A rebuild would drop the picker or the typed variable
                     // values; the next view built picks up the new monitor.
                     if !session.in_subview.get() {
-                        populate_overlay(&window, &session, mode, Some(fresh_workspaces));
+                        // Rebuilt even when no card changed: the metrics did.
+                        if let Ok(grid) = fetch_grid(&session.config, Some(fresh_workspaces)) {
+                            populate_overlay(&window, &session, mode, Some(grid));
+                        }
                     }
                     continue;
                 }
             }
 
             // Workspaces/windows changed → refresh the cards, but never while
-            // a sub-view (picker or variable form) is up.
+            // a sub-view (picker or variable form) is up. niri reports every
+            // window title change, which no card shows.
             if structural && !session.in_subview.get() {
-                populate_overlay(&window, &session, mode, Some(fresh_workspaces));
+                if let Ok(grid) = fetch_grid(&session.config, Some(fresh_workspaces)) {
+                    let changed = session.grid.borrow().as_ref() != Some(&grid);
+                    if changed {
+                        populate_overlay(&window, &session, mode, Some(grid));
+                    }
+                }
             }
         }
     });
@@ -627,14 +641,27 @@ fn confirm_delete_hint(ch: char, window_count: usize) -> String {
     )
 }
 
+/// The grid for niri's current state; `workspaces` saves listing them again.
+fn fetch_grid(
+    config: &ResolvedConfig,
+    workspaces: Option<Vec<niri_ipc::Workspace>>,
+) -> anyhow::Result<GridModel> {
+    let workspaces = match workspaces {
+        Some(workspaces) => workspaces,
+        None => niri::list_workspaces()?,
+    };
+    let windows = niri::list_windows()?;
+    Ok(GridModel::new(&workspaces, &windows, config))
+}
+
 /// Build (or rebuild) the overlay content for `mode` inside an existing window.
 ///
-/// If `prefetched_workspaces` is provided, uses them instead of making a fresh IPC call.
+/// Renders `grid`, or fetches one when it is `None`.
 fn populate_overlay(
     window: &ApplicationWindow,
     session: &Rc<OverlaySession>,
     mode: Mode,
-    prefetched_workspaces: Option<Vec<niri_ipc::Workspace>>,
+    grid: Option<GridModel>,
 ) {
     // The other modes act on the origin: undo the preview before reading focus.
     if mode != Mode::Normal {
@@ -664,19 +691,16 @@ fn populate_overlay(
     let metrics = session.metrics.get();
     apply_scaled_css(&metrics.scaled_css_variables());
 
-    // Use pre-fetched workspaces or fetch fresh; always fetch windows fresh.
-    let workspaces =
-        prefetched_workspaces.unwrap_or_else(|| niri::list_workspaces().unwrap_or_default());
-    let windows = niri::list_windows().unwrap_or_default();
+    let grid = grid.unwrap_or_else(|| {
+        fetch_grid(config, None).unwrap_or_else(|_| GridModel::new(&[], &[], config))
+    });
 
-    // Build keyboard
-    let infos = Rc::new(build_full_keyboard_info(&workspaces, &windows, config));
     // An armed delete survives refreshes while its target still has windows.
     let confirming = session
         .delete_armed
         .get()
         .filter(|_| mode == Mode::Delete)
-        .and_then(|ch| infos.get(&ch))
+        .and_then(|ch| grid.keyboard.get(&ch))
         .filter(|i| i.window_count > 0)
         .map(|i| (i.char_id, i.window_count));
     session.delete_armed.set(confirming.map(|(ch, _)| ch));
@@ -687,22 +711,21 @@ fn populate_overlay(
         error_label,
         error_revealer: error_revealer.clone(),
         session: session.clone(),
-        keyboard_infos: infos.clone(),
-        focused_output: focused_output_from(&workspaces),
+        keyboard_infos: grid.keyboard.clone(),
+        focused_output: grid.focused_output.clone(),
     };
 
     // Assemble: static row → keyboard → hint footer → problems → error revealer → mode tabs
-    let static_infos = build_static_workspace_infos(&workspaces, &windows, config);
-    if !static_infos.is_empty() {
+    if !grid.static_row.is_empty() {
         container.append(&build_static_workspace_row(
-            &static_infos,
+            &grid.static_row,
             mode,
             &ctx,
             &metrics,
         ));
     }
 
-    let keyboard = build_keyboard(&infos, mode, &ctx, &metrics);
+    let keyboard = build_keyboard(&grid.keyboard, mode, &ctx, &metrics);
     container.append(&keyboard);
     let first_hint = confirming.map_or_else(
         || mode.hint().to_owned(),
@@ -726,6 +749,7 @@ fn populate_overlay(
 
     attach_key_handler(&ctx, &config.close_keybinds);
     attach_close_on_backdrop_click(window, &container);
+    *session.grid.borrow_mut() = Some(grid);
 }
 
 /// Switch to (or create) a workspace and close the overlay on success.

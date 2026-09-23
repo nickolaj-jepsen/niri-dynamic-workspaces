@@ -5,7 +5,9 @@ use gtk4::prelude::*;
 use crate::config::KeyboardLayout;
 
 thread_local! {
-    static DYNAMIC_PROVIDER: RefCell<Option<gtk4::CssProvider>> = const { RefCell::new(None) };
+    /// The applied scaled CSS and its provider.
+    static DYNAMIC_PROVIDER: RefCell<Option<(String, gtk4::CssProvider)>> =
+        const { RefCell::new(None) };
 }
 
 #[derive(Clone, Copy)]
@@ -115,8 +117,12 @@ pub(super) fn apply_scaled_css(css: &str) {
         return;
     };
     DYNAMIC_PROVIDER.with(|cell| {
-        let mut opt = cell.borrow_mut();
-        if let Some(old) = opt.take() {
+        let mut applied = cell.borrow_mut();
+        // Swapping the provider restyles every widget on the display.
+        if applied.as_ref().is_some_and(|(current, _)| current == css) {
+            return;
+        }
+        if let Some((_, old)) = applied.take() {
             gtk4::style_context_remove_provider_for_display(&display, &old);
         }
         let provider = gtk4::CssProvider::new();
@@ -126,7 +132,7 @@ pub(super) fn apply_scaled_css(css: &str) {
             &provider,
             gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
         );
-        *opt = Some(provider);
+        *applied = Some((css.to_owned(), provider));
     });
 }
 
