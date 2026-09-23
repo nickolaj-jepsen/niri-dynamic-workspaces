@@ -126,6 +126,18 @@ test_daemon_deletes_empty_workspaces() {
     until_true_for 15 no_ws dyn-b && has_ws dyn-a && has_ws dyn-c
 }
 
+test_daemon_reloads_config_on_content_change() {
+    local config
+    config=$(config_toml)
+    # Home Manager swaps in store files, which all have mtime 1.
+    "$h" run touch -m -d @1 "$config" && "$h" daemon || return 1
+    "$h" app switch a && "$h" app switch b || return 1
+    until_true has_ws dyn-a || return 1
+    general auto_delete_empty true && "$h" run touch -m -d @1 "$config" || return 1
+    "$h" app switch c || return 1
+    until_true_for 15 no_ws dyn-a && until_true no_ws dyn-b && has_ws dyn-c
+}
+
 # overlays_freed <n>: debug builds log a line each time an overlay window is disposed.
 overlays_freed() { [[ $("$h" logs 1000 | grep -c "debug: overlay window freed") -eq $1 ]]; }
 
@@ -147,6 +159,7 @@ tests=(
     overlay_delete_mode
     daemon_serves_invocations
     daemon_deletes_empty_workspaces
+    daemon_reloads_config_on_content_change
     daemon_frees_closed_overlays
 )
 

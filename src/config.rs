@@ -285,6 +285,13 @@ impl ResolvedConfig {
     pub fn should_show_templates(&self, ch: char) -> bool {
         !self.templates.is_empty() && !self.workspace_programs.contains_key(&ch)
     }
+
+    /// Whether loading fell back to the defaults for the whole file.
+    pub fn has_errors(&self) -> bool {
+        self.diagnostics
+            .iter()
+            .any(|d| d.severity == Severity::Error)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1024,39 +1031,84 @@ fn toml_error_summary(e: &toml::de::Error, text: &str) -> String {
     format!("line {line}, column {column}: {}", e.message())
 }
 
-fn file_mtime(path: &Path) -> Option<std::time::SystemTime> {
-    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+/// Follows the config file for the daemon: re-reads it on every poll,
+/// reloads when the contents change, and keeps the last config that loaded
+/// without errors.
+///
+/// Comparing contents rather than mtimes also catches Home Manager's symlink
+/// swaps, where every generation's file has mtime 1.
+pub(crate) struct ConfigWatcher {
+    /// `None` when there is no config directory; the defaults then apply.
+    path: Option<PathBuf>,
+    last_read: Option<Result<Option<String>, String>>,
+    good: Option<ResolvedConfig>,
+}
+
+impl ConfigWatcher {
+    pub(crate) fn new(path_override: Option<&Path>) -> Self {
+        let path = config_path(path_override);
+        let good = path.is_none().then(|| {
+            let config = load_config(None);
+            print_diagnostics(&config);
+            config
+        });
+        Self {
+            path,
+            last_read: None,
+            good,
+        }
+    }
+
+    /// The config to act on: the newest one that loaded without errors, or
+    /// `None` while none has.
+    ///
+    /// Prints the diagnostics to stderr once per change of the contents.
+    pub(crate) fn poll(&mut self) -> Option<&ResolvedConfig> {
+        let Some(path) = &self.path else {
+            return self.good.as_ref();
+        };
+        let read = read_config(path);
+        if self.last_read.as_ref() != Some(&read) {
+            let config = from_contents(path, &read);
+            print_diagnostics(&config);
+            if !config.has_errors() {
+                self.good = Some(config);
+            } else if self.good.is_some() {
+                // The diagnostic says "using defaults", which the daemon does not do.
+                eprintln!("config: keeping the last config that loaded");
+            } else {
+                eprintln!("config: nothing has loaded yet, waiting for a config without errors");
+            }
+            self.last_read = Some(read);
+        }
+        self.good.as_ref()
+    }
+}
+
+fn print_diagnostics(config: &ResolvedConfig) {
+    for d in &config.diagnostics {
+        eprintln!("{d}");
+    }
 }
 
 /// Build the cleanup-prefix source for the daemon's cleanup loop.
 ///
 /// The returned closure yields the current workspace prefix while
-/// `auto_delete_empty` is enabled, or `None` to skip cleanup. The config file
-/// is reloaded whenever its mtime changes, so daemon behavior follows config
-/// edits without a restart.
+/// `auto_delete_empty` is enabled, or `None` to skip cleanup. Each call goes
+/// through a [`ConfigWatcher`], so daemon behavior follows config edits
+/// without a restart, a broken edit keeps the last config that loaded, and a
+/// config broken from the start skips cleanup until it loads.
 pub fn cleanup_prefix_source(
     path_override: Option<&Path>,
 ) -> impl FnMut() -> Option<String> + Send + 'static {
-    let mut current = load_config(path_override);
-    for d in &current.diagnostics {
-        eprintln!("{d}");
-    }
-    let path = config_path(path_override);
-    let mut last_mtime = path.as_deref().and_then(file_mtime);
+    let mut watcher = ConfigWatcher::new(path_override);
+    // Report startup problems now rather than at the first cleanup pass.
+    watcher.poll();
     move || {
-        if let Some(ref p) = path {
-            let mtime = file_mtime(p);
-            if mtime != last_mtime {
-                last_mtime = mtime;
-                current = load_config(Some(p));
-                for d in &current.diagnostics {
-                    eprintln!("{d}");
-                }
-            }
-        }
-        current
-            .auto_delete_empty
-            .then(|| current.workspace_prefix.clone())
+        watcher
+            .poll()
+            .filter(|config| config.auto_delete_empty)
+            .map(|config| config.workspace_prefix.clone())
     }
 }
 
@@ -2046,18 +2098,12 @@ programs = ["firefox"]
     // --- cleanup_prefix_source ---
 
     #[test]
-    fn cleanup_prefix_source_reloads_on_mtime_change() {
-        let path = std::env::temp_dir().join(format!(
-            "ndw-cleanup-source-test-{}.toml",
-            std::process::id()
-        ));
-        std::fs::write(&path, "[general]\nworkspace_prefix = \"aaa-\"\n").unwrap();
+    fn cleanup_prefix_source_reloads_on_content_change() {
+        let path = temp_config("reload", "[general]\nworkspace_prefix = \"aaa-\"\n");
 
         let mut source = cleanup_prefix_source(Some(&path));
         assert_eq!(source(), Some("aaa-".to_string()));
 
-        // Ensure the rewrite lands on a different mtime tick.
-        std::thread::sleep(std::time::Duration::from_millis(50));
         std::fs::write(
             &path,
             "[general]\nworkspace_prefix = \"bbb-\"\nauto_delete_empty = false\n",
@@ -2065,10 +2111,77 @@ programs = ["firefox"]
         .unwrap();
         assert_eq!(source(), None);
 
-        std::thread::sleep(std::time::Duration::from_millis(50));
         std::fs::write(&path, "[general]\nworkspace_prefix = \"ccc-\"\n").unwrap();
         assert_eq!(source(), Some("ccc-".to_string()));
 
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn cleanup_prefix_source_follows_symlink_swap_with_same_mtime() {
+        let dir = std::env::temp_dir().join(format!("ndw-config-test-{}-swap", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b, link) = (dir.join("a.toml"), dir.join("b.toml"), dir.join("cfg.toml"));
+        std::fs::write(&a, "[general]\nworkspace_prefix = \"aaa-\"\n").unwrap();
+        std::fs::write(
+            &b,
+            "[general]\nworkspace_prefix = \"bbb-\"\nauto_delete_empty = false\n",
+        )
+        .unwrap();
+        // Like the Nix store, where Home Manager's generations live.
+        let store_mtime = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1);
+        for file in [&a, &b] {
+            std::fs::File::options()
+                .write(true)
+                .open(file)
+                .unwrap()
+                .set_modified(store_mtime)
+                .unwrap();
+        }
+        std::fs::remove_file(&link).ok();
+        std::os::unix::fs::symlink(&a, &link).unwrap();
+
+        let mut source = cleanup_prefix_source(Some(&link));
+        assert_eq!(source(), Some("aaa-".to_string()));
+
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&b, &link).unwrap();
+        assert_eq!(source(), None);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cleanup_prefix_source_keeps_last_good_config_on_parse_error() {
+        let path = temp_config("keep", "[general]\nauto_delete_empty = false\n");
+
+        let mut source = cleanup_prefix_source(Some(&path));
+        assert_eq!(source(), None);
+
+        // Falling back to the defaults would turn auto-delete back on.
+        std::fs::write(&path, "[general\n").unwrap();
+        assert_eq!(source(), None);
+
+        std::fs::write(&path, "[general]\nworkspace_prefix = \"ccc-\"\n").unwrap();
+        assert_eq!(source(), Some("ccc-".to_string()));
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn cleanup_prefix_source_broken_at_startup_skips_cleanup() {
+        let path = temp_config("broken", "[general\n");
+        let mut source = cleanup_prefix_source(Some(&path));
+        assert_eq!(source(), None);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn config_watcher_accepts_warnings() {
+        let path = temp_config("warned", "[general]\nlayout = \"workman\"\n");
+        let mut watcher = ConfigWatcher::new(Some(&path));
+        let config = watcher.poll().expect("warnings still load");
+        assert_eq!(config.diagnostics.len(), 1);
         std::fs::remove_file(&path).ok();
     }
 
