@@ -31,6 +31,7 @@ the `debug: overlay window freed` lines only debug builds log.
 | `config [file]` | replace its `config.toml` with a file, or stdin |
 | `overlay [mode]` | open the overlay in the background, wait until it is mapped |
 | `key <char>` | click the card for `a`-`z` / `0`-`9` |
+| `hover <char>` | move the pointer onto that card, which previews it |
 | `static <i> [n]` | click the `i`-th of `n` cards (default 1) in the static row |
 | `mode <name>` | click `switch`, `delete` or `move` |
 | `click <x> <y>` | click anywhere |
@@ -80,6 +81,11 @@ application id and answer the invocation instead. The bus runs from a config
 written to the run dir, not the host's `/etc/dbus-1`, and `GDK_DEBUG=no-portals`
 keeps GTK from waiting on a settings portal it activates there.
 
+`fixtures/niri.kdl` turns on `workspace-auto-back-and-forth`, which makes
+focusing the active workspace jump to the previous one. The suite then sees
+the overlay re-focus a workspace, and a test must not re-focus the active
+workspace itself expecting nothing to happen.
+
 The nested niri loads EGL from the dev shell's mesa (`NDW_E2E_EGL_VENDOR`), so
 it runs without `/run/opengl-driver`, as on CI. A session that fails to start
 leaves its logs in `e2e/out/fail-<name>.log`.
@@ -91,7 +97,7 @@ and `config` replaces it in a running session. `test.sh` builds per-test
 settings on that with `add_config` (appends TOML from stdin) and
 `general <key> <value>`.
 `NDW_E2E_SIZE=1920x1080` resizes cage's output with `wlr-randr`; `key`,
-`static` and `mode` only know the default size.
+`hover`, `static` and `mode` only know the default size.
 
 ## Key presses
 
@@ -116,8 +122,9 @@ key in a comment next to each `press`, since the codes are opaque.
 
 ## Click coordinates
 
-`key`, `static` and `mode` hold pixel positions for the default qwerty layout
-on the 1272x688 output cage hands us. The static row is centred, so `static`
-needs to know how many cards it holds. If the overlay metrics change, open the
-overlay, take a `shot`, read the new card centres off the image and update
-`row_for_key`, `static_position` and `mode_position` in `harness.sh`.
+`key` and `hover`, `static` and `mode` hold pixel positions for the default
+qwerty layout on the 1272x688 output cage hands us. The static row is centred,
+so `static` needs to know how many cards it holds. If the overlay metrics
+change, open the overlay, take a `shot`, read the new card centres off the
+image and update `row_for_key`, `static_position` and `mode_position` in
+`harness.sh`.

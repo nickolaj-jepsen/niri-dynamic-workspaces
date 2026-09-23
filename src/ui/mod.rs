@@ -5,7 +5,7 @@ mod picker;
 mod theme;
 mod variables;
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,9 +36,9 @@ fn focused_output_from(workspaces: &[niri_ipc::Workspace]) -> Option<String> {
     workspaces.iter().find(|w| w.is_focused)?.output.clone()
 }
 
-/// Extract the name of the focused workspace from a pre-fetched list.
-fn focused_workspace_name_from(workspaces: &[niri_ipc::Workspace]) -> Option<String> {
-    workspaces.iter().find(|w| w.is_focused)?.name.clone()
+/// Id of the focused workspace in a pre-fetched list.
+fn focused_workspace_id_from(workspaces: &[niri_ipc::Workspace]) -> Option<u64> {
+    workspaces.iter().find(|w| w.is_focused).map(|w| w.id)
 }
 
 fn format_workspace_display(ch: char, config: &ResolvedConfig) -> String {
@@ -127,14 +127,59 @@ impl Mode {
 
 // --- Data types ---
 
+/// What hover preview has focused, so closing undoes only what it changed.
+///
+/// Re-focusing the active workspace is never sent: with niri's
+/// workspace-auto-back-and-forth it jumps to the previous workspace instead.
+struct HoverPreview {
+    /// Focused workspace when the overlay opened, or after the last output change.
+    origin: Cell<Option<u64>>,
+    /// Workspace a preview focused instead of `origin`.
+    previewed: Cell<Option<u64>>,
+}
+
+impl HoverPreview {
+    const fn new(origin: Option<u64>) -> Self {
+        Self {
+            origin: Cell::new(origin),
+            previewed: Cell::new(None),
+        }
+    }
+
+    /// Whether previewing `ws_id` changes focus: not when it already has it.
+    fn should_focus(&self, ws_id: u64) -> bool {
+        self.previewed.get().or(self.origin.get()) != Some(ws_id)
+    }
+
+    /// Record that a preview focused `ws_id`.
+    fn focused(&self, ws_id: u64) {
+        self.previewed
+            .set((self.origin.get() != Some(ws_id)).then_some(ws_id));
+    }
+
+    fn is_previewed(&self, ws_id: u64) -> bool {
+        self.previewed.get() == Some(ws_id)
+    }
+
+    /// The workspace to restore, once; `None` unless a preview moved focus.
+    fn take_restore(&self) -> Option<u64> {
+        self.previewed.take().and(self.origin.get())
+    }
+
+    /// Take `origin` as the focused workspace, dropping any pending restore.
+    fn rebase(&self, origin: Option<u64>) {
+        self.origin.set(origin);
+        self.previewed.set(None);
+    }
+}
+
 /// State shared across one overlay lifetime: created in [`build_ui`] and
 /// threaded through every repopulation and sub-view.
 struct OverlaySession {
     config: Rc<ResolvedConfig>,
     /// Width of the monitor the overlay currently occupies.
     monitor_width: Cell<i32>,
-    /// Original workspace name when overlay opened (for hover-preview restore).
-    original_workspace: RefCell<Option<String>>,
+    preview: HoverPreview,
     /// Set once an action succeeded (skip the hover-preview restore on close).
     selection_made: Cell<bool>,
     /// Armed after the first real mouse movement; prevents hover-preview from
@@ -170,7 +215,7 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
     window.init_layer_shell();
     let theme_warnings = theme::apply(&config.theme);
 
-    // Single IPC fetch — derive focused output, monitor, and workspace name from it.
+    // Single IPC fetch — derive focused output, monitor, and workspace id from it.
     let workspaces = niri::list_workspaces().unwrap_or_default();
     let focused_output = focused_output_from(&workspaces);
     let focused_monitor = focused_output.as_deref().and_then(find_monitor_for_output);
@@ -181,13 +226,7 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
     let session = Rc::new(OverlaySession {
         config: config.clone(),
         monitor_width: Cell::new(get_monitor_width(focused_monitor.as_ref())),
-        // Hover preview state — captured once at overlay open, shared across
-        // repopulations.
-        original_workspace: RefCell::new(if config.hover_preview {
-            focused_workspace_name_from(&workspaces)
-        } else {
-            None
-        }),
+        preview: HoverPreview::new(focused_workspace_id_from(&workspaces)),
         selection_made: Cell::new(false),
         hover_armed: Cell::new(false),
         in_subview: Cell::new(false),
@@ -217,20 +256,7 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
 
     populate_overlay(&window, &session, mode, Some(workspaces));
     free_on_close(&window);
-
-    // Restore original workspace on close if no selection was made.
-    {
-        let close_session = session.clone();
-        window.connect_close_request(move |_| {
-            if !close_session.selection_made.get() {
-                if let Some(ref name) = *close_session.original_workspace.borrow() {
-                    let _ = niri::focus_workspace_by_name(name);
-                }
-            }
-            Propagation::Proceed
-        });
-    }
-
+    connect_session_close(&window, &session);
     follow_compositor(&window, session, focused_output);
 
     if config.inhibit_compositor_shortcuts {
@@ -291,6 +317,10 @@ fn follow_compositor(
             // Focused output changed → move the overlay to that monitor.
             if current != tracked_output {
                 tracked_output.clone_from(&current);
+                // Previews stay on the overlay's output, so no preview moved focus here.
+                session
+                    .preview
+                    .rebase(focused_workspace_id_from(&fresh_workspaces));
                 if let Some(monitor) = current.as_deref().and_then(find_monitor_for_output) {
                     window.set_monitor(Some(&monitor));
                     session.monitor_width.set(get_monitor_width(Some(&monitor)));
@@ -305,6 +335,26 @@ fn follow_compositor(
                 populate_overlay(&window, &session, mode, Some(fresh_workspaces));
             }
         }
+    });
+}
+
+/// Undo a hover preview, if one moved focus.
+fn end_preview(session: &OverlaySession) {
+    if let Some(id) = session.preview.take_restore() {
+        if let Err(e) = niri::focus_workspace_by_id(id) {
+            eprintln!("warning: failed to restore workspace {id}: {e:#}");
+        }
+    }
+}
+
+/// Undo the hover preview when the window closes without a selection.
+fn connect_session_close(window: &ApplicationWindow, session: &Rc<OverlaySession>) {
+    let session = session.clone();
+    window.connect_close_request(move |_| {
+        if !session.selection_made.get() {
+            end_preview(&session);
+        }
+        Propagation::Proceed
     });
 }
 
@@ -625,6 +675,15 @@ fn switch_and_close(
     finish(ctx);
 }
 
+/// Focus a selected workspace, unless a preview already did: re-focusing the
+/// active workspace would trigger niri's workspace-auto-back-and-forth.
+fn focus_selected(ctx: &ActionContext, id: u64) -> anyhow::Result<()> {
+    if ctx.session.preview.is_previewed(id) {
+        return Ok(());
+    }
+    niri::focus_workspace_by_id(id)
+}
+
 /// Close the overlay after a successful action, keeping the new focus.
 fn finish(ctx: &ActionContext) {
     ctx.session.selection_made.set(true);
@@ -650,7 +709,7 @@ fn dispatch_action(ch: char, ctx: &ActionContext) {
                 show_error(ctx, &format!("Failed: workspace '{target}' not found"));
                 return;
             }
-            (Mode::Normal, Some(id)) => niri::focus_workspace_by_id(id),
+            (Mode::Normal, Some(id)) => focus_selected(ctx, id),
             (Mode::MoveWindow, Some(id)) => niri::move_window_to_workspace_by_id(id),
         };
         if let Err(e) = result {
@@ -668,6 +727,15 @@ fn dispatch_action(ch: char, ctx: &ActionContext) {
 
     let result = match ctx.mode {
         Mode::Normal => {
+            // A preview focused it already. Only existing workspaces are
+            // previewed, so no programs or hooks are skipped.
+            if info
+                .and_then(|i| i.ws_id)
+                .is_some_and(|id| ctx.session.preview.is_previewed(id))
+            {
+                finish(ctx);
+                return;
+            }
             let is_uncreated = info.is_none_or(|i| i.is_uncreated);
             if is_uncreated && config.should_show_templates(ch) {
                 show_template_picker(ch, ctx);
@@ -828,21 +896,70 @@ mod tests {
     }
 
     #[test]
-    fn focused_workspace_name_from_returns_name() {
+    fn focused_workspace_id_from_returns_focused() {
         let workspaces = vec![
             test_workspace(1, Some("ws-1"), false),
-            test_workspace(2, Some("ws-2"), true),
+            test_workspace(2, None, true),
         ];
-        assert_eq!(
-            focused_workspace_name_from(&workspaces),
-            Some("ws-2".to_string())
-        );
+        assert_eq!(focused_workspace_id_from(&workspaces), Some(2));
     }
 
     #[test]
-    fn focused_workspace_name_from_returns_none_when_unnamed() {
-        let workspaces = vec![test_workspace(1, None, true)];
-        assert_eq!(focused_workspace_name_from(&workspaces), None);
+    fn focused_workspace_id_from_returns_none_when_unfocused() {
+        let workspaces = vec![test_workspace(1, Some("ws-1"), false)];
+        assert_eq!(focused_workspace_id_from(&workspaces), None);
+    }
+
+    // --- HoverPreview ---
+
+    #[test]
+    fn hover_preview_skips_the_focused_workspace() {
+        let p = HoverPreview::new(Some(1));
+        assert!(!p.should_focus(1));
+        assert!(p.should_focus(2));
+        p.focused(2);
+        assert!(!p.should_focus(2));
+        assert!(p.should_focus(1));
+    }
+
+    #[test]
+    fn hover_preview_restores_origin_once() {
+        let p = HoverPreview::new(Some(1));
+        assert_eq!(p.take_restore(), None);
+        p.focused(2);
+        p.focused(3);
+        assert!(p.is_previewed(3));
+        assert_eq!(p.take_restore(), Some(1));
+        assert_eq!(p.take_restore(), None);
+    }
+
+    #[test]
+    fn hover_preview_back_on_origin_needs_no_restore() {
+        let p = HoverPreview::new(Some(1));
+        p.focused(2);
+        p.focused(1);
+        assert!(!p.is_previewed(1));
+        assert_eq!(p.take_restore(), None);
+    }
+
+    #[test]
+    fn hover_preview_without_origin_never_restores() {
+        let p = HoverPreview::new(None);
+        assert!(p.should_focus(2));
+        p.focused(2);
+        assert!(p.is_previewed(2));
+        assert_eq!(p.take_restore(), None);
+    }
+
+    #[test]
+    fn hover_preview_rebase_moves_the_baseline() {
+        let p = HoverPreview::new(Some(1));
+        p.focused(2);
+        p.rebase(Some(7));
+        assert_eq!(p.take_restore(), None);
+        assert!(!p.should_focus(7));
+        p.focused(2);
+        assert_eq!(p.take_restore(), Some(7));
     }
 
     // --- scroll_target ---

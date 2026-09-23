@@ -9,7 +9,8 @@ use crate::niri;
 
 use super::metrics::KeyboardMetrics;
 use super::{
-    dispatch_action, display_key_char, finish, show_error, ActionContext, Mode, OverlaySession,
+    dispatch_action, display_key_char, finish, focus_selected, show_error, ActionContext, Mode,
+    OverlaySession,
 };
 
 #[expect(
@@ -328,8 +329,11 @@ fn attach_hover_preview(widget: &GtkBox, ws_id: u64, session: &Rc<OverlaySession
     let hover_session = session.clone();
     let motion = EventControllerMotion::new();
     motion.connect_enter(move |_, _, _| {
-        if hover_session.hover_armed.get() {
-            let _ = niri::focus_workspace_by_id(ws_id);
+        if hover_session.hover_armed.get()
+            && hover_session.preview.should_focus(ws_id)
+            && niri::focus_workspace_by_id(ws_id).is_ok()
+        {
+            hover_session.preview.focused(ws_id);
         }
     });
     widget.add_controller(motion);
@@ -472,7 +476,7 @@ fn build_static_card(
         let click = GestureClick::new();
         click.connect_released(move |_, _, _, _| {
             let result = match click_ctx.mode {
-                Mode::Normal => niri::focus_workspace_by_id(id),
+                Mode::Normal => focus_selected(&click_ctx, id),
                 Mode::MoveWindow => niri::move_window_to_workspace_by_id(id),
                 Mode::Delete => return,
             };
