@@ -207,7 +207,8 @@ pub fn delete_workspace(
 }
 
 /// Move a window (`None`: the focused one) to a workspace, creating it if
-/// needed, and run the global on-create hooks when it was created.
+/// needed, and run the global on-create hooks when it was created. With
+/// `follow`, focus goes along with a focused window.
 ///
 /// No programs are spawned: the moved window is the workspace's content.
 /// Errors, creating nothing, when `window_id` is `None` and no window is focused.
@@ -216,8 +217,9 @@ pub fn move_window(
     ch: char,
     ws_name: &str,
     window_id: Option<u64>,
+    follow: bool,
 ) -> anyhow::Result<()> {
-    if niri::move_window_to_workspace(&config.workspace_prefix, ch, ws_name, window_id)? {
+    if niri::move_window_to_workspace(&config.workspace_prefix, ch, ws_name, window_id, follow)? {
         run_create_hooks(config, ch, ws_name, &HookInfo::default());
     }
     Ok(())

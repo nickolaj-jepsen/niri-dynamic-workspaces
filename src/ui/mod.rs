@@ -833,7 +833,7 @@ fn dispatch_action(ch: char, ctx: &ActionContext) {
             }
             (Mode::Normal, Some(id)) => focus_selected(ctx, id),
             (Mode::MoveWindow, Some(id)) => window_to_move(ctx)
-                .and_then(|window| niri::move_window_to_workspace_by_id(id, Some(window))),
+                .and_then(|window| niri::move_window_to_workspace_by_id(id, Some(window), true)),
         };
         if let Err(e) = result {
             show_error(ctx, &format!("Failed: {e:#}"));
@@ -895,8 +895,9 @@ fn dispatch_action(ch: char, ctx: &ActionContext) {
                 }
             })
         }
-        Mode::MoveWindow => window_to_move(ctx)
-            .and_then(|window| crate::actions::move_window(config, ch, &ws_name, Some(window))),
+        Mode::MoveWindow => window_to_move(ctx).and_then(|window| {
+            crate::actions::move_window(config, ch, &ws_name, Some(window), true)
+        }),
     };
 
     if let Err(e) = result {

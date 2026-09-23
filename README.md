@@ -431,6 +431,9 @@ niri-dynamic-workspaces switch a        # switch to / create dyn-a
 niri-dynamic-workspaces delete a        # close dyn-a's windows, then delete it
 niri-dynamic-workspaces move-window a   # move focused window to dyn-a
 
+niri-dynamic-workspaces switch a --here            # pull dyn-a onto the focused monitor
+niri-dynamic-workspaces move-window a --no-follow  # send the window, stay where you are
+
 # create dyn-p from a template "code" whose variables are project and branch
 niri-dynamic-workspaces switch p --template code --var project=~/dev/app --var branch=main
 niri-dynamic-workspaces switch t --title Notes   # create dyn-t titled "Notes"
@@ -444,6 +447,12 @@ also without a template; `--title ""` leaves the workspace untitled. A key
 bound to a template (`[workspace.KEY].template`) uses it without `--template`,
 so its variables need `--var` too. The flags only apply when the workspace is
 created: when it exists, `switch` focuses it and says so.
+
+`--here` first moves an existing workspace from another monitor onto the
+focused one, and niri keeps it there from then on. A new workspace is created
+on the focused monitor anyway, and a pinned one stays where it is.
+`--no-follow` moves the focused window and leaves focus on the current
+workspace.
 
 Errors and config warnings are printed in the invoking terminal, and a failed
 action exits non-zero, also when a daemon handles the call. A relative

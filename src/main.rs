@@ -59,6 +59,9 @@ enum Command {
         key: Option<char>,
         #[command(flatten)]
         create: CreateArgs,
+        /// Move the workspace onto the focused monitor before switching to it
+        #[arg(long, requires = "key")]
+        here: bool,
     },
     /// Delete a workspace
     Delete {
@@ -71,6 +74,9 @@ enum Command {
         /// Workspace key (a-z, 0-9) — act directly without overlay
         #[arg(value_parser = parse_key_arg)]
         key: Option<char>,
+        /// Keep focus on the current workspace instead of following the window
+        #[arg(long, requires = "key")]
+        no_follow: bool,
     },
     /// Start as a background daemon (for spawn-at-startup)
     Daemon,
@@ -123,6 +129,27 @@ fn parse_var(s: &str) -> Result<(String, String), String> {
 #[derive(Default)]
 struct DirectOptions {
     create: CreateArgs,
+    /// `switch --here`
+    here: bool,
+    /// `move-window --no-follow`
+    no_follow: bool,
+}
+
+impl DirectOptions {
+    fn of(command: Option<&Command>) -> Self {
+        match command {
+            Some(Command::Switch { create, here, .. }) => Self {
+                create: create.clone(),
+                here: *here,
+                ..Self::default()
+            },
+            Some(Command::MoveWindow { no_follow, .. }) => Self {
+                no_follow: *no_follow,
+                ..Self::default()
+            },
+            _ => Self::default(),
+        }
+    }
 }
 
 /// Parse a workspace key argument, so a bad key fails in the caller's own pre-parse.
@@ -255,13 +282,19 @@ fn handle_direct_action(
             "--template, --var and --title create dynamic workspaces, \
              and key '{ch}' is pinned to static workspace '{target}'"
         );
+        if options.here {
+            report(
+                cmdline,
+                &format!("note: --here leaves pinned workspace '{target}' on its own output"),
+            );
+        }
         // Resolved first: niri ignores an action on a missing workspace.
         return match mode {
             ui::Mode::Normal => {
                 niri::workspace_id_by_name(target).and_then(niri::focus_workspace_by_id)
             }
             ui::Mode::MoveWindow => niri::workspace_id_by_name(target)
-                .and_then(|id| niri::move_window_to_workspace_by_id(id, None)),
+                .and_then(|id| niri::move_window_to_workspace_by_id(id, None, !options.no_follow)),
             ui::Mode::Delete => anyhow::bail!(
                 "key '{ch}' is pinned to static workspace '{target}', which cannot be deleted"
             ),
@@ -271,6 +304,9 @@ fn handle_direct_action(
     let ws_name = config::workspace_name(&cfg.workspace_prefix, ch);
     match mode {
         ui::Mode::Normal => {
+            if options.here {
+                niri::move_workspace_to_focused_output(&cfg.workspace_prefix, ch)?;
+            }
             // An existing workspace needs no template variables; checked only
             // then, so a plain switch keeps its IPC sequence.
             let from_template = create.is_set() || cfg.template_for(ch).is_some();
@@ -317,7 +353,7 @@ fn handle_direct_action(
                 }
             })
         }
-        ui::Mode::MoveWindow => actions::move_window(&cfg, ch, &ws_name, None),
+        ui::Mode::MoveWindow => actions::move_window(&cfg, ch, &ws_name, None, !options.no_follow),
     }
 }
 
@@ -426,16 +462,10 @@ fn main() -> glib::ExitCode {
             None => (ui::Mode::Normal, None),
             Some(Command::Switch { key, .. }) => (ui::Mode::Normal, key),
             Some(Command::Delete { key }) => (ui::Mode::Delete, key),
-            Some(Command::MoveWindow { key }) => (ui::Mode::MoveWindow, key),
+            Some(Command::MoveWindow { key, .. }) => (ui::Mode::MoveWindow, key),
         };
-        let options = match &cli.command {
-            Some(Command::Switch { create, .. }) => DirectOptions {
-                create: create.clone(),
-            },
-            _ => DirectOptions::default(),
-        };
-
         if let Some(ch) = key {
+            let options = DirectOptions::of(cli.command.as_ref());
             return match handle_direct_action(app, cmdline, &cli, mode, ch, &options) {
                 Ok(()) => 0,
                 Err(e) => {
@@ -563,6 +593,44 @@ mod tests {
             panic!("not a switch");
         };
         assert!(!create.is_set());
+    }
+
+    #[test]
+    fn cli_here_requires_key() {
+        let Err(e) = Cli::try_parse_from(["ndw", "switch", "--here"]) else {
+            panic!("--here without a key must not parse");
+        };
+        assert_eq!(e.exit_code(), 2);
+        let cli = Cli::try_parse_from(["ndw", "switch", "a", "--here"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Switch {
+                key: Some('a'),
+                here: true,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn cli_no_follow_parses() {
+        let cli = Cli::try_parse_from(["ndw", "move-window", "b", "--no-follow"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::MoveWindow {
+                key: Some('b'),
+                no_follow: true,
+            })
+        ));
+        let cli = Cli::try_parse_from(["ndw", "move-window", "b"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::MoveWindow {
+                no_follow: false,
+                ..
+            })
+        ));
+        assert!(Cli::try_parse_from(["ndw", "move-window", "--no-follow"]).is_err());
     }
 
     /// Run `check_config` on `path`: its status, and what it reported and printed.
