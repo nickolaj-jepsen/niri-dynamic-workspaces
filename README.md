@@ -60,7 +60,7 @@ binds never reach niri; add the ones from [Keybinds](#keybinds) yourself.
 
 ### Cargo
 
-Requires GTK4, gtk4-layer-shell, and pkg-config development headers.
+Requires GTK4, GLib 2.80 or newer, gtk4-layer-shell, and pkg-config development headers.
 
 ```bash
 cargo install --git https://github.com/nickolaj-jepsen/niri-dynamic-workspaces
@@ -350,6 +350,10 @@ niri-dynamic-workspaces switch a        # switch to / create dyn-a
 niri-dynamic-workspaces delete a        # delete dyn-a
 niri-dynamic-workspaces move-window a   # move focused window to dyn-a
 ```
+
+Errors and config warnings are printed in the invoking terminal, and a failed
+action exits non-zero, also when a daemon handles the call. A relative
+`--config` path is resolved against the caller's directory.
 
 ### Daemon mode
 
