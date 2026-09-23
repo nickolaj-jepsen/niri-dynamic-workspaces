@@ -253,7 +253,7 @@ Every theme is rendered in the [theme gallery](docs/themes.md).
 | a palette name | `catppuccin-mocha`, `catppuccin-latte`, `gruvbox-dark`, `gruvbox-light`, `nord`, `dracula`, `tokyo-night`, `rose-pine`, `everforest`, `kanagawa`, `solarized-dark`, `solarized-light`, `flexoki-dark`, `flexoki-light`, `fireproof` — all shown in the [gallery](docs/themes.md). |
 | a path | Your own CSS file. Anything containing `/` or ending in `.css` is a path; `~/` is expanded and relative paths start at the config file's directory. |
 
-A theme file is ordinary [GTK CSS](https://docs.gtk.org/gtk4/css-properties.html) and only needs what it changes: primaries it leaves out still come from the GTK theme. It is re-read every time the overlay opens, daemon included; CSS errors are reported on stderr and the rest of the file still applies.
+A theme file is ordinary [GTK CSS](https://docs.gtk.org/gtk4/css-properties.html) and only needs what it changes: primaries it leaves out still come from the GTK theme. It is re-read every time the overlay opens, daemon included; CSS errors are shown on a line under the overlay's hints and printed on stderr, and the rest of the file still applies.
 
 ```css
 /* ~/.config/niri-dynamic-workspaces/mocha.css, with theme = "mocha.css" */
@@ -311,6 +311,7 @@ For anything variables can't express, style the widgets directly.
 | `.workspace-card` | a key or a static workspace; contains `.card-title` and `.card-name` |
 | `.mode-tabs`, `.mode-tab` | mode bar; tabs carry `.switch`, `.delete` or `.move-window`, plus `.active` |
 | `.hints`, `.hint`, `.error-message` | footer hints and the error line |
+| `.config-message` | the line under the hints naming config and theme problems; also carries `.error-message` |
 | `.template-picker` | template view: `.template-title`, `.template-list`, `.template-option` (`.selected`) with `.template-key`, `.template-name`, `.template-programs` |
 | `.variable-prompt` | variable view: `.variable-title`, `.variable-form`, `.variable-row`, `.variable-label`, `.variable-entry` (`.loading`) |
 | `.fuzzy-list`, `.fuzzy-option` (`.selected`), `.fuzzy-more` | select-variable options |
@@ -360,7 +361,7 @@ spawn-at-startup "niri-dynamic-workspaces" "daemon"
 
 The daemon keeps GTK initialized and subsequent `switch`/`delete`/`move-window` invocations are forwarded to it over D-Bus, skipping startup overhead.
 
-Config changes are picked up automatically: the daemon reloads the config file whenever its contents change, including on a Home Manager switch, so no restart is needed. If an edit breaks the file, auto-delete keeps following the last config that loaded.
+Config changes are picked up automatically: the daemon reloads the config file whenever its contents change, including on a Home Manager switch, so no restart is needed. If an edit breaks the file, auto-delete keeps following the last config that loaded, while the overlay opens with the defaults and names the problem.
 
 The Home Manager module enables daemon mode by default, as a user service that
 starts with `graphical-session.target`. The service is skipped unless niri has

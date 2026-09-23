@@ -157,6 +157,8 @@ struct OverlaySession {
     /// True while a sub-view (template picker / variable form) is showing;
     /// suppresses structural refreshes that would destroy it.
     in_subview: Cell<bool>,
+    /// Config and theme problems, shown on a line under the hints.
+    problems: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -177,7 +179,7 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
     let window = ApplicationWindow::builder().application(app).build();
     window.remove_css_class("background");
     window.init_layer_shell();
-    theme::apply(&config.theme);
+    let theme_warnings = theme::apply(&config.theme);
 
     // Single IPC fetch — derive focused output, monitor, and workspace name from it.
     let workspaces = niri::list_workspaces().unwrap_or_default();
@@ -200,6 +202,12 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
         selection_made: Cell::new(false),
         hover_armed: Cell::new(false),
         in_subview: Cell::new(false),
+        problems: config
+            .diagnostics
+            .iter()
+            .map(ToString::to_string)
+            .chain(theme_warnings)
+            .collect(),
     });
 
     // Arm hover-preview after the first real mouse movement so that a cursor
@@ -478,6 +486,32 @@ fn build_hint_footer(metrics: &KeyboardMetrics, hints: &[&str]) -> GtkBox {
     footer
 }
 
+/// One line for the overlay: the first problem, and how many more there are.
+fn diagnostics_summary(problems: &[String]) -> Option<String> {
+    let (first, rest) = problems.split_first()?;
+    Some(if rest.is_empty() {
+        first.clone()
+    } else {
+        format!("{first} (+{} more)", rest.len())
+    })
+}
+
+/// The config-problems line; its tooltip lists every problem.
+fn build_problems_line(problems: &[String]) -> Option<Label> {
+    let summary = diagnostics_summary(problems)?;
+    Some(
+        Label::builder()
+            .label(summary)
+            .css_classes(["error-message", "config-message"])
+            .wrap(true)
+            .justify(gtk4::Justification::Center)
+            // A wrapping label asks for its one-line width; a long path would widen the view.
+            .max_width_chars(100)
+            .tooltip_text(problems.join("\n"))
+            .build(),
+    )
+}
+
 /// Build (or rebuild) the overlay content for `mode` inside an existing window.
 ///
 /// If `prefetched_workspaces` is provided, uses them instead of making a fresh IPC call.
@@ -530,7 +564,7 @@ fn populate_overlay(
         focused_output: focused_output_from(&workspaces),
     };
 
-    // Assemble: static row → keyboard → hint footer → error revealer → mode tabs
+    // Assemble: static row → keyboard → hint footer → problems → error revealer → mode tabs
     let static_infos = build_static_workspace_infos(&workspaces, &windows, config);
     if !static_infos.is_empty() {
         container.append(&build_static_workspace_row(
@@ -547,6 +581,9 @@ fn populate_overlay(
         &metrics,
         &["press key to select", "Tab switch mode", "Escape close"],
     ));
+    if let Some(line) = build_problems_line(&session.problems) {
+        container.append(&line);
+    }
     container.append(&error_revealer);
     container.append(&build_mode_tabs(&ctx, mode));
 
@@ -862,6 +899,35 @@ mod tests {
         assert_eq!(Mode::Normal.css_class(), "switch");
         assert_eq!(Mode::Delete.css_class(), "delete");
         assert_eq!(Mode::MoveWindow.css_class(), "move-window");
+    }
+
+    // --- diagnostics_summary ---
+
+    fn problems(n: usize) -> Vec<String> {
+        (1..=n)
+            .map(|i| format!("config warning: problem {i}"))
+            .collect()
+    }
+
+    #[test]
+    fn diagnostics_summary_none_when_clean() {
+        assert_eq!(diagnostics_summary(&[]), None);
+    }
+
+    #[test]
+    fn diagnostics_summary_single_is_the_problem() {
+        assert_eq!(
+            diagnostics_summary(&problems(1)),
+            Some("config warning: problem 1".to_string())
+        );
+    }
+
+    #[test]
+    fn diagnostics_summary_counts_the_rest() {
+        assert_eq!(
+            diagnostics_summary(&problems(3)),
+            Some("config warning: problem 1 (+2 more)".to_string())
+        );
     }
 
     // --- display_key_char ---

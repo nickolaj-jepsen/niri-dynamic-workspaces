@@ -98,6 +98,13 @@ test_overlay_escape_closes() {
     "$h" closed && no_ws dyn-c
 }
 
+test_broken_config_still_opens() {
+    local log
+    printf '[general\n' | "$h" config && "$h" overlay switch || return 1
+    log=$("$h" logs 40)
+    [[ $log == *"config error:"* ]] && "$h" escape && "$h" closed
+}
+
 test_overlay_delete_mode() {
     "$h" app switch d && "$h" app switch a || return 1
     until_true has_ws dyn-d || return 1
@@ -157,6 +164,7 @@ tests=(
     overlay_key_press_switches
     overlay_escape_closes
     overlay_delete_mode
+    broken_config_still_opens
     daemon_serves_invocations
     daemon_deletes_empty_workspaces
     daemon_reloads_config_on_content_change

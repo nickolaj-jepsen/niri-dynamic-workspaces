@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::path::Path;
+use std::rc::Rc;
 
 use gtk4::CssProvider;
 
@@ -32,16 +33,22 @@ pub fn install_base(display: &gdk4::Display) {
 }
 
 /// Replace the active theme. Files are re-read each call, so edits apply on the next open.
-pub(super) fn apply(theme: &Theme) {
+///
+/// Returns the theme file's problems, which are also printed to stderr.
+pub(super) fn apply(theme: &Theme) -> Vec<String> {
     let Some(display) = gdk4::Display::default() else {
-        return;
+        return Vec::new();
     };
+    let mut warnings = Vec::new();
     let (provider, priority) = match theme {
         Theme::Builtin(builtin) => (from_data(builtin.css), PRIORITY_BUILTIN_THEME),
-        Theme::File(path) => match from_file(path) {
-            Some(provider) => (provider, PRIORITY_THEME_FILE),
-            None => return apply(&Theme::default()),
-        },
+        Theme::File(path) => {
+            let Some(provider) = from_file(path, &mut warnings) else {
+                apply(&Theme::default());
+                return warnings;
+            };
+            (provider, PRIORITY_THEME_FILE)
+        }
     };
     THEME_PROVIDER.with(|cell| {
         if let Some(old) = cell.borrow_mut().replace(provider.clone()) {
@@ -49,23 +56,42 @@ pub(super) fn apply(theme: &Theme) {
         }
     });
     add(&display, &provider, priority);
+    warnings
 }
 
-/// Load a theme file, reporting CSS errors on stderr; `None` only when it cannot be read.
-fn from_file(path: &Path) -> Option<CssProvider> {
+/// Load a theme file, adding CSS errors to `warnings` and stderr; `None`
+/// only when it cannot be read.
+fn from_file(path: &Path, warnings: &mut Vec<String>) -> Option<CssProvider> {
     if let Err(e) = std::fs::metadata(path) {
-        eprintln!(
-            "theme warning: could not read {}: {e}, using the gtk theme",
-            path.display()
+        warn(
+            warnings,
+            &format!(
+                "could not read {}: {e}, using the gtk theme",
+                path.display()
+            ),
         );
         return None;
     }
     let provider = CssProvider::new();
-    provider.connect_parsing_error(|_, section, error| {
-        eprintln!("theme warning: {}: {}", section.to_str(), error.message());
+    let parse_errors = Rc::new(RefCell::new(Vec::new()));
+    let sink = parse_errors.clone();
+    provider.connect_parsing_error(move |_, section, error| {
+        warn(
+            &mut sink.borrow_mut(),
+            &format!("{}: {}", section.to_str(), error.message()),
+        );
     });
+    // Parsing is synchronous, so every error has been reported once this returns.
     provider.load_from_path(path);
+    warnings.append(&mut parse_errors.borrow_mut());
     Some(provider)
+}
+
+/// Print a theme warning (render-lib.sh greps the prefix) and keep it.
+fn warn(warnings: &mut Vec<String>, message: &str) {
+    let warning = format!("theme warning: {message}");
+    eprintln!("{warning}");
+    warnings.push(warning);
 }
 
 fn from_data(css: &str) -> CssProvider {
