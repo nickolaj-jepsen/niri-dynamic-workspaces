@@ -677,6 +677,7 @@ pub(super) mod tests {
             default_programs: Vec::new(),
             workspace_programs: HashMap::new(),
             workspace_names: HashMap::new(),
+            workspace_templates: HashMap::new(),
             static_workspaces: HashMap::new(),
             auto_delete_empty: true,
             hover_preview: true,

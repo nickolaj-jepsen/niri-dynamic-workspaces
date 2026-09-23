@@ -72,6 +72,7 @@ struct WorkspaceEntry {
     programs: Vec<String>,
     #[serde(rename = "static", deserialize_with = "string_or_integer")]
     static_workspace: Option<String>,
+    template: Option<String>,
 }
 
 /// An optional string that may also be written as an integer: `key = 2`,
@@ -167,6 +168,8 @@ pub struct ResolvedConfig {
     pub default_programs: Vec<String>,
     pub workspace_programs: HashMap<char, Vec<String>>,
     pub workspace_names: HashMap<char, String>,
+    /// Keys whose new workspace comes from this template, without the picker.
+    pub workspace_templates: HashMap<char, String>,
     /// Keys pinned to existing (non-dynamic) niri workspaces by name.
     pub static_workspaces: HashMap<char, String>,
     pub auto_delete_empty: bool,
@@ -319,10 +322,18 @@ impl ResolvedConfig {
 
     /// Whether the template picker should be shown for a given workspace key.
     ///
-    /// Returns `true` when templates are configured and the key has no
-    /// per-workspace programs (which would bypass the picker).
+    /// Returns `true` when templates are configured and the key has neither
+    /// per-workspace programs nor a template of its own, which bypass the picker.
     pub fn should_show_templates(&self, ch: char) -> bool {
-        !self.templates.is_empty() && !self.workspace_programs.contains_key(&ch)
+        !self.templates.is_empty()
+            && !self.workspace_programs.contains_key(&ch)
+            && !self.workspace_templates.contains_key(&ch)
+    }
+
+    /// The template `[workspace.<ch>]` creates its workspace from.
+    pub fn template_for(&self, ch: char) -> Option<&Template> {
+        let name = self.workspace_templates.get(&ch)?;
+        self.templates.iter().find(|t| t.name == *name)
     }
 
     /// Whether loading fell back to the defaults for the whole file.
@@ -614,6 +625,8 @@ impl Config {
         let mut workspace_programs = HashMap::new();
         let mut workspace_names = HashMap::new();
         let mut static_workspaces = HashMap::new();
+        // Checked once the templates are resolved: (key, table name, template).
+        let mut bindings: Vec<(char, String, String)> = Vec::new();
         for (key, entry) in self.workspace {
             let Some(ch) = parse_workspace_char(&key) else {
                 warnings.push(format!(
@@ -644,6 +657,11 @@ impl Config {
                             "[workspace.{key}]: 'programs' are ignored for static workspaces"
                         ));
                     }
+                    if entry.template.is_some() {
+                        warnings.push(format!(
+                            "[workspace.{key}]: 'template' is ignored for static workspaces"
+                        ));
+                    }
                     static_workspaces.insert(ch, target);
                     if let Some(name) = entry.name.filter(|n| !n.is_empty()) {
                         workspace_names.insert(ch, name);
@@ -662,6 +680,13 @@ impl Config {
             }
             if let Some(name) = entry.name {
                 workspace_names.insert(ch, name);
+            }
+            match entry.template {
+                Some(template) if template.is_empty() => {
+                    warnings.push(format!("[workspace.{key}]: 'template' is empty, ignoring"));
+                }
+                Some(template) => bindings.push((ch, key, template)),
+                None => {}
             }
         }
 
@@ -834,12 +859,30 @@ impl Config {
             }
         }
 
+        // A template skipped above for its empty programs counts as unknown.
+        let mut workspace_templates = HashMap::new();
+        for (ch, key, template) in bindings {
+            if !templates.iter().any(|t| t.name == template) {
+                warnings.push(format!(
+                    "[workspace.{key}]: unknown template '{template}', ignoring"
+                ));
+                continue;
+            }
+            if workspace_programs.remove(&ch).is_some() {
+                warnings.push(format!(
+                    "[workspace.{key}]: 'programs' are ignored because 'template' is set"
+                ));
+            }
+            workspace_templates.insert(ch, template);
+        }
+
         let resolved = ResolvedConfig {
             workspace_prefix: prefix,
             close_keybinds,
             default_programs: self.general.default_programs,
             workspace_programs,
             workspace_names,
+            workspace_templates,
             static_workspaces,
             auto_delete_empty: self.general.auto_delete_empty,
             hover_preview: self.general.hover_preview,
@@ -1789,6 +1832,80 @@ mod tests {
         assert_eq!(resolved.workspace_names[&'b'], "Terminal");
     }
 
+    // --- Workspace template bindings ---
+
+    /// Resolve `[workspace.d]` with `entry` (TOML lines) next to template dev.
+    fn resolve_binding(entry: &str) -> (ResolvedConfig, Vec<String>) {
+        resolve_toml(&format!(
+            "[template.dev]\nprograms = [\"code\"]\n\n[workspace.d]\n{entry}\n"
+        ))
+    }
+
+    #[test]
+    fn resolve_workspace_template_binding() {
+        let (resolved, warnings) = resolve_binding("template = \"dev\"");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(resolved.workspace_templates[&'d'], "dev");
+        assert_eq!(resolved.template_for('d').unwrap().name, "dev");
+        assert!(resolved.template_for('a').is_none());
+        assert!(!resolved.should_show_templates('d'));
+        assert!(resolved.should_show_templates('a'));
+    }
+
+    #[test]
+    fn resolve_workspace_template_unknown_warns() {
+        let (resolved, warnings) = resolve_binding("template = \"web\"\nprograms = [\"firefox\"]");
+        assert_eq!(
+            warnings,
+            ["[workspace.d]: unknown template 'web', ignoring"]
+        );
+        assert!(resolved.workspace_templates.is_empty());
+        assert_eq!(resolved.workspace_programs[&'d'], ["firefox"]);
+    }
+
+    #[test]
+    fn resolve_workspace_template_skipped_for_empty_programs_is_unknown() {
+        let (resolved, warnings) =
+            resolve_toml("[template.web]\nprograms = []\n\n[workspace.d]\ntemplate = \"web\"\n");
+        assert_eq!(
+            warnings,
+            [
+                "ignoring template 'web': programs list is empty",
+                "[workspace.d]: unknown template 'web', ignoring",
+            ]
+        );
+        assert!(resolved.template_for('d').is_none());
+    }
+
+    #[test]
+    fn resolve_workspace_template_with_programs_warns_template_wins() {
+        let (resolved, warnings) = resolve_binding("template = \"dev\"\nprograms = [\"firefox\"]");
+        assert_eq!(
+            warnings,
+            ["[workspace.d]: 'programs' are ignored because 'template' is set"]
+        );
+        assert_eq!(resolved.template_for('d').unwrap().name, "dev");
+        assert!(!resolved.workspace_programs.contains_key(&'d'));
+    }
+
+    #[test]
+    fn resolve_workspace_template_on_static_warns() {
+        let (resolved, warnings) = resolve_binding("static = \"main\"\ntemplate = \"dev\"");
+        assert_eq!(
+            warnings,
+            ["[workspace.d]: 'template' is ignored for static workspaces"]
+        );
+        assert!(resolved.workspace_templates.is_empty());
+        assert_eq!(resolved.static_workspaces[&'d'], "main");
+    }
+
+    #[test]
+    fn resolve_workspace_template_empty_warns() {
+        let (resolved, warnings) = resolve_binding("template = \"\"");
+        assert_eq!(warnings, ["[workspace.d]: 'template' is empty, ignoring"]);
+        assert!(resolved.workspace_templates.is_empty());
+    }
+
     // --- Static workspace mappings ---
 
     #[test]
@@ -2728,6 +2845,9 @@ programs = ["firefox"]
 static = "main"
 name = "Main"
 
+[workspace.d]
+template = "dev"
+
 [template.dev]
 programs = ["code {{project}}", "kitty {{branch}} {{tool}} {{note}}"]
 key = "d"
@@ -3558,6 +3678,7 @@ type = "text"
             default_programs: Vec::new(),
             workspace_programs: HashMap::new(),
             workspace_names: HashMap::new(),
+            workspace_templates: HashMap::new(),
             static_workspaces: HashMap::new(),
             auto_delete_empty: true,
             hover_preview: true,
