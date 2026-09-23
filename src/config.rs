@@ -961,18 +961,19 @@ fn default_config() -> ResolvedConfig {
 }
 
 /// Resolve the config file location: the override if given, else the XDG default.
-fn config_path(path_override: Option<&Path>) -> Option<PathBuf> {
+pub(crate) fn config_path(path_override: Option<&Path>) -> Option<PathBuf> {
     path_override.map(Path::to_path_buf).or_else(|| {
         dirs::config_dir().map(|dir| dir.join("niri-dynamic-workspaces").join("config.toml"))
     })
 }
 
-/// Read the config file: `Ok(None)` when it does not exist, `Err` with a
-/// user-facing message on any other I/O failure.
-fn read_config(path: &Path) -> Result<Option<String>, String> {
+/// Read the config file: `Ok(None)` when the default file does not exist,
+/// `Err` with a user-facing message on any other I/O failure, including a
+/// missing `explicit` path (one the user named).
+fn read_config(path: &Path, explicit: bool) -> Result<Option<String>, String> {
     match std::fs::read_to_string(path) {
         Ok(text) => Ok(Some(text)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && !explicit => Ok(None),
         Err(e) => Err(format!(
             "could not read {}: {e}, using defaults",
             path.display()
@@ -1040,6 +1041,8 @@ fn toml_error_summary(e: &toml::de::Error, text: &str) -> String {
 pub(crate) struct ConfigWatcher {
     /// `None` when there is no config directory; the defaults then apply.
     path: Option<PathBuf>,
+    /// The user named the path, so a missing file is an error.
+    explicit: bool,
     last_read: Option<Result<Option<String>, String>>,
     good: Option<ResolvedConfig>,
 }
@@ -1054,6 +1057,7 @@ impl ConfigWatcher {
         });
         Self {
             path,
+            explicit: path_override.is_some(),
             last_read: None,
             good,
         }
@@ -1067,7 +1071,7 @@ impl ConfigWatcher {
         let Some(path) = &self.path else {
             return self.good.as_ref();
         };
-        let read = read_config(path);
+        let read = read_config(path, self.explicit);
         if self.last_read.as_ref() != Some(&read) {
             let config = from_contents(path, &read);
             print_diagnostics(&config);
@@ -1125,7 +1129,7 @@ pub fn load_config(path_override: Option<&Path>) -> ResolvedConfig {
         ));
         return config;
     };
-    from_contents(&path, &read_config(&path))
+    from_contents(&path, &read_config(&path, path_override.is_some()))
 }
 
 #[cfg(test)]
@@ -2071,16 +2075,30 @@ programs = ["firefox"]
     }
 
     #[test]
-    fn read_config_missing_file_is_none() {
+    fn read_config_missing_default_path_is_none() {
         let path = temp_config("missing", "");
         std::fs::remove_file(&path).unwrap();
-        assert_eq!(read_config(&path), Ok(None));
+        assert_eq!(read_config(&path, false), Ok(None));
+        assert!(read_config(&path, true).is_err());
+    }
+
+    #[test]
+    fn load_config_missing_explicit_path_is_error() {
+        let path = temp_config("typo", "");
+        std::fs::remove_file(&path).unwrap();
+        let config = load_config(Some(&path));
+        assert!(config.has_errors(), "{:?}", config.diagnostics);
+        assert!(
+            config.diagnostics[0].message.contains("could not read"),
+            "{:?}",
+            config.diagnostics
+        );
     }
 
     #[test]
     fn read_config_unreadable_path_is_error() {
         // A directory exists but cannot be read as a file.
-        let err = read_config(&std::env::temp_dir()).unwrap_err();
+        let err = read_config(&std::env::temp_dir(), false).unwrap_err();
         assert!(err.contains("could not read"), "{err}");
         let config = from_contents(Path::new("dir"), &Err(err));
         assert_eq!(config.diagnostics[0].severity, Severity::Error);
@@ -2186,15 +2204,17 @@ programs = ["firefox"]
     }
 
     #[test]
-    fn cleanup_prefix_source_missing_file_uses_defaults() {
-        let path = std::env::temp_dir().join(format!(
-            "ndw-cleanup-source-missing-{}.toml",
-            std::process::id()
-        ));
-        std::fs::remove_file(&path).ok();
+    fn cleanup_prefix_source_missing_explicit_file_skips_cleanup() {
+        let path = temp_config("later", "");
+        std::fs::remove_file(&path).unwrap();
 
+        // A mistyped --config must not clean up with the default settings.
         let mut source = cleanup_prefix_source(Some(&path));
-        assert_eq!(source(), Some("dyn-".to_string()));
+        assert_eq!(source(), None);
+
+        std::fs::write(&path, "[general]\nworkspace_prefix = \"ddd-\"\n").unwrap();
+        assert_eq!(source(), Some("ddd-".to_string()));
+        std::fs::remove_file(&path).ok();
     }
 
     // --- Template variable resolution ---

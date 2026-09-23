@@ -43,7 +43,7 @@ fn application_id() -> String {
 #[command(version)]
 struct Cli {
     /// Path to config file [default: ~/.config/niri-dynamic-workspaces/config.toml]
-    #[arg(short, long, value_name = "FILE")]
+    #[arg(short, long, value_name = "FILE", global = true)]
     config: Option<PathBuf>,
 
     #[command(subcommand)]
@@ -72,6 +72,8 @@ enum Command {
     },
     /// Start as a background daemon (for spawn-at-startup)
     Daemon,
+    /// Report config problems; exit non-zero if there are any
+    Check,
 }
 
 /// Parse a workspace key argument, so a bad key fails in the caller's own pre-parse.
@@ -111,6 +113,30 @@ fn fail_later(cmdline: &ApplicationCommandLine, msg: &str) {
     if !cmdline.is_remote() {
         LATE_EXIT_STATUS.store(1, Ordering::Relaxed);
     }
+}
+
+/// Load the config at `path` (or the default location), send each problem
+/// to `report`, and return the exit status: 1 if there were any.
+///
+/// Needs no display or bus, so it can run in a build sandbox.
+fn check_config(path: Option<&Path>, report: impl Fn(&str), out: impl Fn(&str)) -> i32 {
+    let cfg = config::load_config(path);
+    for d in &cfg.diagnostics {
+        report(&d.to_string());
+    }
+    if !cfg.diagnostics.is_empty() {
+        return 1;
+    }
+    match config::config_path(path) {
+        Some(file) if file.exists() => out(&format!("{}: no problems found", file.display())),
+        Some(file) => out(&format!(
+            "no config file at {}, defaults apply",
+            file.display()
+        )),
+        // load_config has reported the missing config directory.
+        None => {}
+    }
+    0
 }
 
 fn handle_direct_action(
@@ -175,8 +201,15 @@ fn handle_overlay(
 fn main() -> glib::ExitCode {
     // Pre-parse so --help / --version and bad arguments are handled in the
     // caller before GTK starts (important when a daemon is already running).
-    if let Err(e) = Cli::try_parse() {
-        e.exit();
+    let cli = Cli::try_parse().unwrap_or_else(|e| e.exit());
+    // Subcommands that never start GTK, so they need no display or D-Bus.
+    if matches!(cli.command, Some(Command::Check)) {
+        return check_config(
+            cli.config.as_deref(),
+            |msg| eprintln!("{msg}"),
+            |msg| println!("{msg}"),
+        )
+        .into();
     }
 
     let app = gtk4::Application::builder()
@@ -209,6 +242,14 @@ fn main() -> glib::ExitCode {
             .map(|path| absolutize(path, cmdline.cwd().as_deref()));
 
         let (mode, key) = match cli.command {
+            // main() runs it before GTK starts; only here for exhaustiveness.
+            Some(Command::Check) => {
+                return check_config(
+                    cli.config.as_deref(),
+                    |msg| report(cmdline, msg),
+                    |msg| cmdline.print_literal(&format!("{msg}\n")),
+                );
+            }
             Some(Command::Daemon) => {
                 if hold_guard.borrow().is_some() {
                     return 0;
@@ -294,6 +335,50 @@ mod tests {
             cli.command,
             Some(Command::Switch { key: Some('a') })
         ));
+    }
+
+    /// Run `check_config` on `path`: its status, and what it reported and printed.
+    fn run_check(path: &Path) -> (i32, Vec<String>, Vec<String>) {
+        let (reported, printed) = (RefCell::new(Vec::new()), RefCell::new(Vec::new()));
+        let status = check_config(
+            Some(path),
+            |msg| reported.borrow_mut().push(msg.to_string()),
+            |msg| printed.borrow_mut().push(msg.to_string()),
+        );
+        (status, reported.into_inner(), printed.into_inner())
+    }
+
+    #[test]
+    fn check_config_exit_status_follows_diagnostics() {
+        let path = std::env::temp_dir().join(format!("ndw-check-test-{}.toml", std::process::id()));
+        let check = |contents: &str| {
+            std::fs::write(&path, contents).unwrap();
+            run_check(&path)
+        };
+
+        let (status, reported, printed) = check("[general]\nworkspace_prefix = \"ws-\"\n");
+        assert_eq!((status, reported.len()), (0, 0));
+        assert!(printed[0].ends_with("no problems found"), "{printed:?}");
+
+        let (status, reported, printed) = check("[general\n");
+        assert_eq!((status, printed.len()), (1, 0));
+        assert!(reported[0].starts_with("config error:"), "{reported:?}");
+
+        let (status, reported, _) = check("[general]\nlayout = \"workman\"\n");
+        assert_eq!(status, 1);
+        assert!(reported[0].starts_with("config warning:"), "{reported:?}");
+
+        std::fs::remove_file(&path).unwrap();
+        let (status, reported, _) = run_check(&path);
+        assert_eq!(status, 1, "a missing --config file is an error");
+        assert!(reported[0].starts_with("config error:"), "{reported:?}");
+    }
+
+    #[test]
+    fn cli_config_is_global() {
+        let cli = Cli::try_parse_from(["ndw", "check", "--config", "x.toml"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Check)));
+        assert_eq!(cli.config, Some(PathBuf::from("x.toml")));
     }
 
     #[test]

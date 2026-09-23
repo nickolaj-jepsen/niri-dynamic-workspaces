@@ -332,6 +332,9 @@ Variable and class names are covered by semver. The widget tree between them is 
 - **`niri-dynamic-workspaces delete`** — opens the delete overlay (press key to delete)
 - **`niri-dynamic-workspaces move-window`** — opens the move-window overlay (press key to move the focused window)
 - **`niri-dynamic-workspaces daemon`** — starts as a background daemon (no overlay shown)
+- **`niri-dynamic-workspaces check`** — lists config problems and exits non-zero if there are any; needs no display
+
+Every command takes `-c/--config FILE` to read another config file.
 
 Running the same command while its overlay is open closes the overlay, and
 running another mode's command switches the open overlay to that mode. Keybinds
@@ -376,6 +379,14 @@ disable it:
 ```nix
 programs.niri-dynamic-workspaces.daemon = false;
 ```
+
+### Troubleshooting
+
+Config problems are shown on a line under the overlay's hints and printed in
+the invoking terminal; a file that does not parse falls back to the defaults.
+`niri-dynamic-workspaces check` lists every problem. The daemon logs to stderr,
+which for the Home Manager service is
+`journalctl --user -u niri-dynamic-workspaces`.
 
 ## Development
 
