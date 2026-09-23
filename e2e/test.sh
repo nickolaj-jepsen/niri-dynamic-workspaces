@@ -413,6 +413,34 @@ test_form_takes_typed_command_value() {
     until_true has_ws "dyn-5 feature-x"
 }
 
+# A command whose options never arrive; slow.pid names its background sleep, which only a group kill reaches.
+slow_command='command = '\''sleep 30 & echo $! >"$XDG_CONFIG_HOME/slow.pid"; wait'\'
+slow_pid() {
+    local pid
+    pid=$(cat "$("$h" run printenv XDG_CONFIG_HOME)/slow.pid" 2>/dev/null) && [[ $pid ]] && echo "$pid"
+}
+# gone <pid>: the process has exited; a zombie counts, since its parent died with it.
+gone() { [[ ! -e /proc/$1 || $(cut -d' ' -f3 "/proc/$1/stat" 2>/dev/null) == Z ]]; }
+
+test_form_escape_stops_slow_command() {
+    local pid
+    add_select_template command "$slow_command" && "$h" overlay switch || return 1
+    "$h" type 5 && "$h" type d || return 1 # delta's form
+    until_true slow_pid >/dev/null && pid=$(slow_pid) || return 1
+    "$h" type -k Escape || return 1 # back to the picker
+    until_true gone "$pid" && "$h" open
+}
+
+test_form_offers_text_after_command_timeout() {
+    local pid
+    add_select_template command "$slow_command" && "$h" overlay switch || return 1
+    "$h" type 5 && "$h" type d || return 1 # delta's form
+    until_true slow_pid >/dev/null && pid=$(slow_pid) || return 1
+    until_true_for 15 gone "$pid" || return 1
+    "$h" type late && "$h" type -k Return || return 1
+    until_true has_ws "dyn-5 late"
+}
+
 test_overlay_escape_closes() {
     "$h" overlay switch || return 1
     "$h" escape || return 1
@@ -613,6 +641,8 @@ tests=(
     form_refuses_unmatched_option
     form_click_picks_option
     form_takes_typed_command_value
+    form_escape_stops_slow_command
+    form_offers_text_after_command_timeout
     overlay_escape_closes
     overlay_delete_mode
     overlay_delete_confirms_occupied
