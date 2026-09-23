@@ -80,6 +80,7 @@ struct GeneralConfig {
     hover_preview: bool,
     hide_empty_static: bool,
     inhibit_compositor_shortcuts: bool,
+    confirm_delete: bool,
     theme: String,
 }
 
@@ -93,6 +94,7 @@ impl Default for GeneralConfig {
             hover_preview: true,
             hide_empty_static: false,
             inhibit_compositor_shortcuts: true,
+            confirm_delete: true,
             theme: "gtk".to_string(),
         }
     }
@@ -141,6 +143,8 @@ pub struct ResolvedConfig {
     /// Suppress compositor keybinds while the overlay is open, so a held
     /// Mod+<key> reaches the overlay instead of firing niri binds.
     pub inhibit_compositor_shortcuts: bool,
+    /// Delete mode asks for a second press before closing a workspace's windows.
+    pub confirm_delete: bool,
     pub layout: &'static KeyboardLayout,
     pub theme: Theme,
     pub templates: Vec<Template>,
@@ -737,6 +741,7 @@ impl Config {
             hover_preview: self.general.hover_preview,
             hide_empty_static: self.general.hide_empty_static,
             inhibit_compositor_shortcuts: self.general.inhibit_compositor_shortcuts,
+            confirm_delete: self.general.confirm_delete,
             layout,
             theme,
             templates,
@@ -1320,6 +1325,7 @@ mod tests {
         assert!(resolved.templates.is_empty());
         assert!(!resolved.hide_empty_static);
         assert!(resolved.inhibit_compositor_shortcuts);
+        assert!(resolved.confirm_delete);
     }
 
     #[test]
@@ -1334,6 +1340,20 @@ mod tests {
         let (resolved, warnings) = config.resolve();
         assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
         assert!(!resolved.inhibit_compositor_shortcuts);
+    }
+
+    #[test]
+    fn resolve_confirm_delete_disabled() {
+        let config = Config {
+            general: GeneralConfig {
+                confirm_delete: false,
+                ..GeneralConfig::default()
+            },
+            ..Config::default()
+        };
+        let (resolved, warnings) = config.resolve();
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        assert!(!resolved.confirm_delete);
     }
 
     #[test]
@@ -2687,6 +2707,7 @@ type = "text"
             hover_preview: true,
             hide_empty_static: false,
             inhibit_compositor_shortcuts: true,
+            confirm_delete: true,
             layout: &LAYOUT_QWERTY,
             theme: Theme::default(),
             templates,
