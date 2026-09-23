@@ -798,6 +798,21 @@ impl Config {
                     }
                 }
             }
+            let mut filters: Vec<&str> = Vec::new();
+            for filter in entry
+                .programs
+                .iter()
+                .chain(&entry.title)
+                .flat_map(|t| unknown_filters(t))
+            {
+                if !filters.contains(&filter) {
+                    filters.push(filter);
+                    warnings.push(format!(
+                        "template '{name}': unknown filter '{filter}' (known: {})",
+                        FILTERS.join(", ")
+                    ));
+                }
+            }
 
             templates.push(Template {
                 name: name.clone(),
@@ -897,14 +912,16 @@ fn mentions_env_var(command: &str, var: &str) -> bool {
 /// A piece of a template string: literal text or a `{{name}}` placeholder.
 enum Segment<'a> {
     Literal(&'a str),
-    /// `raw` is the full `{{ name }}` text, `name` the trimmed variable name.
+    /// `raw` is the full `{{ name | filter }}` text; `name` and `filter` are trimmed.
     Placeholder {
         raw: &'a str,
         name: &'a str,
+        filter: Option<&'a str>,
     },
 }
 
-/// Split a template string into literal and `{{name}}` placeholder segments.
+/// Split a template string into literal and `{{name}}` / `{{name|filter}}`
+/// placeholder segments.
 ///
 /// An unterminated `{{` is literal text.
 fn segments(template: &str) -> Vec<Segment<'_>> {
@@ -918,9 +935,15 @@ fn segments(template: &str) -> Vec<Segment<'_>> {
             out.push(Segment::Literal(&rest[..start]));
         }
         let end = start + 2 + len + 2;
+        let inner = &rest[start + 2..end - 2];
+        let (name, filter) = match inner.split_once('|') {
+            Some((name, filter)) => (name.trim(), Some(filter.trim())),
+            None => (inner.trim(), None),
+        };
         out.push(Segment::Placeholder {
             raw: &rest[start..end],
-            name: rest[start + 2..end - 2].trim(),
+            name,
+            filter,
         });
         rest = &rest[end..];
     }
@@ -928,6 +951,40 @@ fn segments(template: &str) -> Vec<Segment<'_>> {
         out.push(Segment::Literal(rest));
     }
     out
+}
+
+/// The filters a placeholder can apply, as in `{{path|basename}}`.
+const FILTERS: &[&str] = &["basename"];
+
+/// The last component of `path` (`/home/u/dev/proj/` gives `proj`), or `None`
+/// when it has none, as for `/`.
+fn basename(path: &str) -> Option<&str> {
+    Path::new(path)
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+}
+
+/// `value` passed through `filter`, or `None` when no such filter exists.
+fn apply_filter<'a>(filter: Option<&str>, value: &'a str) -> Option<&'a str> {
+    match filter {
+        None => Some(value),
+        Some("basename") => Some(basename(value).unwrap_or(value)),
+        Some(_) => None,
+    }
+}
+
+/// The filters named in `template`'s placeholders that [`FILTERS`] lacks.
+fn unknown_filters(template: &str) -> Vec<&str> {
+    segments(template)
+        .into_iter()
+        .filter_map(|segment| match segment {
+            Segment::Placeholder {
+                filter: Some(filter),
+                ..
+            } if !FILTERS.contains(&filter) => Some(filter),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Extract all `{{name}}` variable references from a program string.
@@ -945,16 +1002,21 @@ pub fn extract_variable_references(program: &str) -> Vec<String> {
     refs
 }
 
-/// Substitute `{{name}}` placeholders with their values in a single pass.
+/// Substitute `{{name}}` placeholders with their values in a single pass,
+/// applying a placeholder's filter (`{{name|basename}}`) to its value.
 ///
 /// Inserted values are never rescanned, so a value containing `{{other}}`
-/// stays verbatim. Placeholders with no matching key are left as-is.
+/// stays verbatim. Placeholders with no matching key or an unknown filter
+/// are left as-is.
 pub fn substitute(template: &str, values: &HashMap<String, String>) -> String {
     segments(template)
         .into_iter()
         .map(|segment| match segment {
             Segment::Literal(text) => text,
-            Segment::Placeholder { raw, name } => values.get(name).map_or(raw, String::as_str),
+            Segment::Placeholder { raw, name, filter } => values
+                .get(name)
+                .and_then(|value| apply_filter(filter, value))
+                .unwrap_or(raw),
         })
         .collect()
 }
@@ -977,7 +1039,14 @@ pub fn build_argv(
         .into_iter()
         .map(|segment| match segment {
             Segment::Literal(text) => text.to_string(),
-            Segment::Placeholder { name, .. } => format!("{{{{{name}}}}}"),
+            Segment::Placeholder {
+                name, filter: None, ..
+            } => format!("{{{{{name}}}}}"),
+            Segment::Placeholder {
+                name,
+                filter: Some(filter),
+                ..
+            } => format!("{{{{{name}|{filter}}}}}"),
         })
         .collect();
     Ok(shell_words::split(&normalized)?
@@ -1104,10 +1173,7 @@ pub fn resolve_workspace_title(
             first_var.var_type,
             VariableType::Select(Select::Dirs { .. })
         ) {
-            std::path::Path::new(value)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .map(String::from)
+            basename(value).map(String::from)
         } else {
             Some(value.clone())
         }
@@ -2367,6 +2433,14 @@ options = ["main"]
         assert_eq!(extract_variable_references("code {{ path }}"), vec!["path"]);
     }
 
+    #[test]
+    fn extract_variable_references_ignores_filter() {
+        assert_eq!(
+            extract_variable_references("{{p|basename}} {{ q | basename }} {{p}}"),
+            vec!["p", "q"]
+        );
+    }
+
     // --- substitute ---
 
     fn values(pairs: &[(&str, &str)]) -> HashMap<String, String> {
@@ -2392,6 +2466,26 @@ options = ["main"]
     fn substitute_does_not_rescan_inserted_values() {
         let values = values(&[("a", "{{b}}"), ("b", "{{a}}")]);
         assert_eq!(substitute("{{a}} {{b}}", &values), "{{b}} {{a}}");
+    }
+
+    #[test]
+    fn substitute_basename_filter() {
+        let values = values(&[("p", "/home/u/dev/proj/"), ("q", "notes")]);
+        assert_eq!(
+            substitute("{{p|basename}} {{ q | basename }} {{p}}", &values),
+            "proj notes /home/u/dev/proj/"
+        );
+    }
+
+    #[test]
+    fn substitute_basename_keeps_a_value_without_one() {
+        assert_eq!(substitute("{{p|basename}}", &values(&[("p", "/")])), "/");
+    }
+
+    #[test]
+    fn substitute_unknown_filter_left_verbatim() {
+        let values = values(&[("p", "/a/b")]);
+        assert_eq!(substitute("{{ p | upper }}", &values), "{{ p | upper }}");
     }
 
     // --- build_argv ---
@@ -2420,6 +2514,15 @@ options = ["main"]
         assert_eq!(
             build_argv("code {{ path }}", &values).unwrap(),
             vec!["code", "/tmp"]
+        );
+    }
+
+    #[test]
+    fn build_argv_spaced_filter_is_one_word() {
+        let values = values(&[("p", "/a/my dir")]);
+        assert_eq!(
+            build_argv("code {{ p | basename }}", &values).unwrap(),
+            vec!["code", "my dir"]
         );
     }
 
@@ -3772,6 +3875,32 @@ depth = 2
         values.insert("path".to_string(), "/home/user/dev/myproject".to_string());
         let result = resolve_workspace_title(None, &variables, &values);
         assert_eq!(result, Some("myproject".to_string()));
+    }
+
+    #[test]
+    fn resolve_workspace_title_explicit_basename() {
+        let values = values(&[("p", "/home/user/dev/myproject")]);
+        assert_eq!(
+            resolve_workspace_title(Some("dev: {{p|basename}}"), &[], &values),
+            Some("dev: myproject".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_templates_unknown_filter_warns() {
+        let warnings = toml_warnings(
+            r#"
+[template.dev]
+programs = ["code {{p|upper}}", "kitty {{p|upper}}"]
+title = "{{p|basename}}"
+[template.dev.variables.p]
+name = "Project"
+"#,
+        );
+        assert_eq!(
+            warnings,
+            vec!["template 'dev': unknown filter 'upper' (known: basename)"]
+        );
     }
 
     #[test]

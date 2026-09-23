@@ -207,6 +207,7 @@ programs = ["firefox", "slack"]
 - Workspaces with per-key `[workspace.KEY].programs` skip the picker and create directly
 - Templates can define **variables** with `{{name}}` placeholders in program strings
 - Placeholders are filled in after a program is split into arguments, so a value never breaks out of its argument: `"code {{path}}"` and `"kitty --title 'ws: {{path}}'"` both work with paths containing spaces
+- `{{name|basename}}` inserts only the last component of a path (`/home/user/dev/myproject` → `myproject`). `basename` is the only filter; an unknown one produces a config warning
 - A program that starts a shell (`sh -c '...'`) has that shell parse its script again, so a placeholder inside the script runs as shell code: a directory named `Bob's notes` breaks it, and a `command` option can run commands. Pass the value to the script as a positional parameter instead (a TOML `'''` string saves escaping the quotes):
 
   ```toml
@@ -229,7 +230,7 @@ programs = ["firefox", "slack"]
 - The optional `title` field sets a display name on the workspace (shown on the key card):
   - Supports `{{var}}` substitution from template variables
   - If omitted and the template has variables, the first declared variable's value is used automatically
-  - For `dir`-type variables, the basename is extracted (e.g. `/home/user/dev/myproject` → `myproject`)
+  - For `dir`-type variables, the automatic title is the basename (e.g. `/home/user/dev/myproject` → `myproject`), while an explicit `{{project}}` gives the full path; write `title = "dev: {{project|basename}}"` for `dev: myproject`
   - The full workspace name becomes `{prefix}{key} {title}` (e.g. `dyn-a myproject`)
 
 #### Hooks
