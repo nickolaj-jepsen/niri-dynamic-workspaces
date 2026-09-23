@@ -221,11 +221,17 @@ on_create = ['notify-send "Created $NDW_WORKSPACE_NAME"']
 on_delete = ["cleanup-workspace.sh"]
 ```
 
-- `on_create` / `on_delete` are arrays of shell commands run via `sh -c`
-- Commands run in the background (fire-and-forget, non-blocking)
+- `on_create` / `on_delete` are arrays of shell commands, each run with `sh -c`
+- niri launches them, like `programs`: they get niri's environment and
+  working directory, keep running after the overlay closes, and are not part
+  of the daemon's service
+- An event's commands run one after another in the background; one that fails
+  does not stop the next
+- Their output is discarded; to debug a hook, redirect it
+  (`my-hook >>/tmp/ndw-hooks.log 2>&1`)
 - Variables are passed as environment variables — use shell double quotes (not single quotes) to expand them
 - Environment variables set for each hook:
-  - `NDW_WORKSPACE_NAME` — full workspace name (e.g. `dyn-a`)
+  - `NDW_WORKSPACE_NAME` — full workspace name, title included (e.g. `dyn-a My Project`)
   - `NDW_WORKSPACE_KEY` — single character key (e.g. `a`)
   - `NDW_TEMPLATE` — template name if used (empty otherwise)
   - `NDW_VAR_<NAME>` — template variable values, uppercased (e.g. `NDW_VAR_PATH`)

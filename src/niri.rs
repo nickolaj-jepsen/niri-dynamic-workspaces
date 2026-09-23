@@ -837,41 +837,45 @@ fn overlay_event_loop(
     Ok(())
 }
 
-/// Run hook commands in a background thread via `sh -c`.
+/// Runs its arguments in order, each in its own `sh -c`, so a hook that
+/// exits or fails to parse cannot stop the ones after it.
+const HOOK_RUNNER: &str = r#"for hook in "$@"; do sh -c "$hook"; done"#;
+
+/// The argument vector that runs `commands` through [`HOOK_RUNNER`] with
+/// `env` set, or `None` when there are no commands.
 ///
-/// Each command runs sequentially with the given environment variables set.
-/// Errors are logged to stderr. No-op if `commands` is empty.
-pub fn run_hooks(commands: &[String], env: &[(String, String)]) {
+/// niri's `Spawn` takes no environment, so `env` sets it. Every name in
+/// `env` must be a valid variable name, so that `env` never reads an entry
+/// as an option.
+fn hook_spawn_command(commands: &[String], env: &[(String, String)]) -> Option<Vec<String>> {
     if commands.is_empty() {
-        return;
+        return None;
     }
-    let commands: Vec<String> = commands.to_vec();
-    let env: Vec<(String, String)> = env.to_vec();
-    std::thread::Builder::new()
-        .name("hooks".into())
-        .spawn(move || {
-            for cmd in &commands {
-                let result = std::process::Command::new("sh")
-                    .arg("-c")
-                    .arg(cmd)
-                    .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::inherit())
-                    .spawn();
-                match result {
-                    Ok(mut child) => match child.wait() {
-                        Ok(status) if !status.success() => {
-                            eprintln!("warning: hook '{cmd}' exited with {status}");
-                        }
-                        Ok(_) => {}
-                        Err(e) => eprintln!("warning: hook '{cmd}' failed: {e}"),
-                    },
-                    Err(e) => eprintln!("warning: failed to spawn hook '{cmd}': {e}"),
-                }
-            }
-        })
-        .ok();
+    let mut argv = vec!["env".to_string()];
+    argv.extend(env.iter().map(|(name, value)| format!("{name}={value}")));
+    argv.extend(["sh", "-c", HOOK_RUNNER, "niri-dynamic-workspaces"].map(String::from));
+    argv.extend(commands.iter().cloned());
+    Some(argv)
+}
+
+fn run_hooks_with(client: &mut impl NiriClient, commands: &[String], env: &[(String, String)]) {
+    let Some(command) = hook_spawn_command(commands, env) else {
+        return;
+    };
+    // The workspace action already happened; a hook launch failure must not fail it.
+    if let Err(e) = spawn_with(client, &command) {
+        eprintln!("warning: failed to launch hooks: {e:#}");
+    }
+}
+
+/// Have niri run hook `commands` in the background, one after another, each
+/// through `sh -c` with `env` set.
+///
+/// Like `programs`, hooks run in niri's environment and outlive this process;
+/// their output is discarded. A launch failure is logged to stderr. No-op if
+/// `commands` is empty.
+pub fn run_hooks(commands: &[String], env: &[(String, String)]) {
+    run_hooks_with(&mut SocketClient, commands, env);
 }
 
 pub fn delete_workspace(prefix: &str, ch: char) -> anyhow::Result<()> {
@@ -1606,6 +1610,108 @@ mod tests {
         let err = delete_workspace_impl(&mut client, "dyn-", 'a').unwrap_err();
 
         assert!(err.to_string().contains("not found"));
+        assert_eq!(client.sent.len(), 1);
+    }
+
+    fn strings(words: &[&str]) -> Vec<String> {
+        words.iter().map(|word| (*word).to_string()).collect()
+    }
+
+    fn env_pairs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn hook_spawn_command_is_none_without_hooks() {
+        assert_eq!(
+            hook_spawn_command(&[], &env_pairs(&[("NDW_WORKSPACE_KEY", "a")])),
+            None
+        );
+    }
+
+    #[test]
+    fn hook_spawn_command_sets_env_then_runs_hooks_in_order() {
+        let env = env_pairs(&[
+            ("NDW_WORKSPACE_NAME", "dyn-a My Project"),
+            ("NDW_WORKSPACE_KEY", "a"),
+        ]);
+
+        let command = hook_spawn_command(&strings(&["h1", "h2"]), &env).unwrap();
+
+        assert_eq!(
+            command,
+            strings(&[
+                "env",
+                "NDW_WORKSPACE_NAME=dyn-a My Project",
+                "NDW_WORKSPACE_KEY=a",
+                "sh",
+                "-c",
+                HOOK_RUNNER,
+                "niri-dynamic-workspaces",
+                "h1",
+                "h2",
+            ])
+        );
+    }
+
+    #[test]
+    fn hook_runner_isolates_failing_hooks() {
+        let out = std::env::temp_dir().join(format!("ndw-hook-runner-{}", std::process::id()));
+        let _ = std::fs::remove_file(&out);
+        let env = env_pairs(&[("NDW_WORKSPACE_KEY", "a"), ("OUT", out.to_str().unwrap())]);
+        let hooks = strings(&[
+            r#"echo one >>"$OUT""#,
+            "exit 3",
+            "echo 'unterminated",
+            r#"echo "$NDW_WORKSPACE_KEY" >>"$OUT""#,
+        ]);
+        let argv = hook_spawn_command(&hooks, &env).unwrap();
+
+        std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+
+        let written = std::fs::read_to_string(&out);
+        let _ = std::fs::remove_file(&out);
+        assert_eq!(written.unwrap(), "one\na\n");
+    }
+
+    #[test]
+    fn run_hooks_with_sends_one_spawn_action() {
+        let hooks = strings(&["h1", "h2"]);
+        let env = env_pairs(&[("NDW_WORKSPACE_KEY", "a")]);
+        let mut client = MockClient::new(vec![Response::Handled]);
+
+        run_hooks_with(&mut client, &hooks, &env);
+
+        assert_eq!(client.sent.len(), 1);
+        let expected = hook_spawn_command(&hooks, &env).unwrap();
+        assert!(matches!(
+            &client.sent[0],
+            Request::Action(Action::Spawn { command }) if *command == expected
+        ));
+    }
+
+    #[test]
+    fn run_hooks_with_skips_ipc_without_hooks() {
+        let mut client = MockClient::new(vec![]);
+
+        run_hooks_with(&mut client, &[], &env_pairs(&[("NDW_WORKSPACE_KEY", "a")]));
+
+        assert!(client.sent.is_empty());
+    }
+
+    #[test]
+    fn run_hooks_with_survives_ipc_failure() {
+        let mut client = MockClient::new(vec![]);
+
+        run_hooks_with(&mut client, &strings(&["h1"]), &[]);
+
         assert_eq!(client.sent.len(), 1);
     }
 
