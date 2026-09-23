@@ -551,7 +551,8 @@ stderr, which for the Home Manager service is
 
 Common tasks are [just](https://just.systems) recipes (`just --list`). They
 enter the Nix dev shell (`nix develop`) themselves unless one is active, so they
-work from any shell with `just` installed; the dev shell provides it too.
+work from any shell with `just` installed; the dev shell provides it too. With
+[direnv](https://direnv.net), `direnv allow` loads the dev shell on `cd`.
 
 ```bash
 just build           # debug build; `just build --release` for an optimised one

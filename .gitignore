@@ -3,3 +3,4 @@
 result
 *.qcow2
 e2e/out/
+.direnv/
