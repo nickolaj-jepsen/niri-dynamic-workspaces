@@ -205,6 +205,7 @@ programs = ["firefox", "slack"]
   - `"command"` — dropdown from shell command output (`command` field); outputs the selected stdout line
   - `"dir"` — dropdown from directory scan (`dirs` field; hidden dirs excluded; symlinks to directories are included under their link path; `depth` controls scan depth, default 1); outputs the absolute path of the selected directory (e.g. `/home/user/dev/myproject`)
 - If the source resolves to zero options at runtime, the variable falls back to free-form text input
+- Enter takes the highlighted option. When the typed text matches nothing, `options` refuses and shows an error, `command` uses the typed text, and `dir` uses the typed path if it is an existing absolute directory (`~/` expanded)
 - Templates with variables show an input form before creating the workspace
 - Templates without variables create immediately as before
 - The optional `title` field sets a display name on the workspace (shown on the key card):
@@ -354,7 +355,7 @@ For anything variables can't express, style the widgets directly.
 | `.config-message` | the line under the hints naming config and theme problems; also carries `.error-message` |
 | `.template-picker` | template view: `.template-title`, `.template-list`, `.template-option` (`.selected`) with `.template-key`, `.template-name`, `.template-programs` |
 | `.variable-prompt` | variable view: `.variable-title`, `.variable-form`, `.variable-row`, `.variable-label`, `.variable-entry` (`.loading`) |
-| `.fuzzy-list`, `.fuzzy-option` (`.selected`), `.fuzzy-more` | select-variable options |
+| `.fuzzy-list`, `.fuzzy-option` (`.selected`), `.fuzzy-more` | select-variable options; `.fuzzy-more` holds the hidden-match count or the no-match hint |
 
 `.workspace-card` states: `.static` or `.dynamic`; `.uncreated`, `.empty` or `.occupied`; `.focused`; `.active` (focused, or the visible workspace of another output); `.urgent`; `.disabled` (not a valid target in the current mode); `.confirm` (delete mode: waiting for the second press).
 

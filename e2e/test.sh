@@ -372,6 +372,38 @@ test_held_enter_does_not_submit_form() {
     until_true has_ws dyn-5
 }
 
+# add_select_template <type> <source line>: template delta on key d whose one variable, branch, has that source.
+add_select_template() {
+    add_config <<EOF
+[template.delta]
+programs = ["true {{branch}}"]
+key = "d"
+
+[template.delta.variables.branch]
+name = "Branch"
+type = "$1"
+$2
+EOF
+}
+
+test_form_refuses_unmatched_option() {
+    add_select_template options 'options = ["main", "develop"]' && "$h" overlay switch || return 1
+    "$h" type 5 && "$h" type d || return 1 # delta's form
+    "$h" type zzz && "$h" type -k Return || return 1
+    sleep 0.3
+    "$h" open && no_ws dyn-5 || return 1
+    "$h" type -k BackSpace -k BackSpace -k BackSpace && "$h" type dev && "$h" type -k Return || return 1
+    until_true has_ws "dyn-5 develop"
+}
+
+test_form_takes_typed_command_value() {
+    add_select_template command 'command = "echo main; echo develop"' && "$h" overlay switch || return 1
+    "$h" type 5 && "$h" type d || return 1 # delta's form
+    sleep 0.3 # the options load off the main thread
+    "$h" type feature-x && "$h" type -k Return || return 1
+    until_true has_ws "dyn-5 feature-x"
+}
+
 test_overlay_escape_closes() {
     "$h" overlay switch || return 1
     "$h" escape || return 1
@@ -569,6 +601,8 @@ tests=(
     overlay_close_bind_with_shift
     held_key_does_not_pick_template
     held_enter_does_not_submit_form
+    form_refuses_unmatched_option
+    form_takes_typed_command_value
     overlay_escape_closes
     overlay_delete_mode
     overlay_delete_confirms_occupied
