@@ -67,6 +67,8 @@ pub fn delete_workspace(config: &ResolvedConfig, ch: char, ws_name: &str) -> any
 }
 
 /// Move the focused window to a workspace, creating it if needed.
+///
+/// Errors, creating nothing, when no window is focused.
 pub fn move_window(config: &ResolvedConfig, ch: char, ws_name: &str) -> anyhow::Result<()> {
     niri::move_window_to_workspace(&config.workspace_prefix, ch, ws_name)
 }

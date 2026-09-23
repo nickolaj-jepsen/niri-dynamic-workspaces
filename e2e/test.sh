@@ -78,6 +78,20 @@ test_move_window_moves_it() {
     until_true window_on dyn-b
 }
 
+test_move_window_without_window_creates_nothing() {
+    local err status
+    "$h" app switch a || return 1
+    err=$("$h" app move-window x 2>&1 >/dev/null)
+    status=$?
+    [[ $status == 1 && $err == *"no focused window"* ]] && no_ws dyn-x
+}
+
+test_overlay_move_without_window_stays_open() {
+    "$h" overlay move-window && "$h" key x || return 1
+    sleep 0.5
+    "$h" open && no_ws dyn-x
+}
+
 test_overlay_card_click_switches() {
     "$h" overlay switch || return 1
     "$h" key c || return 1
@@ -278,9 +292,11 @@ tests=(
     switch_creates_workspace
     delete_removes_workspace
     move_window_moves_it
+    move_window_without_window_creates_nothing
     invalid_key_fails_in_caller
     missing_workspace_reports_to_caller
     overlay_card_click_switches
+    overlay_move_without_window_stays_open
     overlay_key_press_switches
     overlay_key_azerty_digit
     overlay_key_azerty_shift_digit

@@ -47,6 +47,17 @@ pub fn focus_workspace_by_name(name: &str) -> anyhow::Result<()> {
     })
 }
 
+/// The focused workspace's active window: what `window_id: None` would move.
+///
+/// Layout-based, so it stays valid while the overlay holds keyboard focus.
+fn focused_window_id(workspaces: &[Workspace]) -> anyhow::Result<u64> {
+    workspaces
+        .iter()
+        .find(|w| w.is_focused)
+        .and_then(|w| w.active_window_id)
+        .context("no focused window to move")
+}
+
 fn list_workspaces_with(client: &mut impl NiriClient) -> anyhow::Result<Vec<Workspace>> {
     match client.send(Request::Workspaces)? {
         Response::Workspaces(mut workspaces) => {
@@ -384,6 +395,9 @@ pub fn move_window_to_workspace_by_name(name: &str) -> anyhow::Result<()> {
 }
 
 /// Move the focused window to a workspace, creating it if it doesn't exist.
+///
+/// # Errors
+/// When no window is focused; nothing is created then.
 pub fn move_window_to_workspace(prefix: &str, ch: char, full_name: &str) -> anyhow::Result<()> {
     move_window_impl(&mut SocketClient, prefix, ch, full_name)
 }
@@ -395,6 +409,8 @@ fn move_window_impl(
     full_name: &str,
 ) -> anyhow::Result<()> {
     let workspaces = list_workspaces_with(client)?;
+    // Before naming: niri takes a windowless move as a no-op, leaving an empty named workspace.
+    let window_id = focused_window_id(&workspaces)?;
 
     let reference = if let Some(existing) = find_workspace_name(&workspaces, prefix, ch) {
         WorkspaceReferenceArg::Name(existing)
@@ -410,7 +426,7 @@ fn move_window_impl(
     send_action_with(
         client,
         Action::MoveWindowToWorkspace {
-            window_id: None,
+            window_id: Some(window_id),
             reference,
             focus: true,
         },
@@ -888,8 +904,13 @@ mod tests {
 
     #[test]
     fn move_window_to_existing_workspace_moves_directly() {
+        let mut focused = test_workspace(2, Some("browser"), true);
+        focused.active_window_id = Some(100);
         let mut client = MockClient::new(vec![
-            Response::Workspaces(vec![test_workspace(1, Some("dyn-a My Project"), false)]),
+            Response::Workspaces(vec![
+                test_workspace(1, Some("dyn-a My Project"), false),
+                focused,
+            ]),
             Response::Handled,
         ]);
 
@@ -899,7 +920,7 @@ mod tests {
         assert!(matches!(
             &client.sent[1],
             Request::Action(Action::MoveWindowToWorkspace {
-                window_id: None,
+                window_id: Some(100),
                 reference: WorkspaceReferenceArg::Name(n),
                 focus: true,
             }) if n == "dyn-a My Project"
@@ -927,7 +948,7 @@ mod tests {
         assert!(matches!(
             &client.sent[2],
             Request::Action(Action::MoveWindowToWorkspace {
-                window_id: None,
+                window_id: Some(100),
                 reference: WorkspaceReferenceArg::Id(2),
                 focus: true,
             })
@@ -938,6 +959,34 @@ mod tests {
             .sent
             .iter()
             .any(|r| matches!(r, Request::Action(Action::FocusWorkspace { .. }))));
+    }
+
+    #[test]
+    fn move_window_without_focused_window_errors_before_naming() {
+        let mut workspaces = workspaces_with_trailing_empty();
+        workspaces[0].active_window_id = None;
+        let mut client = MockClient::new(vec![Response::Workspaces(workspaces)]);
+
+        let err = move_window_impl(&mut client, "dyn-", 'x', "dyn-x").unwrap_err();
+
+        assert!(err.to_string().contains("no focused window"), "{err}");
+        assert_eq!(client.sent.len(), 1);
+    }
+
+    #[test]
+    fn focused_window_id_is_focused_workspaces_active_window() {
+        assert_eq!(
+            focused_window_id(&workspaces_with_trailing_empty()).unwrap(),
+            100
+        );
+
+        let mut no_window = workspaces_with_trailing_empty();
+        no_window[0].active_window_id = None;
+        assert!(focused_window_id(&no_window).is_err());
+
+        let mut unfocused = workspaces_with_trailing_empty();
+        unfocused[0].is_focused = false;
+        assert!(focused_window_id(&unfocused).is_err());
     }
 
     #[test]
