@@ -55,6 +55,7 @@ impl Default for VariableEntry {
 #[serde(default)]
 struct TemplateEntry {
     programs: Vec<String>,
+    #[serde(deserialize_with = "string_or_integer")]
     key: Option<String>,
     variables: HashMap<String, VariableEntry>,
     on_create: Vec<String>,
@@ -66,8 +67,36 @@ struct TemplateEntry {
 struct WorkspaceEntry {
     name: Option<String>,
     programs: Vec<String>,
-    #[serde(rename = "static")]
+    #[serde(rename = "static", deserialize_with = "string_or_integer")]
     static_workspace: Option<String>,
+}
+
+/// An optional string that may also be written as an integer: `key = 2`,
+/// `static = 1`.
+fn string_or_integer<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    struct StringOrInteger;
+
+    impl serde::de::Visitor<'_> for StringOrInteger {
+        type Value = String;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a string or an integer")
+        }
+
+        fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<String, E> {
+            Ok(v.to_string())
+        }
+
+        fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<String, E> {
+            Ok(v.to_string())
+        }
+
+        fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<String, E> {
+            Ok(v.to_string())
+        }
+    }
+
+    d.deserialize_any(StringOrInteger).map(Some)
 }
 
 #[derive(Deserialize)]
@@ -1549,6 +1578,13 @@ programs = ["firefox"]
     }
 
     #[test]
+    fn toml_integer_static_target() {
+        let config = parse_config("[workspace.q]\nstatic = 1\n", Path::new("c.toml"));
+        assert!(config.diagnostics.is_empty(), "{:?}", config.diagnostics);
+        assert_eq!(config.static_workspaces[&'q'], "1");
+    }
+
+    #[test]
     fn resolve_static_empty_target_warns() {
         let toml_str = r#"
 [workspace.q]
@@ -1963,6 +1999,42 @@ programs = ["firefox"]
         assert_eq!(resolved.templates[1].name, "dev");
         assert_eq!(resolved.templates[1].key, Some('d'));
         assert_eq!(resolved.templates[1].programs, vec!["kitty", "code ."]);
+    }
+
+    #[test]
+    fn toml_integer_template_key() {
+        let config = parse_config(
+            "[template.dev]\nprograms = [\"kitty\"]\nkey = 7\n",
+            Path::new("c.toml"),
+        );
+        assert!(config.diagnostics.is_empty(), "{:?}", config.diagnostics);
+        // Not '2', which the template would get automatically.
+        assert_eq!(config.templates[0].key, Some('7'));
+    }
+
+    #[test]
+    fn toml_template_without_key_gets_one() {
+        let config = parse_config(
+            "[template.dev]\nprograms = [\"kitty\"]\n",
+            Path::new("c.toml"),
+        );
+        assert!(config.diagnostics.is_empty(), "{:?}", config.diagnostics);
+        assert_eq!(config.templates[0].key, Some('2'));
+    }
+
+    #[test]
+    fn load_bool_template_key_is_error() {
+        let config = parse_config(
+            "[template.dev]\nkey = true\nprograms = [\"kitty\"]\n",
+            Path::new("c.toml"),
+        );
+        assert!(config.has_errors());
+        let message = &config.diagnostics[0].message;
+        assert!(message.contains("line 2"), "{message}");
+        assert!(
+            message.contains("expected a string or an integer"),
+            "{message}"
+        );
     }
 
     #[test]
