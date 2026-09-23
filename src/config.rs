@@ -343,7 +343,7 @@ fn parse_modifier(name: &str) -> Option<ModifierType> {
         "Ctrl" | "Control" => Some(ModifierType::CONTROL_MASK),
         "Shift" => Some(ModifierType::SHIFT_MASK),
         "Alt" | "Mod1" => Some(ModifierType::ALT_MASK),
-        "Super" | "Mod4" => Some(ModifierType::SUPER_MASK),
+        "Super" | "Mod4" | "Mod" => Some(ModifierType::SUPER_MASK),
         _ => None,
     }
 }
@@ -556,6 +556,18 @@ fn parse_keybind(s: &str) -> Result<Keybind, String> {
     Ok(Keybind { modifiers, key })
 }
 
+/// The workspace key a close bind takes from the overlay, which checks close
+/// binds first. Super counts as no modifier: keys are often pressed with the
+/// launch bind's Super still held. A Ctrl, Shift or Alt bind only takes a
+/// press made on purpose.
+fn shadowed_workspace_key(kb: &Keybind) -> Option<char> {
+    let distinct = ModifierType::CONTROL_MASK | ModifierType::SHIFT_MASK | ModifierType::ALT_MASK;
+    if kb.modifiers.intersects(distinct) {
+        return None;
+    }
+    kb.key.to_unicode().filter(|&c| is_workspace_char(c))
+}
+
 impl Config {
     #[expect(
         clippy::too_many_lines,
@@ -567,9 +579,22 @@ impl Config {
         let mut close_keybinds = Vec::new();
         for s in &self.keybinds.close {
             match parse_keybind(s) {
-                Ok(kb) => close_keybinds.push(kb),
+                Ok(kb) => {
+                    if let Some(ch) = shadowed_workspace_key(&kb) {
+                        warnings.push(format!("close keybind '{s}' shadows workspace key '{ch}'"));
+                    }
+                    close_keybinds.push(kb);
+                }
                 Err(e) => warnings.push(format!("ignoring close keybind '{s}': {e}")),
             }
+        }
+        if close_keybinds.is_empty() && !self.keybinds.close.is_empty() {
+            warnings.push("no valid close keybind, using the defaults".to_string());
+            close_keybinds = KeybindsConfig::default()
+                .close
+                .iter()
+                .filter_map(|s| parse_keybind(s).ok())
+                .collect();
         }
 
         // An empty prefix would make every single-character niri workspace dynamic.
@@ -1407,6 +1432,7 @@ mod tests {
         assert_eq!(parse_modifier("Mod1"), Some(ModifierType::ALT_MASK));
         assert_eq!(parse_modifier("Super"), Some(ModifierType::SUPER_MASK));
         assert_eq!(parse_modifier("Mod4"), Some(ModifierType::SUPER_MASK));
+        assert_eq!(parse_modifier("Mod"), Some(ModifierType::SUPER_MASK));
     }
 
     #[test]
@@ -1540,6 +1566,80 @@ mod tests {
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("Bogus+x"));
         assert_eq!(resolved.close_keybinds.len(), 1);
+    }
+
+    /// Resolve `[keybinds] close = binds`.
+    fn resolve_close(binds: &[&str]) -> (ResolvedConfig, Vec<String>) {
+        Config {
+            keybinds: KeybindsConfig {
+                close: binds.iter().map(ToString::to_string).collect(),
+            },
+            ..Config::default()
+        }
+        .resolve()
+    }
+
+    #[test]
+    fn resolve_bare_close_keybind_shadowing_warns() {
+        for (bind, ch) in [("q", 'q'), ("Q", 'q'), ("7", '7')] {
+            let (resolved, warnings) = resolve_close(&["Escape", bind]);
+            assert_eq!(
+                warnings,
+                vec![format!(
+                    "close keybind '{bind}' shadows workspace key '{ch}'"
+                )]
+            );
+            assert_eq!(resolved.close_keybinds.len(), 2);
+        }
+    }
+
+    #[test]
+    fn resolve_super_close_keybind_shadowing_warns() {
+        for bind in ["Super+q", "Mod+q", "Mod4+q"] {
+            let (resolved, warnings) = resolve_close(&[bind]);
+            assert_eq!(warnings.len(), 1, "{bind}: {warnings:?}");
+            assert!(warnings[0].contains("shadows workspace key 'q'"));
+            assert_eq!(
+                resolved.close_keybinds[0].modifiers,
+                ModifierType::SUPER_MASK
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_modified_close_keybinds_do_not_warn() {
+        let binds = [
+            "Ctrl+q",
+            "Shift+q",
+            "Alt+q",
+            "Super+Ctrl+q",
+            "Escape",
+            "F1",
+            "space",
+        ];
+        let (resolved, warnings) = resolve_close(&binds);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(resolved.close_keybinds.len(), binds.len());
+    }
+
+    #[test]
+    fn resolve_all_invalid_close_keybinds_fall_back() {
+        let (resolved, warnings) = resolve_close(&["Esc", "Bogus+x"]);
+        assert_eq!(warnings.len(), 3, "{warnings:?}");
+        assert!(
+            warnings[2].contains("using the defaults"),
+            "{}",
+            warnings[2]
+        );
+        let (defaults, _) = Config::default().resolve();
+        assert_eq!(resolved.close_keybinds.len(), defaults.close_keybinds.len());
+    }
+
+    #[test]
+    fn resolve_empty_close_list_stays_empty() {
+        let (resolved, warnings) = resolve_close(&[]);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(resolved.close_keybinds.is_empty());
     }
 
     #[test]
