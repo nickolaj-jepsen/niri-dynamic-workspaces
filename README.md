@@ -91,7 +91,8 @@ ignored and reported as warnings (see [Troubleshooting](#troubleshooting)).
 
 ```toml
 [general]
-workspace_prefix = "dyn-"          # prefix for dynamic workspace names
+workspace_prefix = "dyn-"          # prefix for dynamic workspace names; an empty
+                                   # one falls back to "dyn-"
 default_programs = ["kitty"]       # programs launched when creating any new workspace
 auto_delete_empty = true           # daemon: auto-delete empty unfocused workspaces
 hover_preview = true               # preview workspaces by hovering over cards
@@ -158,6 +159,8 @@ their key instead of in the row above the keyboard.
 - Urgent windows highlight the key, like any other workspace card
 - If the named workspace doesn't exist, the key appears disabled and pressing it shows an error
 - Names match case-insensitively, as in niri
+- A dynamic workspace name (`dyn-a`, `dyn-a Title`) can't be pinned and is
+  ignored with a warning
 - A name made of digits can be written as a number (`static = 1`); quote one
   with a leading zero (`static = "01"`)
 
