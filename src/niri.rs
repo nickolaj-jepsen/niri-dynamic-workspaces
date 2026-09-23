@@ -210,14 +210,14 @@ fn focus_or_create_impl(
 /// `full_name` and spawn `commands` (argument vectors) there.
 ///
 /// Returns the created workspace's id (`None` when an existing one was
-/// focused) and, when two or more programs spawned, a [`ReorderRequest`] for
-/// [`reorder_workspace_columns`].
+/// focused) and, when programs spawned, the [`SpawnedPrograms`] for
+/// [`place_spawned_windows`].
 pub fn switch_workspace(
     prefix: &str,
     ch: char,
     full_name: &str,
     commands: &[Vec<String>],
-) -> anyhow::Result<(Option<u64>, Option<ReorderRequest>)> {
+) -> anyhow::Result<(Option<u64>, Option<SpawnedPrograms>)> {
     switch_workspace_with(&mut SocketClient, prefix, ch, full_name, commands)
 }
 
@@ -227,7 +227,7 @@ fn switch_workspace_with(
     ch: char,
     full_name: &str,
     commands: &[Vec<String>],
-) -> anyhow::Result<(Option<u64>, Option<ReorderRequest>)> {
+) -> anyhow::Result<(Option<u64>, Option<SpawnedPrograms>)> {
     let Some(ws_id) = focus_or_create_impl(client, prefix, ch, full_name)? else {
         return Ok((None, None));
     };
@@ -236,19 +236,34 @@ fn switch_workspace_with(
 
 /// Spawn the non-empty `commands` in order for the new workspace `workspace_id`.
 ///
-/// Returns a [`ReorderRequest`] when two or more programs spawned.
+/// Returns the [`SpawnedPrograms`] to place, or `None` when nothing spawned
+/// or the windows open beforehand could not be listed.
 fn spawn_programs_with(
     client: &mut impl NiriClient,
     workspace_id: u64,
     commands: &[Vec<String>],
-) -> anyhow::Result<Option<ReorderRequest>> {
+) -> anyhow::Result<Option<SpawnedPrograms>> {
     let commands: Vec<Vec<String>> = commands.iter().filter(|c| !c.is_empty()).cloned().collect();
+    if commands.is_empty() {
+        return Ok(None);
+    }
+    // Without this list the user's own windows would pass for the programs'.
+    let preexisting = match list_windows_with(client) {
+        Ok(windows) => Some(windows.iter().map(|w| w.id).collect()),
+        Err(e) => {
+            eprintln!(
+                "warning: failed to list windows, so program windows stay where they open: {e:#}"
+            );
+            None
+        }
+    };
     for command in &commands {
         spawn_with(client, command).with_context(|| format!("failed to spawn '{}'", command[0]))?;
     }
-    Ok((commands.len() >= 2).then_some(ReorderRequest {
+    Ok(preexisting.map(|preexisting| SpawnedPrograms {
         workspace_id,
         commands,
+        preexisting,
     }))
 }
 
@@ -264,31 +279,39 @@ pub(crate) fn spawn_with(client: &mut impl NiriClient, command: &[String]) -> an
     )
 }
 
-/// Programs spawned on a new workspace, whose columns should follow `commands`.
+/// Programs spawned on a new workspace: their windows belong there, with
+/// columns in `commands` order.
 #[derive(Debug)]
-pub struct ReorderRequest {
+pub struct SpawnedPrograms {
     workspace_id: u64,
     /// Non-empty argument vectors, in the desired column order.
     commands: Vec<Vec<String>>,
+    /// Every window open before the spawn, so none of the programs'.
+    preexisting: HashSet<u64>,
 }
 
-/// Poll budgets for [`reorder_workspace_columns`], counted in window listings.
-struct ReorderTiming {
+/// Poll budgets for [`place_spawned_windows`], counted in window listings.
+struct PlacementTiming {
     poll_interval: Duration,
     /// Pause after each focus or move so niri applies it before the next.
     action_delay: Duration,
     /// Listings spent waiting for every program's window to appear.
     appear_polls: u32,
-    /// Listings in all, including those waiting for the windows to settle.
-    total_polls: u32,
+    /// Listings before the columns are ordered, including those waiting for
+    /// the windows to settle.
+    settle_polls: u32,
+    /// Listings in all while a program has no window yet.
+    watch_polls: u32,
 }
 
-/// 5 s for the windows to appear, 8 s in all.
-const REORDER_TIMING: ReorderTiming = ReorderTiming {
+/// 5 s for the windows to appear, 8 s until the columns are ordered, 15 s
+/// for a slow program's window.
+const PLACEMENT_TIMING: PlacementTiming = PlacementTiming {
     poll_interval: Duration::from_millis(200),
     action_delay: Duration::from_millis(50),
     appear_polls: 25,
-    total_polls: 40,
+    settle_polls: 40,
+    watch_polls: 75,
 };
 
 /// Unchanged listings in a row that count as settled: apps like VS Code
@@ -328,14 +351,16 @@ fn later_word_matches(command: &[String], app_id: &str) -> bool {
         .any(|word| word_matches(app_id, word))
 }
 
-/// Wait for the programs' windows on the new workspace, then move their
-/// columns into command order unless the user has left the workspace.
+/// Watch for the programs' windows. One that opens on another workspace,
+/// because the user switched away, is moved to the programs' workspace
+/// without focus; with two or more programs, the columns are then put in
+/// command order unless the user has left the workspace.
 ///
-/// Blocks for up to 8 s. Best-effort: logs errors to stderr since the overlay
-/// is already closed.
-pub fn reorder_workspace_columns(request: &ReorderRequest) {
-    if let Err(e) = reorder_columns_impl(&mut SocketClient, request, &REORDER_TIMING) {
-        eprintln!("warning: failed to reorder columns: {e}");
+/// Blocks until every program has a window, for up to 15 s. Best-effort:
+/// logs errors to stderr since the overlay is already closed.
+pub fn place_spawned_windows(programs: &SpawnedPrograms) {
+    if let Err(e) = place_windows_impl(&mut SocketClient, programs, &PLACEMENT_TIMING) {
+        eprintln!("warning: failed to place program windows: {e}");
     }
 }
 
@@ -345,17 +370,37 @@ fn new_workspace_windows(windows: &[Window], ws_id: u64) -> impl Iterator<Item =
         .filter(move |w| w.workspace_id == Some(ws_id))
 }
 
-fn reorder_columns_impl(
+fn place_windows_impl(
     client: &mut impl NiriClient,
-    request: &ReorderRequest,
-    timing: &ReorderTiming,
+    programs: &SpawnedPrograms,
+    timing: &PlacementTiming,
 ) -> anyhow::Result<()> {
-    let windows = settled_windows(client, request.workspace_id, request.commands.len(), timing)?;
+    let mut watch = Watch::new(programs);
+    let windows = watch.appeared_windows(client, timing)?;
+    if programs.commands.len() >= 2 {
+        let windows = watch.settled_windows(client, timing, windows)?;
+        order_columns(client, programs, &windows, timing.action_delay)?;
+    }
+    while !watch.all_claimed && watch.polls < timing.watch_polls {
+        thread::sleep(timing.poll_interval);
+        watch.poll(client)?;
+    }
+    Ok(())
+}
+
+/// Put the columns of `windows`, those on the programs' workspace, in
+/// command order.
+fn order_columns(
+    client: &mut impl NiriClient,
+    programs: &SpawnedPrograms,
+    windows: &[Window],
+    action_delay: Duration,
+) -> anyhow::Result<()> {
     if windows.is_empty() {
         return Ok(());
     }
-    let ordered = match_windows(&request.commands, &windows);
-    for (command, slot) in request.commands.iter().zip(&ordered) {
+    let ordered = match_windows(&programs.commands, windows);
+    for (command, slot) in programs.commands.iter().zip(&ordered) {
         if slot.is_none() {
             eprintln!(
                 "warning: no window matched `{}`, leaving its column in place",
@@ -363,7 +408,121 @@ fn reorder_columns_impl(
             );
         }
     }
-    apply_column_order(client, request.workspace_id, &ordered, timing.action_delay)
+    apply_column_order(client, programs.workspace_id, &ordered, action_delay)
+}
+
+/// The window listings of one placement, each followed by moving the
+/// programs' stray windows to their workspace.
+struct Watch<'a> {
+    programs: &'a SpawnedPrograms,
+    polls: u32,
+    /// The programs' windows that were on the workspace or moved there. They
+    /// are never moved again, so one the user moves away stays there.
+    placed: HashSet<u64>,
+    /// Whether every program had a window at the last listing.
+    all_claimed: bool,
+}
+
+impl<'a> Watch<'a> {
+    fn new(programs: &'a SpawnedPrograms) -> Self {
+        Self {
+            programs,
+            polls: 0,
+            placed: HashSet::new(),
+            all_claimed: false,
+        }
+    }
+
+    fn poll(&mut self, client: &mut impl NiriClient) -> anyhow::Result<Vec<Window>> {
+        let windows = list_windows_with(client)?;
+        self.polls += 1;
+        self.claim_strays(client, &windows);
+        Ok(windows)
+    }
+
+    /// Pair the programs with new windows, and move each paired window that
+    /// opened on another workspace to theirs without focusing it.
+    fn claim_strays(&mut self, client: &mut impl NiriClient, windows: &[Window]) {
+        let ws_id = self.programs.workspace_id;
+        let mut candidates: Vec<Window> = windows
+            .iter()
+            .filter(|w| !self.programs.preexisting.contains(&w.id))
+            .cloned()
+            .collect();
+        // A window in place keeps its program from a stray, such as one the user opened.
+        candidates.sort_by_key(|w| !(w.workspace_id == Some(ws_id) || self.placed.contains(&w.id)));
+        let slots = match_windows(&self.programs.commands, &candidates);
+        self.all_claimed = slots.iter().all(Option::is_some);
+
+        for window in candidates.iter().filter(|w| slots.contains(&Some(w.id))) {
+            if !self.placed.insert(window.id) || window.workspace_id == Some(ws_id) {
+                continue;
+            }
+            let action = Action::MoveWindowToWorkspace {
+                window_id: Some(window.id),
+                reference: WorkspaceReferenceArg::Id(ws_id),
+                focus: false,
+            };
+            if let Err(e) = send_action_with(client, action) {
+                eprintln!(
+                    "warning: failed to move window {} to its workspace: {e:#}",
+                    window.id
+                );
+            }
+        }
+    }
+
+    /// Poll until a window per program is on the workspace or the appear
+    /// budget runs out; returns the last listing.
+    fn appeared_windows(
+        &mut self,
+        client: &mut impl NiriClient,
+        timing: &PlacementTiming,
+    ) -> anyhow::Result<Vec<Window>> {
+        let ws_id = self.programs.workspace_id;
+        loop {
+            let windows = self.poll(client)?;
+            if new_workspace_windows(&windows, ws_id).count() >= self.programs.commands.len()
+                || self.polls >= timing.appear_polls
+            {
+                return Ok(windows);
+            }
+            thread::sleep(timing.poll_interval);
+        }
+    }
+
+    /// The windows on the workspace once the set, starting from `windows`,
+    /// stayed unchanged for [`STABLE_POLLS`] listings (or the settle budget
+    /// ran out).
+    fn settled_windows(
+        &mut self,
+        client: &mut impl NiriClient,
+        timing: &PlacementTiming,
+        mut windows: Vec<Window>,
+    ) -> anyhow::Result<Vec<Window>> {
+        let ws_id = self.programs.workspace_id;
+        let ids = |windows: &[Window]| -> HashSet<u64> {
+            new_workspace_windows(windows, ws_id)
+                .map(|w| w.id)
+                .collect()
+        };
+
+        let mut last_ids = ids(&windows);
+        let mut stable = 0;
+        while stable < STABLE_POLLS && self.polls < timing.settle_polls {
+            thread::sleep(timing.poll_interval);
+            windows = self.poll(client)?;
+            let current_ids = ids(&windows);
+            if current_ids == last_ids {
+                stable += 1;
+            } else {
+                last_ids = current_ids;
+                stable = 0;
+            }
+        }
+
+        Ok(new_workspace_windows(&windows, ws_id).cloned().collect())
+    }
 }
 
 fn focused_workspace_id(client: &mut impl NiriClient) -> anyhow::Result<Option<u64>> {
@@ -432,51 +591,6 @@ fn apply_column_order(
         }
     }
     Ok(())
-}
-
-/// The windows on workspace `ws_id` once `expected` of them appeared (or the
-/// appear budget ran out) and the set then stayed unchanged for
-/// [`STABLE_POLLS`] listings (or the total budget ran out).
-fn settled_windows(
-    client: &mut impl NiriClient,
-    ws_id: u64,
-    expected: usize,
-    timing: &ReorderTiming,
-) -> anyhow::Result<Vec<Window>> {
-    let ids = |windows: &[Window]| -> HashSet<u64> {
-        new_workspace_windows(windows, ws_id)
-            .map(|w| w.id)
-            .collect()
-    };
-
-    let mut polls = 0;
-    let mut windows = loop {
-        let windows = list_windows_with(client)?;
-        polls += 1;
-        if new_workspace_windows(&windows, ws_id).count() >= expected
-            || polls >= timing.appear_polls
-        {
-            break windows;
-        }
-        thread::sleep(timing.poll_interval);
-    };
-
-    let mut last_ids = ids(&windows);
-    let mut stable = 0;
-    while stable < STABLE_POLLS && polls < timing.total_polls {
-        thread::sleep(timing.poll_interval);
-        windows = list_windows_with(client)?;
-        polls += 1;
-        let current_ids = ids(&windows);
-        if current_ids == last_ids {
-            stable += 1;
-        } else {
-            last_ids = current_ids;
-            stable = 0;
-        }
-    }
-
-    Ok(new_workspace_windows(&windows, ws_id).cloned().collect())
 }
 
 /// Pair each command with a distinct window by app id, in command order;
@@ -698,8 +812,9 @@ fn retitle_workspace_impl(
 }
 
 /// How long cleanup leaves a workspace created with programs alone, so it is
-/// not removed while they start.
-pub const SPAWN_GRACE: Duration = Duration::from_secs(15);
+/// not removed while they start: past the placement's 15 s watch and the
+/// cleanup's confirming pass.
+pub const SPAWN_GRACE: Duration = Duration::from_secs(20);
 
 /// Workspaces the daemon's cleanup must leave alone: each until a deadline,
 /// and the open overlay's origin until it closes.
@@ -1330,16 +1445,17 @@ mod tests {
     }
 
     #[test]
-    fn switch_workspace_creates_then_spawns_in_order() {
+    fn switch_workspace_creates_then_lists_windows_then_spawns() {
         let mut client = MockClient::new(vec![
             Response::Workspaces(workspaces_with_trailing_empty()),
             Response::Handled,
             Response::Handled,
+            Response::Windows(vec![test_window(100, 1, "foot")]),
             Response::Handled,
             Response::Handled,
         ]);
 
-        let (created, reorder) = switch_workspace_with(
+        let (created, placement) = switch_workspace_with(
             &mut client,
             "dyn-",
             'a',
@@ -1349,10 +1465,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(created, Some(2));
-        let reorder = reorder.unwrap();
-        assert_eq!(reorder.workspace_id, 2);
-        assert_eq!(reorder.commands.len(), 2);
-        assert_eq!(client.sent.len(), 5);
+        let placement = placement.unwrap();
+        assert_eq!(placement.workspace_id, 2);
+        assert_eq!(placement.commands.len(), 2);
+        assert_eq!(placement.preexisting, HashSet::from([100]));
+        assert_eq!(client.sent.len(), 6);
         assert!(matches!(
             &client.sent[1],
             Request::Action(Action::FocusWorkspace {
@@ -1366,12 +1483,13 @@ mod tests {
                 ..
             })
         ));
+        assert!(matches!(&client.sent[3], Request::Windows));
         assert!(matches!(
-            &client.sent[3],
+            &client.sent[4],
             Request::Action(Action::Spawn { command }) if command == &["foot"]
         ));
         assert!(matches!(
-            &client.sent[4],
+            &client.sent[5],
             Request::Action(Action::Spawn { command }) if command == &["kitty"]
         ));
     }
@@ -1383,7 +1501,7 @@ mod tests {
             Response::Handled,
         ]);
 
-        let (created, reorder) = switch_workspace_with(
+        let (created, placement) = switch_workspace_with(
             &mut client,
             "dyn-",
             'a',
@@ -1393,21 +1511,22 @@ mod tests {
         .unwrap();
 
         assert_eq!(created, None);
-        assert!(reorder.is_none());
+        assert!(placement.is_none());
         assert_eq!(client.sent.len(), 2);
         assert!(!client.sent.iter().any(is_spawn));
     }
 
     #[test]
-    fn switch_workspace_one_program_needs_no_reorder() {
+    fn switch_workspace_places_a_single_program() {
         let mut client = MockClient::new(vec![
             Response::Workspaces(workspaces_with_trailing_empty()),
             Response::Handled,
             Response::Handled,
+            Response::Windows(vec![]),
             Response::Handled,
         ]);
 
-        let (created, reorder) = switch_workspace_with(
+        let (created, placement) = switch_workspace_with(
             &mut client,
             "dyn-",
             'a',
@@ -1417,32 +1536,90 @@ mod tests {
         .unwrap();
 
         assert_eq!(created, Some(2));
-        assert!(reorder.is_none());
+        assert_eq!(placement.unwrap().commands, commands(&[&["foot"]]));
         assert_eq!(client.sent.iter().filter(|r| is_spawn(r)).count(), 1);
     }
 
-    /// Appear within 3 listings, 6 in all, and no waiting.
-    const TEST_TIMING: ReorderTiming = ReorderTiming {
+    #[test]
+    fn switch_workspace_without_programs_lists_no_windows() {
+        let mut client = MockClient::new(vec![
+            Response::Workspaces(workspaces_with_trailing_empty()),
+            Response::Handled,
+            Response::Handled,
+        ]);
+
+        let (created, placement) =
+            switch_workspace_with(&mut client, "dyn-", 'a', "dyn-a", &commands(&[&[]])).unwrap();
+
+        assert_eq!(created, Some(2));
+        assert!(placement.is_none());
+        assert_eq!(client.sent.len(), 3);
+    }
+
+    #[test]
+    fn switch_workspace_listing_failure_spawns_without_placement() {
+        let mut client = MockClient::new(vec![
+            Response::Workspaces(workspaces_with_trailing_empty()),
+            Response::Handled,
+            Response::Handled,
+            // Not a window list, so the listing fails.
+            Response::Handled,
+            Response::Handled,
+        ]);
+
+        let (created, placement) =
+            switch_workspace_with(&mut client, "dyn-", 'a', "dyn-a", &commands(&[&["foot"]]))
+                .unwrap();
+
+        assert_eq!(created, Some(2));
+        assert!(placement.is_none());
+        assert_eq!(client.sent.iter().filter(|r| is_spawn(r)).count(), 1);
+    }
+
+    /// Appear within 3 listings, order the columns by 6, stop watching then,
+    /// and no waiting.
+    const TEST_TIMING: PlacementTiming = PlacementTiming {
         poll_interval: Duration::ZERO,
         action_delay: Duration::ZERO,
         appear_polls: 3,
-        total_polls: 6,
+        settle_polls: 6,
+        watch_polls: 6,
     };
 
-    /// Reorder `argvs` spawned on workspace 2 against `script`, which it must use up.
-    fn reorder(argvs: &[&[&str]], script: Vec<Response>) -> MockClient {
-        let mut client = MockClient::new(script);
-        let request = ReorderRequest {
+    /// [`TEST_TIMING`], watching for a slow program's window up to 8 listings.
+    const WATCH_TIMING: PlacementTiming = PlacementTiming {
+        watch_polls: 8,
+        ..TEST_TIMING
+    };
+
+    /// `argvs` spawned on workspace 2 while the `preexisting` windows were open.
+    fn spawned(argvs: &[&[&str]], preexisting: &[u64]) -> SpawnedPrograms {
+        SpawnedPrograms {
             workspace_id: 2,
             commands: commands(argvs),
-        };
-        reorder_columns_impl(&mut client, &request, &TEST_TIMING).unwrap();
+            preexisting: preexisting.iter().copied().collect(),
+        }
+    }
+
+    /// Place `programs` against `script`, which it must use up.
+    fn place(
+        programs: &SpawnedPrograms,
+        timing: &PlacementTiming,
+        script: Vec<Response>,
+    ) -> MockClient {
+        let mut client = MockClient::new(script);
+        place_windows_impl(&mut client, programs, timing).unwrap();
         assert!(
             client.responses.is_empty(),
             "unused: {:?}",
             client.responses
         );
         client
+    }
+
+    /// Place `argvs`, spawned on workspace 2 while no window was open, against `script`.
+    fn reorder(argvs: &[&[&str]], script: Vec<Response>) -> MockClient {
+        place(&spawned(argvs, &[]), &TEST_TIMING, script)
     }
 
     #[derive(Debug, PartialEq)]
@@ -1734,6 +1911,121 @@ mod tests {
             reorder_steps(&client.sent),
             [Step::Focus(10), Step::Move(1), Step::Focus(12)]
         );
+    }
+
+    fn is_window_move(request: &Request) -> bool {
+        matches!(
+            request,
+            Request::Action(Action::MoveWindowToWorkspace { .. })
+        )
+    }
+
+    /// Whether `request` moves window `id` to workspace 2, leaving focus alone.
+    fn is_unfocused_move_to_2(request: &Request, id: u64) -> bool {
+        matches!(
+            request,
+            Request::Action(Action::MoveWindowToWorkspace {
+                window_id: Some(w),
+                reference: WorkspaceReferenceArg::Id(2),
+                focus: false,
+            }) if *w == id
+        )
+    }
+
+    #[test]
+    fn placement_moves_a_stray_window_without_focus() {
+        let client = place(
+            &spawned(&[&["foot"]], &[1]),
+            &TEST_TIMING,
+            vec![
+                Response::Windows(vec![test_window(1, 1, "foot"), test_window(10, 1, "foot")]),
+                Response::Handled,
+                Response::Windows(vec![test_window(1, 1, "foot"), test_window(10, 2, "foot")]),
+            ],
+        );
+
+        // The foot open before the spawn stays.
+        assert_eq!(client.sent.len(), 3);
+        assert!(
+            is_unfocused_move_to_2(&client.sent[1], 10),
+            "{:?}",
+            client.sent
+        );
+    }
+
+    #[test]
+    fn placement_ignores_unmatched_new_windows() {
+        let firefox = Response::Windows(vec![test_window(12, 1, "firefox")]);
+
+        let client = place(
+            &spawned(&[&["foot"]], &[]),
+            &WATCH_TIMING,
+            repeat(&firefox, 8).collect(),
+        );
+
+        assert!(!client.sent.iter().any(is_window_move));
+    }
+
+    #[test]
+    fn placement_prefers_windows_already_on_the_workspace() {
+        // The user opened foot 20 elsewhere while the program's foot 10 mapped in place.
+        let client = place(
+            &spawned(&[&["foot"]], &[]),
+            &WATCH_TIMING,
+            vec![Response::Windows(vec![
+                test_window(20, 1, "foot"),
+                test_window(10, 2, "foot"),
+            ])],
+        );
+
+        assert_eq!(client.sent.len(), 1);
+    }
+
+    #[test]
+    fn placement_moves_each_window_at_most_once() {
+        let programs = spawned(&[&["foot"], &["kitty"]], &[]);
+        let mut watch = Watch::new(&programs);
+        let mut client = MockClient::new(vec![Response::Handled]);
+
+        watch.claim_strays(&mut client, &[test_window(10, 2, "foot")]);
+        watch.claim_strays(
+            &mut client,
+            &[test_window(10, 2, "foot"), test_window(11, 1, "kitty")],
+        );
+        // The user moved both on: foot from the workspace, kitty after it was moved there.
+        watch.claim_strays(
+            &mut client,
+            &[test_window(10, 1, "foot"), test_window(11, 3, "kitty")],
+        );
+
+        assert_eq!(client.sent.len(), 1);
+        assert!(is_unfocused_move_to_2(&client.sent[0], 11));
+        assert!(watch.all_claimed);
+    }
+
+    #[test]
+    fn placement_watches_for_a_slow_program_after_ordering() {
+        let foot = Response::Windows(vec![test_tiled_window(10, 2, "foot", 1)]);
+
+        let client = place(
+            &spawned(&[&["foot"], &["kitty"]], &[]),
+            &WATCH_TIMING,
+            repeat(&foot, 6)
+                .chain([
+                    Response::FocusedWindow(None),
+                    focus_on(2),
+                    foot.clone(),
+                    Response::Windows(vec![
+                        test_tiled_window(10, 2, "foot", 1),
+                        test_tiled_window(11, 1, "kitty", 1),
+                    ]),
+                    Response::Handled,
+                ])
+                .collect(),
+        );
+
+        assert!(is_unfocused_move_to_2(client.sent.last().unwrap(), 11));
+        assert_eq!(reorder_steps(&client.sent), []);
     }
 
     #[test]
@@ -2823,7 +3115,7 @@ mod tests {
         let t0 = Instant::now();
         debouncer.recheck_at(Some(t0 + SPAWN_GRACE));
 
-        assert!(!debouncer.due(t0 + Duration::from_millis(14_900)));
+        assert!(!debouncer.due(t0 + SPAWN_GRACE.saturating_sub(Duration::from_millis(100))));
         assert!(debouncer.due(t0 + SPAWN_GRACE));
     }
 

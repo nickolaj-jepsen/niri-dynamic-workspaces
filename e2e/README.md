@@ -56,6 +56,11 @@ A session by hand:
 ./e2e/harness.sh stop
 ```
 
+Without a daemon, an `app switch` that creates a workspace with programs
+returns once each program has a window, or after 15 s: a program that opens
+none, like `true`, holds it that long. Run it in the background
+(`app switch e &`) to act meanwhile; later `app` calls are forwarded to it.
+
 ## Theme gallery
 
 `./e2e/render-themes.sh` renders every `themes/<name>.css` as

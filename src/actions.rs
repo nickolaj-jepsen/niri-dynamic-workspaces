@@ -1,5 +1,5 @@
 //! Workspace action choreography shared by the CLI and the overlay UI:
-//! niri IPC call → on-create/on-delete hooks. Column reordering and delete
+//! niri IPC call → on-create/on-delete hooks. Window placement and delete
 //! completion run in the background while the application is held.
 
 use std::collections::HashMap;
@@ -125,8 +125,8 @@ fn find_template<'a>(config: &'a ResolvedConfig, name: &str) -> anyhow::Result<&
 /// A new workspace with programs is spared from cleanup for
 /// [`niri::SPAWN_GRACE`].
 ///
-/// Column reordering (needed when 2+ programs spawn) runs on a background
-/// thread; see [`spawn_reorder`].
+/// Placing the programs' windows runs on a background thread; see
+/// [`spawn_placement`].
 pub fn switch_workspace(
     app: &gtk4::Application,
     config: &ResolvedConfig,
@@ -142,10 +142,10 @@ pub fn switch_workspace(
                 .with_context(|| format!("failed to parse command '{program}'"))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
-    let (created, reorder) =
+    let (created, placement) =
         niri::switch_workspace(&config.workspace_prefix, ch, ws_name, &commands)?;
-    if let Some(request) = reorder {
-        spawn_reorder(app, request);
+    if let Some(programs) = placement {
+        spawn_placement(app, programs);
     }
     if let Some(id) = created {
         // It stays empty until a program maps a window, which the daemon's
@@ -194,7 +194,7 @@ pub fn delete_workspace(
         }
         Ok(())
     };
-    // Held like spawn_reorder: a CLI caller waits for the outcome.
+    // Held like spawn_placement: a CLI caller waits for the outcome.
     let guard = app.hold();
     glib::spawn_future_local(async move {
         let result = gio::spawn_blocking(finish)
@@ -225,17 +225,17 @@ pub fn move_window(
     Ok(())
 }
 
-/// Run column reordering on a blocking thread, holding the application alive
-/// until it settles.
+/// Place the programs' windows on a blocking thread, holding the application
+/// alive until every program has a window or the watch ends.
 ///
 /// The hold guard prevents two failure modes: without it, a non-daemon
-/// process exits when the overlay closes (killing the reorder mid-poll), and
-/// running the reorder inline would block the daemon's main loop for the
-/// duration of the window polling.
-fn spawn_reorder(app: &gtk4::Application, request: niri::ReorderRequest) {
+/// process exits when the overlay closes (killing the placement mid-poll),
+/// and running the placement inline would block the daemon's main loop for
+/// the duration of the window polling.
+fn spawn_placement(app: &gtk4::Application, programs: niri::SpawnedPrograms) {
     let guard = app.hold();
     glib::spawn_future_local(async move {
-        let _ = gio::spawn_blocking(move || niri::reorder_workspace_columns(&request)).await;
+        let _ = gio::spawn_blocking(move || niri::place_spawned_windows(&programs)).await;
         drop(guard);
     });
 }

@@ -176,7 +176,7 @@ test_delete_hook_gets_full_name() {
     until_true has_mark "deleted-dyn-a Notes"
 }
 
-# A reorder still waiting on a late window must not pull the user back after they leave.
+# A placement still waiting on a late window must not pull the user back after they leave.
 test_reorder_leaves_focus_alone() {
     local ok
     # The direct foot is listed second, so it is out of its slot and the reorder cannot skip it.
@@ -185,13 +185,37 @@ test_reorder_leaves_focus_alone() {
 programs = ["sh -c 'sleep 2; exec foot sleep 60'", "foot sleep 60"]
 EOF
     "$h" app switch b || return 1
-    # The reorder's hold keeps this instance up until it is done; the switch back is forwarded to it.
+    # The placement's hold keeps this instance up until it is done; the switch back is forwarded to it.
     "$h" app switch c &
-    # The late foot maps on dyn-b, so the reorder waits out its 5 s budget and acts at about 5.6 s.
+    # The late foot maps on dyn-b and moves to dyn-c, where the reorder finds it out of its slot.
     until_true window_on dyn-c && "$h" app switch b && stays_focused dyn-b 8
     ok=$?
     wait
-    ((ok == 0)) && focused_is dyn-b
+    ((ok == 0)) && focused_is dyn-b && [[ $(windows_on dyn-c) == 2 ]]
+}
+
+# A slow program's window that maps where the user went moves to its workspace, leaving focus
+# there and the user's own foot, open before the spawn, in place.
+test_slow_program_follows_its_workspace() {
+    local ok own switch
+    add_config <<'EOF' || return 1
+[workspace.e]
+programs = ["sh -c 'sleep 3; exec foot sleep 60'"]
+EOF
+    "$h" app switch b && spawn_window || return 1
+    own=$(windows | jq '.[0].id')
+    # The placement's hold keeps this instance up until it is done; the switch back is forwarded to it.
+    "$h" app switch e &
+    switch=$!
+    # Only the user's foot yet when they leave, or the program's could map on dyn-e directly.
+    until_true has_ws dyn-e && "$h" app switch b && [[ $(windows | jq length) == 1 ]] &&
+        until_true window_on dyn-e foot && stays_focused dyn-b 1
+    ok=$?
+    # Not a bare wait, which would also wait for the user's foot to exit.
+    wait "$switch"
+    ((ok == 0)) && [[ $(windows_on dyn-b) == 1 ]] &&
+        windows | jq -e --argjson id "$own" --arg ws "$(ws_id dyn-b)" \
+            'any(.[]; .id == $id and (.workspace_id | tostring) == $ws)' >/dev/null
 }
 
 test_overlay_move_without_window_stays_open() {
@@ -768,6 +792,7 @@ tests=(
     move_window_runs_create_hooks
     delete_hook_gets_full_name
     reorder_leaves_focus_alone
+    slow_program_follows_its_workspace
     invalid_key_fails_in_caller
     missing_workspace_reports_to_caller
     rename_sets_and_clears_title
