@@ -7,6 +7,8 @@ Releases before 0.12.0 are listed on [GitHub Releases](https://github.com/nickol
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-09-23
+
 ### Added
 
 - `switch KEY` takes `--template NAME`, `--var NAME=VALUE` and `--title TITLE` to create the workspace from a template and set its title (`--title ""` for none).
@@ -106,5 +108,6 @@ Releases before 0.12.0 are listed on [GitHub Releases](https://github.com/nickol
 - Dropdown variables with many options stay responsive, show the best 50 matches and keep the selection in view; the template picker also scrolls to the selection.
 - A template named `Empty` now runs its `on_create` hooks and sets `NDW_TEMPLATE`.
 
-[Unreleased]: https://github.com/nickolaj-jepsen/niri-dynamic-workspaces/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/nickolaj-jepsen/niri-dynamic-workspaces/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/nickolaj-jepsen/niri-dynamic-workspaces/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/nickolaj-jepsen/niri-dynamic-workspaces/compare/v0.11.0...v0.12.0
