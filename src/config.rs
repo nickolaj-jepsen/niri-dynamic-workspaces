@@ -625,6 +625,11 @@ impl Config {
                 None => {}
             }
             if !entry.programs.is_empty() {
+                warn_unbalanced(
+                    &format!("[workspace.{key}]"),
+                    &entry.programs,
+                    &mut warnings,
+                );
                 workspace_programs.insert(ch, entry.programs);
             }
             if let Some(name) = entry.name {
@@ -647,6 +652,12 @@ impl Config {
             Theme::default()
         });
 
+        warn_unbalanced(
+            "[general] default_programs",
+            &self.general.default_programs,
+            &mut warnings,
+        );
+
         // --- Templates ---
         let mut templates: Vec<Template> = Vec::new();
         // Reserve '1' for the "Empty" option in the template picker.
@@ -665,10 +676,21 @@ impl Config {
                 ));
                 continue;
             }
+            warn_unbalanced(
+                &format!("template '{name}'"),
+                &entry.programs,
+                &mut warnings,
+            );
 
             let key = if let Some(ref k) = entry.key {
                 if let Some(ch) = parse_workspace_char(k) {
-                    if used_hotkeys.contains(&ch) {
+                    if ch == '1' {
+                        warnings.push(format!(
+                            "template '{name}': key '1' is reserved for the Empty option, \
+                             ignoring key"
+                        ));
+                        None
+                    } else if used_hotkeys.contains(&ch) {
                         warnings.push(format!(
                             "template '{name}': duplicate hotkey '{ch}', ignoring key"
                         ));
@@ -738,13 +760,11 @@ impl Config {
                     ));
                 }
             }
-            for v in &variables {
-                if !referenced_names.contains(&v.name) {
-                    warnings.push(format!(
-                        "template '{name}': variable '{}' is never referenced in programs",
-                        v.name
-                    ));
-                }
+            for v in unused_variables(&variables, entry, &self.hooks.on_create) {
+                warnings.push(format!(
+                    "template '{name}': variable '{v}' is never referenced in programs, \
+                     title or hooks"
+                ));
             }
 
             // Validate title template references
@@ -802,6 +822,55 @@ impl Config {
 
         (resolved, warnings)
     }
+}
+
+/// Warn about each of `programs` that cannot be split into arguments; it
+/// would fail when a workspace is created.
+fn warn_unbalanced(context: &str, programs: &[String], warnings: &mut Vec<String>) {
+    for program in programs {
+        if let Err(e) = build_argv(program, &HashMap::new()) {
+            warnings.push(format!("{context}: cannot split program `{program}` ({e})"));
+        }
+    }
+}
+
+/// The names of `variables` that nothing reads: no `{{name}}` in the
+/// template's programs or title, no `NDW_VAR_*` in its or the global
+/// `on_create` hooks, and not the first one while it fills in the title.
+fn unused_variables<'a>(
+    variables: &'a [TemplateVariable],
+    entry: &TemplateEntry,
+    global_on_create: &[String],
+) -> Vec<&'a str> {
+    let placeholders: HashSet<String> = entry
+        .programs
+        .iter()
+        .chain(&entry.title)
+        .flat_map(|text| extract_variable_references(text))
+        .collect();
+    let hooks: Vec<&String> = entry.on_create.iter().chain(global_on_create).collect();
+    variables
+        .iter()
+        .enumerate()
+        .filter(|&(i, v)| {
+            let fills_title = i == 0 && entry.title.is_none();
+            let env_name = hook_env_var(&v.name);
+            !fills_title
+                && !placeholders.contains(&v.name)
+                && !hooks.iter().any(|hook| mentions_env_var(hook, &env_name))
+        })
+        .map(|(_, v)| v.name.as_str())
+        .collect()
+}
+
+/// Whether shell `command` contains `var` as a whole word, as in
+/// `"$NDW_VAR_PATH"` but not `$NDW_VAR_PATHS`.
+fn mentions_env_var(command: &str, var: &str) -> bool {
+    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    command.match_indices(var).any(|(i, _)| {
+        !command[..i].chars().next_back().is_some_and(is_word)
+            && !command[i + var.len()..].chars().next().is_some_and(is_word)
+    })
 }
 
 /// A piece of a template string: literal text or a `{{name}}` placeholder.
@@ -2023,9 +2092,12 @@ layout = "dvorak"
             ..Config::default()
         };
         let (resolved, warnings) = config.resolve();
-        // key '1' is reserved for Empty — should warn as duplicate
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("duplicate hotkey '1'"));
+        assert!(
+            warnings[0].contains("key '1' is reserved"),
+            "{}",
+            warnings[0]
+        );
         // Template kept but key cleared and auto-assigned
         assert_eq!(resolved.templates.len(), 1);
         let tmpl = &resolved.templates[0];
@@ -2887,6 +2959,8 @@ options = ["main", "develop", "staging"]
                 programs: vec!["kitty".to_string()],
                 key: Some("d".to_string()),
                 variables,
+                // Without a title the first variable would fill it in.
+                title: Some("dev".to_string()),
                 ..TemplateEntry::default()
             },
         );
@@ -2898,6 +2972,141 @@ options = ["main", "develop", "staging"]
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("never referenced"));
         assert!(warnings[0].contains("unused"));
+    }
+
+    /// Warnings for `text`, a config whose parsing must succeed.
+    fn toml_warnings(text: &str) -> Vec<String> {
+        toml::from_str::<Config>(text).unwrap().resolve().1
+    }
+
+    #[test]
+    fn resolve_variable_used_only_in_title_is_referenced() {
+        let warnings = toml_warnings(
+            r#"
+[template.dev]
+programs = ["kitty {{path}}"]
+title = "{{topic}}"
+[template.dev.variables.path]
+name = "Path"
+[template.dev.variables.topic]
+name = "Topic"
+"#,
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn resolve_variable_used_only_in_hook_env_is_referenced() {
+        for hooks in [
+            "[template.dev]\non_create = ['git -C \"$NDW_VAR_PATH\" status']",
+            "[hooks]\non_create = ['echo \"${NDW_VAR_PATH}\"']\n[template.dev]",
+        ] {
+            let warnings = toml_warnings(&format!(
+                "{hooks}\nprograms = [\"kitty\"]\ntitle = \"dev\"\n\
+                 [template.dev.variables.path]\nname = \"Path\"\n"
+            ));
+            assert!(warnings.is_empty(), "{hooks}: {warnings:?}");
+        }
+    }
+
+    #[test]
+    fn resolve_longer_hook_env_name_is_not_a_reference() {
+        let warnings = toml_warnings(
+            r#"
+[template.dev]
+programs = ["kitty"]
+title = "dev"
+on_create = ['echo "$NDW_VAR_PATHS"']
+[template.dev.variables.path]
+name = "Path"
+"#,
+        );
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("'path' is never referenced"));
+    }
+
+    #[test]
+    fn mentions_env_var_matches_whole_words() {
+        assert!(mentions_env_var("echo $NDW_VAR_X", "NDW_VAR_X"));
+        assert!(mentions_env_var("echo \"${NDW_VAR_X}\"", "NDW_VAR_X"));
+        assert!(mentions_env_var(
+            "echo $NDW_VAR_X/a $NDW_VAR_XY",
+            "NDW_VAR_X"
+        ));
+        assert!(!mentions_env_var("echo $NDW_VAR_XY", "NDW_VAR_X"));
+        assert!(!mentions_env_var("echo $MY_NDW_VAR_X", "NDW_VAR_X"));
+    }
+
+    #[test]
+    fn resolve_first_variable_feeds_auto_title() {
+        let warnings = toml_warnings(
+            r#"
+[template.dev]
+programs = ["kitty"]
+[template.dev.variables.branch]
+name = "Branch"
+"#,
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn resolve_undefined_title_ref_warns_once() {
+        let warnings = toml_warnings(
+            r#"
+[template.dev]
+programs = ["kitty"]
+title = "{{nope}}"
+"#,
+        );
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("title references undefined variable"));
+    }
+
+    #[test]
+    fn resolve_unbalanced_quotes_warn() {
+        for (text, context) in [
+            (
+                "[general]\ndefault_programs = [\"kitty 'x\"]\n",
+                "[general] default_programs",
+            ),
+            (
+                "[workspace.a]\nprograms = [\"kitty 'x\"]\n",
+                "[workspace.a]",
+            ),
+            (
+                "[template.dev]\nprograms = [\"kitty 'x\"]\n",
+                "template 'dev'",
+            ),
+        ] {
+            let (resolved, warnings) = toml::from_str::<Config>(text).unwrap().resolve();
+            assert_eq!(
+                warnings,
+                vec![format!(
+                    "{context}: cannot split program `kitty 'x` (missing closing quote)"
+                )]
+            );
+            // Kept: creating the workspace reports the same problem.
+            let kept = resolved
+                .default_programs
+                .iter()
+                .chain(resolved.workspace_programs.values().flatten())
+                .chain(resolved.templates.iter().flat_map(|t| &t.programs));
+            assert_eq!(kept.count(), 1, "{text}");
+        }
+    }
+
+    #[test]
+    fn resolve_quoted_placeholders_split_cleanly() {
+        let warnings = toml_warnings(
+            r#"
+[template.dev]
+programs = ["kitty --title 'ws: {{ path }}'"]
+[template.dev.variables.path]
+name = "Path"
+"#,
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
 
     #[test]
