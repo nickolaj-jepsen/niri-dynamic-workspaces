@@ -131,6 +131,16 @@ static = "01"                          # pin an existing niri workspace to this 
 name = "Main"                          # optional display name shown on the key
 ```
 
+#### Program order
+
+When a new workspace starts two or more programs, their columns are put in
+list order once the windows appear. Each window is matched to its program by
+app id: through the executable name (`firefox` for `org.mozilla.firefox`) or,
+for a wrapper, a later argument (`flatpak run com.slack.Slack`,
+`uwsm app -- kitty`, `sh -c 'sleep 1; exec foot'`). A window that matches no
+program keeps niri's placement, and nothing is moved once you switch to
+another workspace.
+
 #### Static workspace mappings
 
 If you have fixed named workspaces in your niri config (e.g. `workspace "01"`

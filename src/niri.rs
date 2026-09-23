@@ -288,9 +288,9 @@ const REORDER_TIMING: ReorderTiming = ReorderTiming {
 /// remap and resize during startup.
 const STABLE_POLLS: u32 = 3;
 
-/// The executable name of a command: its first argument without any leading path.
-fn executable_name(program: &str) -> &str {
-    program.rsplit('/').next().unwrap_or(program)
+/// A command word without any leading path.
+fn basename(word: &str) -> &str {
+    word.rsplit('/').next().unwrap_or(word)
 }
 
 /// Check whether a window's `app_id` matches an executable name.
@@ -299,6 +299,26 @@ fn app_id_matches(app_id: &str, exe: &str) -> bool {
     app_id
         .split('.')
         .any(|segment| segment.eq_ignore_ascii_case(exe))
+}
+
+/// Whether a command word names the window's app: its basename is a segment
+/// of the app id (`firefox`, `org.mozilla.firefox`) or the whole of it
+/// (`com.slack.Slack`).
+fn word_matches(app_id: &str, word: &str) -> bool {
+    // `code ~/dev/` has an empty basename, which would match an empty app id.
+    let name = basename(word);
+    !name.is_empty() && (app_id_matches(app_id, name) || app_id.eq_ignore_ascii_case(name))
+}
+
+/// Whether a word after the first names the window's app, as with the
+/// program a wrapper starts: `flatpak run com.slack.Slack`, `uwsm app --
+/// kitty`, `env FOO=1 foot`, `sh -c '...; exec foot'`.
+fn later_word_matches(command: &[String], app_id: &str) -> bool {
+    command
+        .iter()
+        .skip(1)
+        .flat_map(|arg| arg.split_whitespace())
+        .any(|word| word_matches(app_id, word))
 }
 
 /// Wait for the programs' windows on the new workspace, then move their
@@ -328,6 +348,14 @@ fn reorder_columns_impl(
         return Ok(());
     }
     let ordered = match_windows(&request.commands, &windows);
+    for (command, slot) in request.commands.iter().zip(&ordered) {
+        if slot.is_none() {
+            eprintln!(
+                "warning: no window matched `{}`, leaving its column in place",
+                shell_words::join(command)
+            );
+        }
+    }
     apply_column_order(client, request.workspace_id, &ordered, timing.action_delay)
 }
 
@@ -444,22 +472,35 @@ fn settled_windows(
     Ok(new_workspace_windows(&windows, ws_id).cloned().collect())
 }
 
-/// Pair each command with a distinct window whose app id matches its
-/// executable name, greedily in command order; `None` where none matches.
+/// Pair each command with a distinct window by app id, in command order;
+/// `None` where no window matches.
+///
+/// Every executable is matched before any later word, so a direct `kitty`
+/// keeps its window from a `uwsm app -- kitty`. Windows without an app id
+/// never match.
 fn match_windows(commands: &[Vec<String>], windows: &[Window]) -> Vec<Option<u64>> {
-    let mut used = HashSet::new();
-    commands
+    let mut unclaimed: Vec<(u64, &str)> = windows
+        .iter()
+        .filter_map(|w| Some((w.id, w.app_id.as_deref()?)))
+        .collect();
+    let mut claim = |matches: &dyn Fn(&str) -> bool| {
+        let i = unclaimed.iter().position(|&(_, app_id)| matches(app_id))?;
+        Some(unclaimed.remove(i).0)
+    };
+
+    let mut slots: Vec<Option<u64>> = commands
         .iter()
         .map(|command| {
-            let exe = executable_name(command.first()?);
-            let window = windows.iter().find(|w| {
-                !used.contains(&w.id)
-                    && app_id_matches(w.app_id.as_deref().unwrap_or_default(), exe)
-            })?;
-            used.insert(window.id);
-            Some(window.id)
+            let program = command.first()?;
+            claim(&|app_id| word_matches(app_id, program))
         })
-        .collect()
+        .collect();
+    for (slot, command) in slots.iter_mut().zip(commands) {
+        if slot.is_none() {
+            *slot = claim(&|app_id| later_word_matches(command, app_id));
+        }
+    }
+    slots
 }
 
 /// Move a window to an existing workspace by id; `None` moves the focused window.
@@ -1639,10 +1680,10 @@ mod tests {
     }
 
     #[test]
-    fn executable_name_strips_leading_path() {
-        assert_eq!(executable_name("firefox"), "firefox");
-        assert_eq!(executable_name("/usr/bin/firefox"), "firefox");
-        assert_eq!(executable_name("/opt/my apps/firefox"), "firefox");
+    fn basename_strips_leading_path() {
+        assert_eq!(basename("firefox"), "firefox");
+        assert_eq!(basename("/usr/bin/firefox"), "firefox");
+        assert_eq!(basename("/opt/my apps/firefox"), "firefox");
     }
 
     #[test]
@@ -1652,6 +1693,76 @@ mod tests {
         assert!(app_id_matches("firefox", "firefox")); // no dots
         assert!(!app_id_matches("org.mozilla.firefox", "chrome")); // no match
         assert!(!app_id_matches("org.mozilla.firefox", "fire")); // partial segment
+    }
+
+    #[test]
+    fn word_matches_segments_and_whole_ids() {
+        assert!(word_matches("org.mozilla.firefox", "/usr/bin/firefox"));
+        assert!(word_matches("com.slack.Slack", "com.slack.slack"));
+        // A flatpak's exported launcher.
+        assert!(word_matches(
+            "com.slack.Slack",
+            "/var/lib/flatpak/exports/bin/com.slack.Slack"
+        ));
+        assert!(!word_matches("", "/home/me/dev/"));
+        assert!(!word_matches("org.mozilla.firefox", "--"));
+    }
+
+    #[test]
+    fn match_windows_finds_wrapped_programs() {
+        let windows = vec![
+            test_window(14, 2, "Alacritty"),
+            test_window(13, 2, "org.mozilla.firefox"),
+            test_window(12, 2, "foot"),
+            test_window(11, 2, "kitty"),
+            test_window(10, 2, "com.slack.Slack"),
+        ];
+
+        let slots = match_windows(
+            &commands(&[
+                &["flatpak", "run", "com.slack.Slack"],
+                &["uwsm", "app", "--", "kitty"],
+                &["env", "FOO=1", "foot"],
+                &["app2unit", "firefox"],
+                &["sh", "-c", "sleep 1; exec alacritty"],
+            ]),
+            &windows,
+        );
+
+        assert_eq!(slots, [Some(10), Some(11), Some(12), Some(13), Some(14)]);
+    }
+
+    #[test]
+    fn match_windows_prefers_executable_matches() {
+        let windows = vec![test_window(10, 2, "kitty"), test_window(11, 2, "kitty")];
+
+        let slots = match_windows(
+            &commands(&[&["uwsm", "app", "--", "kitty"], &["kitty"]]),
+            &windows,
+        );
+
+        assert_eq!(slots, [Some(11), Some(10)]);
+    }
+
+    #[test]
+    fn match_windows_ignores_empty_basenames_and_missing_app_ids() {
+        let mut no_app_id = test_window(10, 2, "");
+        no_app_id.app_id = None;
+        let windows = vec![no_app_id, test_window(11, 2, "")];
+
+        let slots = match_windows(&commands(&[&["code", "/home/me/dev/"]]), &windows);
+
+        assert_eq!(slots, [None]);
+    }
+
+    #[test]
+    fn match_windows_leaves_renamed_binaries_unmatched() {
+        // A known limit: the executable shares no word with the app id.
+        let windows = vec![test_window(10, 2, "org.gnome.TextEditor")];
+
+        let slots = match_windows(&commands(&[&["gnome-text-editor"]]), &windows);
+
+        assert_eq!(slots, [None]);
     }
 
     #[test]
