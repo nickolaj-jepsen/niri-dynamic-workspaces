@@ -34,6 +34,7 @@ the `debug: overlay window freed` lines only debug builds log.
 | `mode <name>` | click `switch`, `delete` or `move` |
 | `click <x> <y>` | click anywhere |
 | `type <args...>` | press keys with `wtype`, e.g. `type c` |
+| `press <codes> [ms]` | press evdev codes through niri's layout (`46` = c, `29+46` = Ctrl+c), optionally held for `ms` |
 | `escape` | dismiss the overlay |
 | `open` / `closed` | is the overlay mapped, or wait until it is not |
 | `state` | workspaces as JSON |
@@ -100,6 +101,17 @@ the last one. A new overlay then reads a repeat of the previous call's keycodes
 with the compositor's layout, where the first keycode `wtype` hands out is
 Escape, so `type` sends a throwaway F24 first, which the overlay ignores.
 `escape` is correct either way.
+
+`press` tests layout handling, which `type` cannot: `wtype`'s keymap has one
+group and one level per key. It runs `wtype` on cage's display instead, where
+the nested niri reads each key as a raw evdev code through its own layout
+(`us,fr,ru` in `fixtures/niri.kdl`, us active). `wtype` numbers keysyms from
+1 in order of first use, so `press` releases fillers for codes 1 up to the
+highest one before pressing, which puts each pressed keysym on its code. It
+waits 0.3 s before the first key: niri binds cage's keyboard only once the
+session's first `wtype` has created it, and keys sent before that are lost.
+Pick a group first with `run niri msg action switch-layout <index>`. Name the
+key in a comment next to each `press`, since the codes are opaque.
 
 ## Click coordinates
 

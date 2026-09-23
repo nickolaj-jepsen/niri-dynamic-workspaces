@@ -100,7 +100,8 @@ inhibit_compositor_shortcuts = true # suppress niri keybinds while the overlay i
                                    # open, so a still-held Mod+<key> reaches the
                                    # overlay instead of firing compositor binds
                                    # (binds with allow-inhibiting=false still fire)
-layout = "qwerty"                  # keyboard layout for the overlay (see table below)
+layout = "qwerty"                  # arrangement of the drawn keys (see table
+                                   # below); presses follow your XKB layout
 theme = "gtk"                      # follows your GTK theme; or a built-in palette
                                    # ("dark", "nord", …) or a CSS file (see Theming)
 
@@ -237,6 +238,12 @@ name = "Project path"
 | Colemak  | `colemak`  |
 
 All layouts contain the same 36 keys (a–z, 0–9) arranged in the physical positions of each keyboard layout. The value is case-insensitive.
+
+`layout` only arranges the drawing. A key press selects the character the key
+types. A key that types none of them (AZERTY's unshifted digits, a Cyrillic
+letter) selects the one it carries at another level or in another group of your
+keymap, so a non-Latin layout needs a Latin one next to it (niri
+`layout "us,ru"`).
 
 ### Theming
 

@@ -10,7 +10,8 @@ animations {
 input {
     keyboard {
         xkb {
-            layout "us"
+            // us stays active; layout tests pick a group with `niri msg action switch-layout <index>`.
+            layout "us,fr,ru"
         }
     }
 }

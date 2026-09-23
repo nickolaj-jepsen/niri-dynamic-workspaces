@@ -92,6 +92,25 @@ test_overlay_key_press_switches() {
     until_true focused_is dyn-c && "$h" closed
 }
 
+# press reads evdev codes through the fixture's "us,fr,ru" layout; switch-layout picks the group.
+test_overlay_key_azerty_digit() {
+    "$h" run niri msg action switch-layout 1 && "$h" overlay switch || return 1
+    "$h" press 2 || return 1 # fr: &
+    until_true has_ws dyn-1 && "$h" closed
+}
+
+test_overlay_key_azerty_shift_digit() {
+    "$h" run niri msg action switch-layout 1 && "$h" overlay switch || return 1
+    "$h" press 42+3 || return 1 # fr: Shift+é, which types 2
+    until_true has_ws dyn-2 && "$h" closed
+}
+
+test_overlay_key_cyrillic() {
+    "$h" run niri msg action switch-layout 2 && "$h" overlay switch || return 1
+    "$h" press 30 || return 1 # ru: ф, on the key us types a with
+    until_true has_ws dyn-a && "$h" closed
+}
+
 test_overlay_escape_closes() {
     "$h" overlay switch || return 1
     "$h" escape || return 1
@@ -204,6 +223,9 @@ tests=(
     missing_workspace_reports_to_caller
     overlay_card_click_switches
     overlay_key_press_switches
+    overlay_key_azerty_digit
+    overlay_key_azerty_shift_digit
+    overlay_key_cyrillic
     overlay_escape_closes
     overlay_delete_mode
     broken_config_still_opens
