@@ -103,10 +103,6 @@ static LATE_EXIT_STATUS: AtomicI32 = AtomicI32::new(0);
 /// for its last reference to drop, so it still gets the message and status.
 /// GIO reads a local invocation's status as soon as the handler returns, so
 /// `main` exits with it instead.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "for async actions; none report failures yet")
-)]
 fn fail_later(cmdline: &ApplicationCommandLine, msg: &str) {
     report(cmdline, msg);
     cmdline.set_exit_status(1);
@@ -176,7 +172,14 @@ fn handle_direct_action(
             cfg.programs_for(ch),
             &actions::HookInfo::default(),
         ),
-        ui::Mode::Delete => actions::delete_workspace(&cfg, ch, &ws_name),
+        ui::Mode::Delete => {
+            let cmdline = cmdline.clone();
+            actions::delete_workspace(app, &cfg, ch, move |result| {
+                if let Err(e) = result {
+                    fail_later(&cmdline, &format!("error: {e:#}"));
+                }
+            })
+        }
         ui::Mode::MoveWindow => actions::move_window(&cfg, ch, &ws_name, None),
     }
 }

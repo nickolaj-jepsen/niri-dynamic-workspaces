@@ -1,5 +1,6 @@
 //! Workspace action choreography shared by the CLI and the overlay UI:
-//! niri IPC call → on-create/on-delete hooks → column reordering.
+//! niri IPC call → on-create/on-delete hooks. Column reordering and delete
+//! completion run in the background while the application is held.
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -71,11 +72,39 @@ fn run_create_hooks(config: &ResolvedConfig, ch: char, ws_name: &str, hook_info:
     niri::run_hooks(&hooks, &env);
 }
 
-/// Delete a workspace and run on-delete hooks on success.
-pub fn delete_workspace(config: &ResolvedConfig, ch: char, ws_name: &str) -> anyhow::Result<()> {
-    niri::delete_workspace(&config.workspace_prefix, ch)?;
-    let env = config::build_hook_env(ws_name, ch, None, &HashMap::new());
-    niri::run_hooks(&config.hooks.on_delete, &env);
+/// Delete the workspace for `ch`: ask its windows to close, then, on a
+/// background thread once they have, unset its name and run the on-delete
+/// hooks with that name.
+///
+/// Errors from finding the workspace or asking its windows to close are
+/// returned directly. `on_done` gets the background outcome on the main
+/// thread, while the application is still held: a window still open after
+/// a few seconds fails it, and the workspace keeps its name without running
+/// hooks.
+pub fn delete_workspace(
+    app: &gtk4::Application,
+    config: &ResolvedConfig,
+    ch: char,
+    on_done: impl FnOnce(anyhow::Result<()>) + 'static,
+) -> anyhow::Result<()> {
+    let pending = niri::begin_delete(&config.workspace_prefix, ch)?;
+    let on_delete = config.hooks.on_delete.clone();
+    let finish = move || {
+        if niri::finish_delete(&pending)? {
+            let env = config::build_hook_env(&pending.name, ch, None, &HashMap::new());
+            niri::run_hooks(&on_delete, &env);
+        }
+        Ok(())
+    };
+    // Held like spawn_reorder: a CLI caller waits for the outcome.
+    let guard = app.hold();
+    glib::spawn_future_local(async move {
+        let result = gio::spawn_blocking(finish)
+            .await
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("workspace delete panicked")));
+        on_done(result);
+        drop(guard);
+    });
     Ok(())
 }
 
