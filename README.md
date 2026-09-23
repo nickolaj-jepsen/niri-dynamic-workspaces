@@ -222,6 +222,7 @@ on_delete = ["cleanup-workspace.sh"]
 ```
 
 - `on_create` / `on_delete` are arrays of shell commands, each run with `sh -c`
+- `on_create` runs whenever a workspace is created, also by `move-window`
 - niri launches them, like `programs`: they get niri's environment and
   working directory, keep running after the overlay closes, and are not part
   of the daemon's service
@@ -235,7 +236,8 @@ on_delete = ["cleanup-workspace.sh"]
   - `NDW_WORKSPACE_KEY` — single character key (e.g. `a`)
   - `NDW_TEMPLATE` — template name if used (empty otherwise)
   - `NDW_VAR_<NAME>` — template variable values, uppercased (e.g. `NDW_VAR_PATH`)
-- Templates can define additional `on_create` hooks that run after the global ones:
+- Templates can define additional `on_create` hooks that run after the global
+  ones when the template creates a workspace:
 
 ```toml
 [template.dev]

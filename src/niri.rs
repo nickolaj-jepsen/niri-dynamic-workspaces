@@ -512,8 +512,10 @@ pub fn move_window_to_workspace_by_id(id: u64, window_id: Option<u64>) -> anyhow
     })
 }
 
-/// Move a window to a workspace, creating it if it doesn't exist; `None`
-/// moves the focused window.
+/// Move a window to a workspace, creating it as `full_name` if it doesn't
+/// exist; `None` moves the focused window.
+///
+/// Returns whether a new workspace was named.
 ///
 /// # Errors
 /// When `window_id` is `None` and no window is focused; nothing is created then.
@@ -522,7 +524,7 @@ pub fn move_window_to_workspace(
     ch: char,
     full_name: &str,
     window_id: Option<u64>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     move_window_impl(&mut SocketClient, prefix, ch, full_name, window_id)
 }
 
@@ -532,7 +534,7 @@ fn move_window_impl(
     ch: char,
     full_name: &str,
     window_id: Option<u64>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     let workspaces = list_workspaces_with(client)?;
     let window_id = match window_id {
         Some(id) => id,
@@ -540,7 +542,9 @@ fn move_window_impl(
         None => focused_window_id(&workspaces)?,
     };
 
-    let reference = if let Some(existing) = find_workspace_name(&workspaces, prefix, ch) {
+    let existing = find_workspace_name(&workspaces, prefix, ch);
+    let created = existing.is_none();
+    let reference = if let Some(existing) = existing {
         WorkspaceReferenceArg::Name(existing)
     } else {
         // Naming by id needs no focus change, so the focused window — the one
@@ -558,7 +562,8 @@ fn move_window_impl(
             reference,
             focus: true,
         },
-    )
+    )?;
+    Ok(created)
 }
 
 /// Remove empty, unfocused dynamic workspaces matching the given prefix.
@@ -1443,8 +1448,9 @@ mod tests {
             Response::Handled,
         ]);
 
-        move_window_impl(&mut client, "dyn-", 'a', "dyn-a", None).unwrap();
+        let created = move_window_impl(&mut client, "dyn-", 'a', "dyn-a", None).unwrap();
 
+        assert!(!created);
         assert_eq!(client.sent.len(), 2);
         assert!(matches!(
             &client.sent[1],
@@ -1464,8 +1470,9 @@ mod tests {
             Response::Handled,
         ]);
 
-        move_window_impl(&mut client, "dyn-", 'a', "dyn-a", None).unwrap();
+        let created = move_window_impl(&mut client, "dyn-", 'a', "dyn-a", None).unwrap();
 
+        assert!(created);
         assert_eq!(client.sent.len(), 3);
         assert!(matches!(
             &client.sent[1],
