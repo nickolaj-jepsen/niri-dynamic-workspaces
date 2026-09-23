@@ -31,14 +31,6 @@ use metrics::{apply_scaled_css, find_monitor_for_output, get_monitor_width, Keyb
 use picker::show_template_picker;
 pub use theme::install_base as install_base_styles;
 
-/// Modifier mask for matching keybinds (includes Super to detect compositor keybind hold).
-const RELEVANT_MODS: gdk4::ModifierType = gdk4::ModifierType::from_bits_retain(
-    gdk4::ModifierType::CONTROL_MASK.bits()
-        | gdk4::ModifierType::SHIFT_MASK.bits()
-        | gdk4::ModifierType::ALT_MASK.bits()
-        | gdk4::ModifierType::SUPER_MASK.bits(),
-);
-
 /// Extract the output name of the focused workspace from a pre-fetched list.
 fn focused_output_from(workspaces: &[niri_ipc::Workspace]) -> Option<String> {
     workspaces.iter().find(|w| w.is_focused)?.output.clone()
@@ -438,14 +430,15 @@ fn create_error_revealer() -> (Label, Revealer) {
     (label, revealer)
 }
 
-fn matches_close_keybind(
-    key: gdk4::Key,
-    modifier: gdk4::ModifierType,
-    keybinds: &[crate::config::Keybind],
-) -> bool {
+/// Whether `event` triggers one of `keybinds`, matched like a GTK shortcut.
+///
+/// Caps Lock and a Shift the keysym consumed are ignored; Ctrl, Alt and
+/// Super must match. A Latin bind also fires from its physical key while a
+/// group without that keysym (Cyrillic) is active.
+fn matches_close_keybind(event: &gdk4::KeyEvent, keybinds: &[crate::config::Keybind]) -> bool {
     keybinds
         .iter()
-        .any(|kb| key == kb.key && modifier & RELEVANT_MODS == kb.modifiers)
+        .any(|kb| event.matches(kb.key, kb.modifiers) != gdk4::KeyMatch::None)
 }
 
 fn new_key_controller() -> EventControllerKey {
@@ -680,8 +673,11 @@ fn attach_key_handler(ctx: &ActionContext, close_keybinds: &[crate::config::Keyb
     let key_ctx = ctx.clone();
     let close_keybinds = close_keybinds.to_vec();
     let key_controller = new_key_controller();
-    key_controller.connect_key_pressed(move |ctrl, key, _, modifier| {
-        if matches_close_keybind(key, modifier, &close_keybinds) {
+    key_controller.connect_key_pressed(move |ctrl, key, _, _| {
+        let Some(event) = keys::current_key_event(ctrl) else {
+            return Propagation::Proceed;
+        };
+        if matches_close_keybind(&event, &close_keybinds) {
             key_ctx.window.close();
             return Propagation::Stop;
         }
@@ -701,9 +697,6 @@ fn attach_key_handler(ctx: &ActionContext, close_keybinds: &[crate::config::Keyb
         }
 
         // Workspace key: action depends on mode
-        let Some(event) = keys::current_key_event(ctrl) else {
-            return Propagation::Proceed;
-        };
         if let Some((ch, _)) = keys::workspace_key_press(&event).filter(|(_, m)| m.is_empty()) {
             dispatch_action(ch, &key_ctx);
             return Propagation::Stop;

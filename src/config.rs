@@ -512,7 +512,10 @@ fn parse_keybind(s: &str) -> Result<Keybind, String> {
         modifiers |= parse_modifier(part).ok_or_else(|| format!("unknown modifier '{part}'"))?;
     }
 
-    let key = Key::from_name(key_name).ok_or_else(|| format!("unknown key name '{key_name}'"))?;
+    // Lowercase, as GTK accelerators do: "Ctrl+C" is Ctrl+c, and Shift must be written out.
+    let key = Key::from_name(key_name)
+        .ok_or_else(|| format!("unknown key name '{key_name}'"))?
+        .to_lower();
 
     Ok(Keybind { modifiers, key })
 }
@@ -1234,6 +1237,17 @@ mod tests {
             ModifierType::CONTROL_MASK | ModifierType::SHIFT_MASK
         );
         assert_eq!(kb.key, Key::from_name("a").unwrap());
+    }
+
+    #[test]
+    fn parse_keybind_lowercases_letter_keys() {
+        assert_eq!(parse_keybind("Ctrl+C").unwrap().key, Key::c);
+        let kb = parse_keybind("Ctrl+Shift+Q").unwrap();
+        assert_eq!(kb.key, Key::q);
+        assert_eq!(
+            kb.modifiers,
+            ModifierType::CONTROL_MASK | ModifierType::SHIFT_MASK
+        );
     }
 
     #[test]

@@ -111,6 +111,28 @@ test_overlay_key_cyrillic() {
     until_true has_ws dyn-a && "$h" closed
 }
 
+test_overlay_close_bind_ignores_caps_lock() {
+    "$h" overlay switch || return 1
+    "$h" press 58 && "$h" press 29+46 || return 1 # Caps Lock, then Ctrl+c
+    "$h" closed && no_ws dyn-c
+}
+
+test_overlay_close_bind_on_cyrillic() {
+    "$h" run niri msg action switch-layout 2 && "$h" overlay switch || return 1
+    "$h" press 29+46 || return 1 # ru: Ctrl+с, on the key us types c with
+    "$h" closed
+}
+
+test_overlay_close_bind_with_shift() {
+    add_config <<'EOF' || return 1
+[keybinds]
+close = ["Escape", "Ctrl+Shift+q"]
+EOF
+    "$h" overlay switch || return 1
+    "$h" press 29+42+16 || return 1 # Ctrl+Shift+q
+    "$h" closed && no_ws dyn-q
+}
+
 test_overlay_escape_closes() {
     "$h" overlay switch || return 1
     "$h" escape || return 1
@@ -226,6 +248,9 @@ tests=(
     overlay_key_azerty_digit
     overlay_key_azerty_shift_digit
     overlay_key_cyrillic
+    overlay_close_bind_ignores_caps_lock
+    overlay_close_bind_on_cyrillic
+    overlay_close_bind_with_shift
     overlay_escape_closes
     overlay_delete_mode
     broken_config_still_opens

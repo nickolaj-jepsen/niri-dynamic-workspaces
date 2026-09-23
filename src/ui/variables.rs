@@ -523,9 +523,12 @@ fn attach_variable_input_key_handler(
     let template_variables = option.variables.clone();
 
     let key_controller = new_key_controller();
-    key_controller.connect_key_pressed(move |_, key, _, modifier| {
+    key_controller.connect_key_pressed(move |ctrl, key, _, _| {
+        let Some(event) = super::keys::current_key_event(ctrl) else {
+            return Propagation::Proceed;
+        };
         // Close keybinds / Escape → go back to template picker
-        if matches_close_keybind(key, modifier, &close_keybinds) {
+        if matches_close_keybind(&event, &close_keybinds) {
             let ctx_clone = key_ctx.clone();
             glib::idle_add_local_once(move || {
                 show_template_picker(ch, &ctx_clone);
