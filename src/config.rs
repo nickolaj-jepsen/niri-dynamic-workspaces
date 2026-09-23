@@ -2983,6 +2983,26 @@ name = "Note"
         assert_eq!(keys, struct_fields::<GeneralConfig>());
     }
 
+    /// Every `toml` code block in README.md must load without a diagnostic,
+    /// so the documented config cannot drift from the code.
+    #[test]
+    fn readme_toml_blocks_load_cleanly() {
+        let blocks: Vec<&str> = include_str!("../README.md")
+            .split("```toml\n")
+            .skip(1)
+            .map(|rest| rest.split("```").next().unwrap_or_default())
+            .collect();
+        assert!(!blocks.is_empty(), "README.md has no ```toml blocks");
+        for block in blocks {
+            let config = parse_config(block, Path::new("README.md"));
+            assert!(
+                config.diagnostics.is_empty(),
+                "{block}\n{:#?}",
+                config.diagnostics
+            );
+        }
+    }
+
     #[test]
     fn toml_error_summary_without_span_uses_message() {
         let e = <toml::de::Error as serde::de::Error>::custom("boom");

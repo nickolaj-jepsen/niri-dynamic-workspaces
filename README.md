@@ -46,7 +46,9 @@ programs.niri-dynamic-workspaces = {
 };
 ```
 
-The module installs the package, writes the config file and runs the daemon.
+The module installs the package (`package` picks another build), writes the
+config file from `settings` (the keys under [Configuration](#configuration)) and
+runs the daemon.
 
 The keybinds go into `programs.niri.settings.binds` when the Home Manager module
 from [sodiboo/niri-flake](https://github.com/sodiboo/niri-flake) is loaded
@@ -93,7 +95,8 @@ ignored and reported as warnings (see [Troubleshooting](#troubleshooting)).
 [general]
 workspace_prefix = "dyn-"          # prefix for dynamic workspace names; an empty
                                    # one falls back to "dyn-"
-default_programs = ["kitty"]       # programs launched when creating any new workspace
+default_programs = []              # launched when creating any new workspace,
+                                   # e.g. ["kitty"]
 auto_delete_empty = true           # daemon: auto-delete empty unfocused workspaces
 hover_preview = true               # preview workspaces by hovering over cards
 hide_empty_static = false          # hide empty workspaces from the row above the
@@ -182,29 +185,33 @@ Templates let you choose from predefined program sets when creating a new worksp
 
 ```toml
 [template.dev]
-programs = ["kitty", "code {{path}}"]
+programs = ["kitty --directory {{project}}", "code {{project}}"]
 key = "d"                        # optional hotkey shortcut
-title = "{{path}}"               # optional workspace title (see below)
+title = "{{task}}"               # optional workspace title (see below)
+on_create = ['git -C "$NDW_VAR_PROJECT" switch "$NDW_VAR_BRANCH"']  # see Hooks
 
-[template.dev.variables.path]
-name = "Project path"            # display label shown in the input form
-type = "text"                    # free-form input (default)
+[template.dev.variables.project]
+name = "Project"                 # display label shown in the input form
+type = "dir"                     # dropdown from directory scan
+dirs = ["~/dev", "~/work"]       # directories to scan for child dirs
+depth = 1                        # scan depth (default 1)
 
 [template.dev.variables.branch]
 name = "Git branch"
 type = "options"                 # dropdown from static list
 options = ["main", "develop", "staging"]
 
-[template.dev.variables.tool]
-name = "Build tool"
-type = "command"                 # dropdown from shell command output
-command = "ls ~/dev"             # each stdout line = one option
+[template.dev.variables.task]
+name = "Task"
+type = "text"                    # free-form input (default)
 
-[template.dev.variables.project]
-name = "Project"
-type = "dir"                     # dropdown from directory scan
-dirs = ["~/dev", "~/work"]       # directories to scan for child dirs
-depth = 1                        # scan depth (default 1)
+[template.ssh]                   # no title: the first variable names the workspace
+programs = ["kitty ssh {{host}}"]
+
+[template.ssh.variables.host]
+name = "Host"
+type = "command"                 # dropdown from shell command output,
+command = "awk '/^Host [^*?]+$/ {print $2}' ~/.ssh/config"  # one option per line
 
 [template.browser]
 programs = ["firefox", "slack"]
