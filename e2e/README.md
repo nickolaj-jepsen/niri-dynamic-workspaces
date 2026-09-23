@@ -31,6 +31,7 @@ the `debug: overlay window freed` lines only debug builds log.
 | `config [file]` | replace its `config.toml` with a file, or stdin |
 | `overlay [mode]` | open the overlay in the background, wait until it is mapped |
 | `key <char>` | click the card for `a`-`z` / `0`-`9` |
+| `static <i> [n]` | click the `i`-th of `n` cards (default 1) in the static row |
 | `mode <name>` | click `switch`, `delete` or `move` |
 | `click <x> <y>` | click anywhere |
 | `type <args...>` | press keys with `wtype`, e.g. `type c` |
@@ -89,8 +90,8 @@ leaves it unset). `NDW_E2E_CONFIG` swaps in another `config.toml` at `start`,
 and `config` replaces it in a running session. `test.sh` builds per-test
 settings on that with `add_config` (appends TOML from stdin) and
 `general <key> <value>`.
-`NDW_E2E_SIZE=1920x1080` resizes cage's output with `wlr-randr`; `key` and
-`mode` only know the default size.
+`NDW_E2E_SIZE=1920x1080` resizes cage's output with `wlr-randr`; `key`,
+`static` and `mode` only know the default size.
 
 ## Key presses
 
@@ -115,7 +116,8 @@ key in a comment next to each `press`, since the codes are opaque.
 
 ## Click coordinates
 
-`key` and `mode` hold pixel positions for the default qwerty layout on the
-1272x688 output cage hands us. If the overlay metrics change, open the overlay,
-take a `shot`, read the new card centres off the image and update
-`row_for_key` and `mode_position` in `harness.sh`.
+`key`, `static` and `mode` hold pixel positions for the default qwerty layout
+on the 1272x688 output cage hands us. The static row is centred, so `static`
+needs to know how many cards it holds. If the overlay metrics change, open the
+overlay, take a `shot`, read the new card centres off the image and update
+`row_for_key`, `static_position` and `mode_position` in `harness.sh`.

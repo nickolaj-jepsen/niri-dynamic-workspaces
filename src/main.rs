@@ -153,9 +153,14 @@ fn handle_direct_action(
 
     // Statically mapped key: act on the pinned workspace directly.
     if let Some(target) = cfg.static_workspaces.get(&ch) {
+        // Resolved first: niri ignores an action on a missing workspace.
         return match mode {
-            ui::Mode::Normal => niri::focus_workspace_by_name(target),
-            ui::Mode::MoveWindow => niri::move_window_to_workspace_by_name(target),
+            ui::Mode::Normal => {
+                niri::workspace_id_by_name(target).and_then(niri::focus_workspace_by_id)
+            }
+            ui::Mode::MoveWindow => {
+                niri::workspace_id_by_name(target).and_then(niri::move_window_to_workspace_by_id)
+            }
             ui::Mode::Delete => anyhow::bail!(
                 "key '{ch}' is pinned to static workspace '{target}', which cannot be deleted"
             ),

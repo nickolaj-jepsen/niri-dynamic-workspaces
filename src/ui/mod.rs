@@ -636,16 +636,22 @@ fn dispatch_action(ch: char, ctx: &ActionContext) {
 
     // Statically mapped key: act on the pinned workspace directly.
     if let Some(target) = config.static_workspaces.get(&ch) {
-        let result = match ctx.mode {
-            Mode::Normal => niri::focus_workspace_by_name(target),
-            Mode::MoveWindow => niri::move_window_to_workspace_by_name(target),
-            Mode::Delete => {
+        // The listing that built the cards: niri ignores an action on a missing workspace.
+        let ws_id = ctx.keyboard_infos.get(&ch).and_then(|i| i.ws_id);
+        let result = match (ctx.mode, ws_id) {
+            (Mode::Delete, _) => {
                 show_error(
                     ctx,
                     &format!("'{target}' is a static workspace and cannot be deleted"),
                 );
                 return;
             }
+            (_, None) => {
+                show_error(ctx, &format!("Failed: workspace '{target}' not found"));
+                return;
+            }
+            (Mode::Normal, Some(id)) => niri::focus_workspace_by_id(id),
+            (Mode::MoveWindow, Some(id)) => niri::move_window_to_workspace_by_id(id),
         };
         if let Err(e) = result {
             show_error(ctx, &format!("Failed: {e:#}"));
