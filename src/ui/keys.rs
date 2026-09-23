@@ -1,4 +1,7 @@
-//! Layout-independent key resolution shared by the overlay views.
+//! Layout-independent key resolution and the held-key guard shared by the
+//! overlay views.
+
+use std::cell::Cell;
 
 use gtk4::prelude::*;
 use gtk4::EventControllerKey;
@@ -70,6 +73,37 @@ fn deliberate_mods(state: gdk4::ModifierType, consumed: gdk4::ModifierType) -> g
     state & !consumed & ACTION_MODS
 }
 
+/// Keycode of the last selecting press. GTK repeats a held key client-side
+/// into whichever view is showing, so its repeats are swallowed until release.
+#[derive(Default)]
+pub(super) struct HeldKey(Cell<Option<u32>>);
+
+impl HeldKey {
+    /// Swallow the repeats of `keycode` from now on.
+    pub(super) fn hold(&self, keycode: u32) {
+        self.0.set(Some(keycode));
+    }
+
+    /// Whether a press of `keycode` is a repeat of the held key.
+    ///
+    /// Any other press ends the hold: it stops the held key repeating, and it
+    /// recovers from a release lost to a focus change.
+    pub(super) fn is_repeat(&self, keycode: u32) -> bool {
+        if self.0.get() == Some(keycode) {
+            return true;
+        }
+        self.0.set(None);
+        false
+    }
+
+    /// End the hold if `keycode` is the held key.
+    pub(super) fn release(&self, keycode: u32) {
+        if self.0.get() == Some(keycode) {
+            self.0.set(None);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,5 +159,31 @@ mod tests {
             deliberate_mods(ModifierType::ALT_MASK, ModifierType::empty()),
             ModifierType::ALT_MASK
         );
+    }
+
+    #[test]
+    fn held_key_swallows_repeats_until_release() {
+        let held = HeldKey::default();
+        held.hold(12);
+        assert!(held.is_repeat(12));
+        assert!(held.is_repeat(12));
+        held.release(12);
+        assert!(!held.is_repeat(12));
+    }
+
+    #[test]
+    fn held_key_ends_when_another_key_is_pressed() {
+        let held = HeldKey::default();
+        held.hold(12);
+        assert!(!held.is_repeat(30));
+        assert!(!held.is_repeat(12));
+    }
+
+    #[test]
+    fn held_key_ignores_other_releases() {
+        let held = HeldKey::default();
+        held.hold(12);
+        held.release(30);
+        assert!(held.is_repeat(12));
     }
 }
