@@ -268,9 +268,12 @@ fn attach_template_key_handler(
     let sel = selected_idx.clone();
 
     let key_controller = new_key_controller();
-    key_controller.connect_key_pressed(move |ctrl, key, _, modifier| {
+    key_controller.connect_key_pressed(move |ctrl, key, _, _| {
+        let Some(event) = keys::current_key_event(ctrl) else {
+            return Propagation::Proceed;
+        };
         // Close keybinds / Escape → go back to main view
-        if matches_close_keybind(key, modifier, &close_keybinds) {
+        if matches_close_keybind(&event, &close_keybinds) {
             let ctx = key_ctx.clone();
             glib::idle_add_local_once(move || {
                 populate_overlay(&ctx.window, &ctx.session, Mode::Normal, None);
@@ -297,9 +300,6 @@ fn attach_template_key_handler(
         }
 
         // Shortcut keys — match template options
-        let Some(event) = keys::current_key_event(ctrl) else {
-            return Propagation::Proceed;
-        };
         if let Some((pressed, _)) = keys::workspace_key_press(&event).filter(|(_, m)| m.is_empty())
         {
             if let Some(opt) = options.iter().find(|o| o.key == Some(pressed)) {

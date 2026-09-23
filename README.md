@@ -107,6 +107,8 @@ theme = "gtk"                      # follows your GTK theme; or a built-in palet
 
 [keybinds]
 close = ["Escape", "Ctrl+c", "Ctrl+w", "Ctrl+q"]  # keys to dismiss the overlay
+                                                  # (GTK key names; Caps Lock is
+                                                  # ignored, "Ctrl+Shift+q" works)
 
 [workspace.a]                          # key: a-z or 0-9
 name = "Browser"                       # optional display name shown on the key
