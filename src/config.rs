@@ -657,6 +657,18 @@ impl Config {
                 .collect();
             variables.sort_by(|a, b| a.name.cmp(&b.name));
 
+            // Warn about variables whose values would overwrite each other in hooks
+            let mut env_names: HashMap<String, &str> = HashMap::new();
+            for v in &variables {
+                let env_name = hook_env_var(&v.name);
+                if let Some(other) = env_names.insert(env_name.clone(), &v.name) {
+                    warnings.push(format!(
+                        "template '{name}': variables '{other}' and '{}' share hook variable {env_name}",
+                        v.name
+                    ));
+                }
+            }
+
             // Warn about unreferenced variables and undefined references
             let declared_names: HashSet<&str> = variables.iter().map(|v| v.name.as_str()).collect();
             let mut referenced_names: HashSet<String> = HashSet::new();
@@ -829,7 +841,30 @@ pub fn build_argv(
         .collect())
 }
 
+/// The hook environment variable for template variable `name`: `NDW_VAR_`
+/// followed by `name` uppercased, with every character other than an ASCII
+/// letter or digit replaced by `_`.
+///
+/// The result is always a valid shell variable name: `project-dir` becomes
+/// `NDW_VAR_PROJECT_DIR`.
+pub fn hook_env_var(name: &str) -> String {
+    let suffix: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("NDW_VAR_{suffix}")
+}
+
 /// Build the environment variable pairs for hook execution.
+///
+/// Variables follow the fixed entries under their [`hook_env_var`] names,
+/// ordered by variable name.
 pub fn build_hook_env(
     workspace_name: &str,
     workspace_key: char,
@@ -844,12 +879,13 @@ pub fn build_hook_env(
             template_name.unwrap_or("").to_string(),
         ),
     ];
-    for (name, value) in variables {
-        env.push((
-            format!("NDW_VAR_{}", name.to_ascii_uppercase()),
-            value.clone(),
-        ));
-    }
+    let mut variables: Vec<_> = variables.iter().collect();
+    variables.sort();
+    env.extend(
+        variables
+            .into_iter()
+            .map(|(name, value)| (hook_env_var(name), value.clone())),
+    );
     env
 }
 
@@ -2464,6 +2500,46 @@ options = ["main", "develop", "staging"]
         assert!(warnings[0].contains("{{path}}"));
     }
 
+    /// Warnings for template `dev` running `program` with text variables `names`.
+    fn variable_warnings(program: &str, names: &[&str]) -> Vec<String> {
+        use std::fmt::Write as _;
+
+        let mut toml_str = format!("[template.dev]\nprograms = [{program:?}]\n");
+        for name in names {
+            writeln!(
+                toml_str,
+                "[template.dev.variables.{name}]\nname = \"{name}\""
+            )
+            .unwrap();
+        }
+        let config: Config = toml::from_str(&toml_str).unwrap();
+        config.resolve().1
+    }
+
+    #[test]
+    fn resolve_templates_colliding_hook_variable_names_warn() {
+        for (a, b, env_name) in [
+            ("project-dir", "project_dir", "NDW_VAR_PROJECT_DIR"),
+            ("PATH", "path", "NDW_VAR_PATH"),
+        ] {
+            let warnings = variable_warnings(&format!("code {{{{{a}}}}} {{{{{b}}}}}"), &[a, b]);
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+            assert!(
+                warnings[0].contains(&format!("'{a}'"))
+                    && warnings[0].contains(&format!("'{b}'"))
+                    && warnings[0].contains(env_name),
+                "{}",
+                warnings[0]
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_templates_hyphenated_variable_no_warning() {
+        let warnings = variable_warnings("code {{project-dir}}", &["project-dir"]);
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+    }
+
     #[test]
     fn toml_with_template_variables() {
         let toml_str = r#"
@@ -2539,6 +2615,44 @@ type = "text"
         let env = build_hook_env("dyn-a", 'a', Some("dev"), &vars);
         assert!(env.contains(&("NDW_VAR_PATH".to_string(), "/home/user".to_string())));
         assert!(env.contains(&("NDW_VAR_BRANCH".to_string(), "main".to_string())));
+    }
+
+    #[test]
+    fn hook_env_var_maps_non_alnum_to_underscore() {
+        assert_eq!(hook_env_var("path"), "NDW_VAR_PATH");
+        assert_eq!(hook_env_var("project-dir"), "NDW_VAR_PROJECT_DIR");
+        assert_eq!(hook_env_var("a.b"), "NDW_VAR_A_B");
+        assert_eq!(hook_env_var("n\u{e4}me"), "NDW_VAR_N_ME");
+        assert_eq!(hook_env_var("x_1"), "NDW_VAR_X_1");
+    }
+
+    #[test]
+    fn build_hook_env_uses_shell_safe_names() {
+        let vars = HashMap::from([("project-dir".to_string(), "/x".to_string())]);
+        let env = build_hook_env("dyn-a", 'a', Some("dev"), &vars);
+        assert!(env.contains(&("NDW_VAR_PROJECT_DIR".to_string(), "/x".to_string())));
+    }
+
+    #[test]
+    fn build_hook_env_orders_variables_by_name() {
+        let vars: HashMap<String, String> = ["c", "a", "d", "b"]
+            .into_iter()
+            .map(|name| (name.to_string(), String::new()))
+            .collect();
+        let env = build_hook_env("dyn-a", 'a', None, &vars);
+        let names: Vec<&str> = env.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "NDW_WORKSPACE_NAME",
+                "NDW_WORKSPACE_KEY",
+                "NDW_TEMPLATE",
+                "NDW_VAR_A",
+                "NDW_VAR_B",
+                "NDW_VAR_C",
+                "NDW_VAR_D",
+            ]
+        );
     }
 
     // --- collect_create_hooks ---

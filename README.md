@@ -235,7 +235,10 @@ on_delete = ["cleanup-workspace.sh"]
   - `NDW_WORKSPACE_NAME` — full workspace name, title included (e.g. `dyn-a My Project`)
   - `NDW_WORKSPACE_KEY` — single character key (e.g. `a`)
   - `NDW_TEMPLATE` — template name if used (empty otherwise)
-  - `NDW_VAR_<NAME>` — template variable values, uppercased (e.g. `NDW_VAR_PATH`)
+  - `NDW_VAR_<NAME>` — template variable values. The name is uppercased and
+    any character other than an ASCII letter or digit becomes `_` (`path` →
+    `NDW_VAR_PATH`, `project-dir` → `NDW_VAR_PROJECT_DIR`); variables that
+    map to the same name produce a config warning
 - Templates can define additional `on_create` hooks that run after the global
   ones when the template creates a workspace:
 
