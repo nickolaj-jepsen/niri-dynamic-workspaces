@@ -384,6 +384,17 @@ workspace d. Press Escape to close the overlay.
 
 While open, the overlay tracks the compositor live: it follows the focused output across monitors and refreshes its cards when workspaces or windows change.
 
+The overlay is a layer-shell surface with the namespace `niri-dynamic-workspaces`,
+so niri layer rules can target it, for example to keep workspace titles out of
+screen shares:
+
+```kdl
+layer-rule {
+    match namespace="^niri-dynamic-workspaces$"
+    block-out-from "screencast"
+}
+```
+
 #### Direct mode (no overlay)
 
 Pass a workspace key to act immediately without opening the overlay:

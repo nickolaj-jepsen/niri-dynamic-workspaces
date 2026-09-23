@@ -437,6 +437,8 @@ fn free_on_close(window: &ApplicationWindow) {
 
 /// Anchor the window to all edges as an exclusive-keyboard overlay layer surface.
 fn configure_layer_shell(window: &ApplicationWindow) {
+    // Users write niri layer rules against it (README), so renaming it is breaking.
+    window.set_namespace(Some("niri-dynamic-workspaces"));
     window.set_layer(Layer::Overlay);
     window.set_keyboard_mode(KeyboardMode::Exclusive);
     window.set_anchor(Edge::Top, true);
