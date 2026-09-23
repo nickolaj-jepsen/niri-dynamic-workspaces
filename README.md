@@ -86,7 +86,8 @@ overlay, also start the daemon at login (see [Daemon mode](#daemon-mode)).
 
 Config file: `~/.config/niri-dynamic-workspaces/config.toml`
 
-All fields are optional with sensible defaults.
+All fields are optional with sensible defaults. Unknown or misspelled keys are
+ignored and reported as warnings (see [Troubleshooting](#troubleshooting)).
 
 ```toml
 [general]

@@ -7,6 +7,7 @@ use serde::Deserialize;
 use crate::niri::CleanupConfig;
 
 // --- Serde structs (TOML representation) ---
+// No #[serde(flatten)]: serde_ignored can't see unknown keys through it.
 
 #[derive(Default, Deserialize)]
 #[serde(default)]
@@ -1043,8 +1044,12 @@ fn from_contents(path: &Path, read: &Result<Option<String>, String>) -> Resolved
 /// Parse and resolve config text read from `path`, which anchors relative theme paths.
 ///
 /// Text that does not parse yields the defaults plus one error diagnostic.
+/// Keys the config does not know are warnings, listed before the others.
 fn parse_config(text: &str, path: &Path) -> ResolvedConfig {
-    let config: Config = match toml::from_str(text) {
+    let mut unknown = Vec::new();
+    let parsed: Result<Config, _> = toml::Deserializer::parse(text)
+        .and_then(|de| serde_ignored::deserialize(de, |key| unknown.push(key.to_string())));
+    let config = match parsed {
         Ok(config) => config,
         Err(e) => {
             let mut config = default_config();
@@ -1057,13 +1062,49 @@ fn parse_config(text: &str, path: &Path) -> ResolvedConfig {
         }
     };
     let (mut resolved, warnings) = config.resolve();
-    resolved
-        .diagnostics
-        .extend(warnings.into_iter().map(Diagnostic::warning));
+    resolved.diagnostics.extend(
+        unknown
+            .iter()
+            .map(|key| unknown_key_warning(key))
+            .chain(warnings)
+            .map(Diagnostic::warning),
+    );
     if let (Theme::File(theme), Some(dir)) = (&mut resolved.theme, path.parent()) {
         *theme = dir.join(&*theme);
     }
     resolved
+}
+
+/// The keys of `[general]`, which also parse at the top level without effect.
+const GENERAL_KEYS: &[&str] = &[
+    "workspace_prefix",
+    "default_programs",
+    "auto_delete_empty",
+    "layout",
+    "hover_preview",
+    "hide_empty_static",
+    "inhibit_compositor_shortcuts",
+    "confirm_delete",
+    "theme",
+];
+
+/// The warning for an ignored key at dotted `path`, with a hint for the
+/// likely mistakes.
+fn unknown_key_warning(path: &str) -> String {
+    let parts: Vec<&str> = path.split('.').collect();
+    let hint = match parts.as_slice() {
+        ["workspaces", ..] => Some("did you mean [workspace]?"),
+        ["templates", ..] => Some("did you mean [template]?"),
+        ["hook", ..] => Some("did you mean [hooks]?"),
+        ["keybind", ..] => Some("did you mean [keybinds]?"),
+        [key] if GENERAL_KEYS.contains(key) => Some("general settings go under [general]"),
+        ["template", _, "on_delete"] => Some("templates only support on_create"),
+        _ => None,
+    };
+    match hint {
+        Some(hint) => format!("unknown key '{path}'; {hint}"),
+        None => format!("unknown key '{path}'"),
+    }
 }
 
 /// `line L, column C: <message>` for a TOML error in `text`; just the message
@@ -1184,6 +1225,7 @@ pub fn load_config(path_override: Option<&Path>) -> ResolvedConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     // --- workspace_name ---
 
@@ -2118,6 +2160,223 @@ programs = ["firefox"]
             Path::new("/cfg/c.toml"),
         );
         assert_eq!(config.theme, Theme::File("/cfg/mine.css".into()));
+    }
+
+    #[test]
+    fn load_unknown_keys_warn() {
+        for (text, expected) in [
+            (
+                "layout = \"dvorak\"\n",
+                "unknown key 'layout'; general settings go under [general]",
+            ),
+            (
+                "[general]\nhover_previw = false\n",
+                "unknown key 'general.hover_previw'",
+            ),
+            (
+                "[templates.dev]\nprograms = [\"kitty\"]\n",
+                "unknown key 'templates'; did you mean [template]?",
+            ),
+            (
+                "[workspace.q]\nprogram = \"firefox\"\n",
+                "unknown key 'workspace.q.program'",
+            ),
+            (
+                "[template.zeta]\nprograms = [\"kitty\"]\non_delete = [\"x\"]\n",
+                "unknown key 'template.zeta.on_delete'; templates only support on_create",
+            ),
+            (
+                "[template.zeta]\nprograms = [\"kitty {{b}}\"]\n\
+                 [template.zeta.variables.b]\nlabel = \"Branch\"\n",
+                "unknown key 'template.zeta.variables.b.label'",
+            ),
+        ] {
+            let config = parse_config(text, Path::new("c.toml"));
+            assert_eq!(
+                config.diagnostics.first(),
+                Some(&Diagnostic::warning(expected)),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn load_unknown_key_keeps_the_rest() {
+        let config = parse_config(
+            "[general]\nworkspace_prefix = \"ws-\"\nhover_previw = false\n",
+            Path::new("c.toml"),
+        );
+        assert_eq!(config.workspace_prefix, "ws-");
+        assert!(config.hover_preview);
+        assert!(!config.has_errors());
+    }
+
+    #[test]
+    fn unknown_key_warning_hints() {
+        assert_eq!(
+            unknown_key_warning("workspaces"),
+            "unknown key 'workspaces'; did you mean [workspace]?"
+        );
+        assert_eq!(
+            unknown_key_warning("hook"),
+            "unknown key 'hook'; did you mean [hooks]?"
+        );
+        assert_eq!(
+            unknown_key_warning("keybind"),
+            "unknown key 'keybind'; did you mean [keybinds]?"
+        );
+        assert_eq!(
+            unknown_key_warning("theme"),
+            "unknown key 'theme'; general settings go under [general]"
+        );
+        // General settings misplaced deeper, and on_delete outside a template, get no hint.
+        assert_eq!(
+            unknown_key_warning("keybinds.theme"),
+            "unknown key 'keybinds.theme'"
+        );
+        assert_eq!(
+            unknown_key_warning("workspace.a.on_delete"),
+            "unknown key 'workspace.a.on_delete'"
+        );
+    }
+
+    /// Sets every key the config reads, in every section.
+    const FULL_CONFIG: &str = r#"
+[general]
+workspace_prefix = "ws-"
+default_programs = ["kitty"]
+auto_delete_empty = false
+layout = "dvorak"
+hover_preview = false
+hide_empty_static = true
+inhibit_compositor_shortcuts = false
+confirm_delete = false
+theme = "nord"
+
+[keybinds]
+close = ["Escape"]
+
+[hooks]
+on_create = ["notify-send created"]
+on_delete = ["notify-send deleted"]
+
+[workspace.a]
+name = "Browser"
+programs = ["firefox"]
+
+[workspace.q]
+static = "main"
+name = "Main"
+
+[template.dev]
+programs = ["code {{project}}", "kitty {{branch}} {{tool}} {{note}}"]
+key = "d"
+title = "{{project}}"
+on_create = ["true"]
+
+[template.dev.variables.project]
+name = "Project"
+type = "dir"
+dirs = ["~/dev"]
+depth = 2
+
+[template.dev.variables.branch]
+name = "Branch"
+type = "options"
+options = ["main"]
+
+[template.dev.variables.tool]
+name = "Tool"
+type = "command"
+command = "ls"
+
+[template.dev.variables.note]
+name = "Note"
+"#;
+
+    #[test]
+    fn load_full_config_has_no_unknown_keys() {
+        let config = parse_config(FULL_CONFIG, Path::new("c.toml"));
+        assert!(config.diagnostics.is_empty(), "{:?}", config.diagnostics);
+    }
+
+    /// The keys serde reads for struct `T`, taken from its derived `Deserialize`.
+    fn struct_fields<T: serde::de::DeserializeOwned>() -> BTreeSet<&'static str> {
+        struct Capture<'a>(&'a mut &'static [&'static str]);
+
+        impl<'de> serde::Deserializer<'de> for Capture<'_> {
+            type Error = serde::de::value::Error;
+
+            fn deserialize_any<V: serde::de::Visitor<'de>>(
+                self,
+                _: V,
+            ) -> Result<V::Value, Self::Error> {
+                Err(serde::de::Error::custom("not a struct"))
+            }
+
+            fn deserialize_struct<V: serde::de::Visitor<'de>>(
+                self,
+                _: &'static str,
+                fields: &'static [&'static str],
+                _: V,
+            ) -> Result<V::Value, Self::Error> {
+                *self.0 = fields;
+                Err(serde::de::Error::custom("fields captured"))
+            }
+
+            serde::forward_to_deserialize_any! {
+                bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+                bytes byte_buf option unit unit_struct newtype_struct seq tuple
+                tuple_struct map enum identifier ignored_any
+            }
+        }
+
+        let mut fields: &'static [&'static str] = &[];
+        assert!(T::deserialize(Capture(&mut fields)).is_err());
+        fields.iter().copied().collect()
+    }
+
+    /// The keys of every table in `values`.
+    fn table_keys<'a>(values: impl IntoIterator<Item = &'a toml::Value>) -> BTreeSet<&'a str> {
+        values
+            .into_iter()
+            .flat_map(|value| value.as_table().expect("a table").keys())
+            .map(String::as_str)
+            .collect()
+    }
+
+    /// Keeps [`FULL_CONFIG`] complete, so a new or renamed field fails
+    /// [`load_full_config_has_no_unknown_keys`] until the fixture has it.
+    #[test]
+    fn full_config_sets_every_field() {
+        let root: toml::Value = toml::from_str(FULL_CONFIG).unwrap();
+        let workspaces = root["workspace"].as_table().unwrap().values();
+        let templates: Vec<_> = root["template"].as_table().unwrap().values().collect();
+        let variables = templates
+            .iter()
+            .flat_map(|template| template["variables"].as_table().unwrap().values());
+        assert_eq!(table_keys([&root]), struct_fields::<Config>());
+        assert_eq!(
+            table_keys([&root["general"]]),
+            struct_fields::<GeneralConfig>()
+        );
+        assert_eq!(
+            table_keys([&root["keybinds"]]),
+            struct_fields::<KeybindsConfig>()
+        );
+        assert_eq!(table_keys([&root["hooks"]]), struct_fields::<HooksConfig>());
+        assert_eq!(table_keys(workspaces), struct_fields::<WorkspaceEntry>());
+        assert_eq!(
+            table_keys(templates.iter().copied()),
+            struct_fields::<TemplateEntry>()
+        );
+        assert_eq!(table_keys(variables), struct_fields::<VariableEntry>());
+    }
+
+    #[test]
+    fn general_keys_match_general_config() {
+        let keys: BTreeSet<&str> = GENERAL_KEYS.iter().copied().collect();
+        assert_eq!(keys, struct_fields::<GeneralConfig>());
     }
 
     #[test]

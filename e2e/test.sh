@@ -532,6 +532,15 @@ test_daemon_forwards_errors_to_caller() {
     [[ $status == 2 && $err == *"invalid value 'Q'"* ]]
 }
 
+# A misspelled key is ignored, and the daemon names it in the caller's terminal.
+test_unknown_key_reaches_caller_via_daemon() {
+    local err status
+    general hover_previw false && "$h" daemon || return 1
+    err=$("$h" app switch a 2>&1 >/dev/null)
+    status=$?
+    [[ $status == 0 && $err == *"unknown key 'general.hover_previw'"* ]] && until_true has_ws dyn-a
+}
+
 test_daemon_deletes_empty_workspaces() {
     general auto_delete_empty true && add_hooks || return 1
     "$h" daemon || return 1
@@ -651,6 +660,7 @@ tests=(
     check_reports_problems
     daemon_serves_invocations
     daemon_forwards_errors_to_caller
+    unknown_key_reaches_caller_via_daemon
     daemon_deletes_empty_workspaces
     daemon_keeps_workspace_for_slow_program
     overlay_hover_keeps_empty_origin
