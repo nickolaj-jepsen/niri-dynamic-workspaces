@@ -396,6 +396,15 @@ test_form_refuses_unmatched_option() {
     until_true has_ws "dyn-5 develop"
 }
 
+test_form_click_picks_option() {
+    add_select_template options 'options = ["main", "develop"]' && "$h" overlay switch || return 1
+    "$h" type 5 && "$h" type d || return 1 # delta's form
+    sleep 0.5 # an early click can land before the form is laid out
+    # Right of the text on develop's row, the second of two; read off a 'shot' if the form changes.
+    "$h" click 700 389 && "$h" type -k Return || return 1
+    until_true has_ws "dyn-5 develop"
+}
+
 test_form_takes_typed_command_value() {
     add_select_template command 'command = "echo main; echo develop"' && "$h" overlay switch || return 1
     "$h" type 5 && "$h" type d || return 1 # delta's form
@@ -602,6 +611,7 @@ tests=(
     held_key_does_not_pick_template
     held_enter_does_not_submit_form
     form_refuses_unmatched_option
+    form_click_picks_option
     form_takes_typed_command_value
     overlay_escape_closes
     overlay_delete_mode

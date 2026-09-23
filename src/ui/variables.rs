@@ -9,7 +9,8 @@ use glib::Propagation;
 use gtk4::gio;
 use gtk4::prelude::*;
 use gtk4::{
-    Align, Box as GtkBox, Entry, EventControllerKey, Label, Orientation, PolicyType, ScrolledWindow,
+    Align, Box as GtkBox, Entry, EventControllerKey, GestureClick, Label, Orientation, PolicyType,
+    ScrolledWindow,
 };
 
 use crate::actions::HookInfo;
@@ -51,6 +52,9 @@ fn fuzzy_filter(query: &str, options: &[String], matcher: &mut Matcher) -> Vec<u
 
 /// Rows rendered by a fuzzy select; further matches are reached by typing.
 const MAX_VISIBLE_OPTIONS: usize = 50;
+
+/// Longer options are ellipsized, so a deep path cannot push the form off-screen.
+const FUZZY_OPTION_MAX_CHARS: i32 = 60;
 
 /// What Enter does with typed text that matches no option.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -166,6 +170,43 @@ fn fuzzy_hint(match_count: usize, unmatched: Unmatched) -> Option<String> {
         .checked_sub(MAX_VISIBLE_OPTIONS)
         .filter(|&n| n > 0)?;
     Some(format!("\u{2026} and {hidden} more, keep typing to narrow"))
+}
+
+/// Move the highlight to rendered row `new_idx`.
+fn select_row(rows: &[Label], selected: &Cell<usize>, new_idx: usize) {
+    rows[selected.get()].remove_css_class("selected");
+    rows[new_idx].add_css_class("selected");
+    selected.set(new_idx);
+}
+
+/// Highlight the row of `list_box` that a click lands on.
+///
+/// One gesture on the list: a per-row one capturing `rows` would keep every
+/// row alive through a reference cycle. For the same reason the closure must
+/// not capture an ancestor of `list_box`.
+fn select_clicked_rows(
+    list_box: &GtkBox,
+    rows: Rc<Vec<Label>>,
+    selected: Rc<Cell<usize>>,
+    filtered: Rc<RefCell<Vec<usize>>>,
+) {
+    let click = GestureClick::new();
+    click.connect_released(move |gesture, _, _, y| {
+        let Some(list) = gesture.widget() else {
+            return;
+        };
+        // By row band rather than pick(): the labels are only as wide as their text.
+        let slot = rows.iter().take(filtered.borrow().len()).position(|row| {
+            row.compute_bounds(&list).is_some_and(|bounds| {
+                let top = f64::from(bounds.y());
+                (top..top + f64::from(bounds.height())).contains(&y)
+            })
+        });
+        if let Some(slot) = slot {
+            select_row(&rows, &selected, slot);
+        }
+    });
+    list_box.add_controller(click);
 }
 
 /// Show the best matches in the fixed row pool and highlight `selected`.
@@ -353,6 +394,9 @@ fn build_fuzzy_select(
             let label = Label::builder()
                 .css_classes(["fuzzy-option"])
                 .halign(Align::Start)
+                // Middle keeps the root and basename of deep paths.
+                .ellipsize(gtk4::pango::EllipsizeMode::Middle)
+                .max_width_chars(FUZZY_OPTION_MAX_CHARS)
                 .build();
             list_box.append(&label);
             label
@@ -369,6 +413,8 @@ fn build_fuzzy_select(
         .vscrollbar_policy(PolicyType::Automatic)
         .max_content_height(metrics.key_size * 3)
         .propagate_natural_height(true)
+        // Otherwise it reports the ellipsized rows' minimum as its natural width.
+        .propagate_natural_width(true)
         .child(&list_box)
         .build();
     row.append(&scrolled);
@@ -407,6 +453,7 @@ fn build_fuzzy_select(
     {
         let filtered = filtered.clone();
         let selected = selected.clone();
+        let rows = rows.clone();
         let key_ctrl = EventControllerKey::new();
         key_ctrl.connect_key_pressed(move |_, key, _, _| {
             let is_up = key == gdk4::Key::Up || key == gdk4::Key::KP_Up;
@@ -416,17 +463,16 @@ fn build_fuzzy_select(
                 return Propagation::Proceed;
             }
 
-            let current = selected.get();
-            let new_idx = wrap_index(current, visible, is_down);
-            rows[current].remove_css_class("selected");
-            rows[new_idx].add_css_class("selected");
-            selected.set(new_idx);
+            let new_idx = wrap_index(selected.get(), visible, is_down);
+            select_row(&rows, &selected, new_idx);
             scroll_to_child(&scrolled, &rows[new_idx]);
 
             Propagation::Stop
         });
         search_entry.add_controller(key_ctrl);
     }
+
+    select_clicked_rows(&list_box, rows, selected.clone(), filtered.clone());
 
     VariableWidget::Enum(FuzzySelect {
         entry: search_entry,
