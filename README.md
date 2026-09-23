@@ -125,9 +125,7 @@ programs = ["firefox", "slack"]        # programs launched on create (replaces d
 [workspace.b]
 programs = ["kitty --title myterm"]    # arguments split with shell quoting rules
 # Quote arguments containing spaces: ["kitty --title 'my term'"]. No shell is
-# involved — quoting only groups words. {{variables}} are filled in after the
-# split, so a value never breaks out of its argument: "code {{path}}" and
-# "kitty --title 'ws: {{path}}'" both work with paths containing spaces.
+# involved — quoting only groups words.
 
 [workspace.1]                          # digit workspaces work too
 name = "Comms"
@@ -208,6 +206,16 @@ programs = ["firefox", "slack"]
 - The picker always includes an "Empty" option that uses `default_programs`
 - Workspaces with per-key `[workspace.KEY].programs` skip the picker and create directly
 - Templates can define **variables** with `{{name}}` placeholders in program strings
+- Placeholders are filled in after a program is split into arguments, so a value never breaks out of its argument: `"code {{path}}"` and `"kitty --title 'ws: {{path}}'"` both work with paths containing spaces
+- A program that starts a shell (`sh -c '...'`) has that shell parse its script again, so a placeholder inside the script runs as shell code: a directory named `Bob's notes` breaks it, and a `command` option can run commands. Pass the value to the script as a positional parameter instead (a TOML `'''` string saves escaping the quotes):
+
+  ```toml
+  [template.nvim]
+  programs = ['''sh -c 'cd "$1" && exec nvim' sh {{project}}''']
+
+  [template.nvim.variables.project]
+  name = "Project"
+  ```
 - Each variable has a required `name` (display label) and optional `type` (defaults to `"text"`)
 - Variable types:
   - `"text"` — free-form text input (default); outputs whatever the user types
