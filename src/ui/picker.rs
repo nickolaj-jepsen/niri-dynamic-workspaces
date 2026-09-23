@@ -9,13 +9,14 @@ use gtk4::{Align, Box as GtkBox, GestureClick, Label, Orientation, PolicyType, S
 use crate::actions::HookInfo;
 use crate::config::{ResolvedConfig, TemplateVariable};
 
+use super::keys;
 use super::metrics::KeyboardMetrics;
 use super::variables::show_variable_input;
 use super::{
     attach_close_on_backdrop_click, build_hint_footer, create_error_revealer, display_key_char,
     format_workspace_display, matches_close_keybind, new_key_controller, populate_overlay,
     remove_app_controllers, scroll_to_child, switch_and_close, wrap_in_backdrop, wrap_index,
-    ActionContext, Mode, ACTION_MODS,
+    ActionContext, Mode,
 };
 
 /// An option in the template picker (either "Empty" or a named template).
@@ -267,7 +268,7 @@ fn attach_template_key_handler(
     let sel = selected_idx.clone();
 
     let key_controller = new_key_controller();
-    key_controller.connect_key_pressed(move |_, key, _, modifier| {
+    key_controller.connect_key_pressed(move |ctrl, key, _, modifier| {
         // Close keybinds / Escape → go back to main view
         if matches_close_keybind(key, modifier, &close_keybinds) {
             let ctx = key_ctx.clone();
@@ -296,15 +297,14 @@ fn attach_template_key_handler(
         }
 
         // Shortcut keys — match template options
-        if let Some(pressed) = key.to_unicode() {
-            let pressed = pressed.to_ascii_lowercase();
-            if (modifier & ACTION_MODS).is_empty() {
-                for opt in options.iter() {
-                    if opt.key == Some(pressed) {
-                        select_template_option(opt, ws_char, &key_ctx);
-                        return Propagation::Stop;
-                    }
-                }
+        let Some(event) = keys::current_key_event(ctrl) else {
+            return Propagation::Proceed;
+        };
+        if let Some((pressed, _)) = keys::workspace_key_press(&event).filter(|(_, m)| m.is_empty())
+        {
+            if let Some(opt) = options.iter().find(|o| o.key == Some(pressed)) {
+                select_template_option(opt, ws_char, &key_ctx);
+                return Propagation::Stop;
             }
         }
 

@@ -73,6 +73,25 @@ click_at() {
     in_env wlrctl pointer click left
 }
 
+# wtype numbers keysyms 1.. in order of first use, and the niri inside cage reads the numbers as evdev
+# codes through its own layout; release-only fillers put each pressed keysym on its code.
+code_sym() { printf 'U%X' $((0x4E00 + $1)); }
+
+# press_codes <code>[+<code>...] [hold-ms]
+press_codes() {
+    local codes c i max=0 args=()
+    [[ -f $env_file ]] || die "not started (run '$0 start')"
+    IFS=+ read -ra codes <<<"$1"
+    for c in "${codes[@]}"; do max=$((c > max ? c : max)); done
+    # niri binds cage's keyboard only once the session's first wtype creates it; keys sent before are lost.
+    args+=(-s 300)
+    for ((c = 1; c <= max; c++)); do args+=(-p "$(code_sym "$c")"); done
+    for c in "${codes[@]}"; do args+=(-P "$(code_sym "$c")"); done
+    if [[ -n ${2:-} ]]; then args+=(-s "$2"); fi
+    for ((i = ${#codes[@]} - 1; i >= 0; i--)); do args+=(-p "$(code_sym "${codes[i]}")"); done
+    WAYLAND_DISPLAY=$(cat "$run_dir/cage.display") wtype "${args[@]}"
+}
+
 overlay_open() { [[ $(in_env niri msg -j layers | jq length) -gt 0 ]]; }
 output_width() { in_env niri msg -j outputs | jq '.[].logical.width'; }
 output_resized() { [[ $(output_width) != "$1" ]]; }
@@ -184,6 +203,7 @@ usage: harness.sh <command>
   mode <name>      click switch | delete | move
   click <x> <y>    click anywhere
   type <args...>   press keys with wtype (c, -M ctrl -k c, ...)
+  press <codes> [ms]  press evdev codes through niri's layout (46 = c, 29+46 = Ctrl+c), held ms
   escape           dismiss the overlay
   open | closed    is the overlay mapped / wait until it is not
   state            workspaces as JSON
@@ -214,6 +234,7 @@ overlay) in_env "$bin" "${1:-switch}" >>"$run_dir/app.log" 2>&1 &
 type)    # niri resends a virtual keyboard's keymap only when it changes, so a new client would read a
          # repeated call's keycodes with the compositor's keymap; an F24 first, which the overlay ignores, changes it.
          in_env wtype -k F24 && in_env wtype "$@" ;;
+press)   press_codes "$1" "${2:-}" ;;
 escape)  in_env wtype -k Escape ;;
 click)   click_at "$1" "$2" ;;
 key)     click_at $(key_position "$1") ;;

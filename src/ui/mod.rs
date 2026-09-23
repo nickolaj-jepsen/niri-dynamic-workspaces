@@ -1,4 +1,5 @@
 mod cards;
+mod keys;
 mod metrics;
 mod picker;
 mod theme;
@@ -36,13 +37,6 @@ const RELEVANT_MODS: gdk4::ModifierType = gdk4::ModifierType::from_bits_retain(
         | gdk4::ModifierType::SHIFT_MASK.bits()
         | gdk4::ModifierType::ALT_MASK.bits()
         | gdk4::ModifierType::SUPER_MASK.bits(),
-);
-
-/// Modifier mask for workspace key actions (excludes Super so holding Mod doesn't block input).
-const ACTION_MODS: gdk4::ModifierType = gdk4::ModifierType::from_bits_retain(
-    gdk4::ModifierType::CONTROL_MASK.bits()
-        | gdk4::ModifierType::SHIFT_MASK.bits()
-        | gdk4::ModifierType::ALT_MASK.bits(),
 );
 
 /// Extract the output name of the focused workspace from a pre-fetched list.
@@ -686,7 +680,7 @@ fn attach_key_handler(ctx: &ActionContext, close_keybinds: &[crate::config::Keyb
     let key_ctx = ctx.clone();
     let close_keybinds = close_keybinds.to_vec();
     let key_controller = new_key_controller();
-    key_controller.connect_key_pressed(move |_, key, _, modifier| {
+    key_controller.connect_key_pressed(move |ctrl, key, _, modifier| {
         if matches_close_keybind(key, modifier, &close_keybinds) {
             key_ctx.window.close();
             return Propagation::Stop;
@@ -707,13 +701,12 @@ fn attach_key_handler(ctx: &ActionContext, close_keybinds: &[crate::config::Keyb
         }
 
         // Workspace key: action depends on mode
-        // Ignore Super so holding Mod from the opening keybind doesn't block input
-        if let Some(ch) = key.to_unicode() {
-            let ch = ch.to_ascii_lowercase();
-            if crate::config::is_workspace_char(ch) && (modifier & ACTION_MODS).is_empty() {
-                dispatch_action(ch, &key_ctx);
-                return Propagation::Stop;
-            }
+        let Some(event) = keys::current_key_event(ctrl) else {
+            return Propagation::Proceed;
+        };
+        if let Some((ch, _)) = keys::workspace_key_press(&event).filter(|(_, m)| m.is_empty()) {
+            dispatch_action(ch, &key_ctx);
+            return Propagation::Stop;
         }
 
         Propagation::Proceed
