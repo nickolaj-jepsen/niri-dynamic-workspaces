@@ -60,7 +60,7 @@ binds never reach niri; add the ones from [Keybinds](#keybinds) yourself.
 
 ### Cargo
 
-Requires GTK4, GLib 2.80 or newer, gtk4-layer-shell, and pkg-config development headers.
+Requires GTK 4.16 and GLib 2.80 or newer (the stylesheet uses CSS custom properties and `color-mix()`), gtk4-layer-shell, and pkg-config development headers.
 
 ```bash
 cargo install --git https://github.com/nickolaj-jepsen/niri-dynamic-workspaces

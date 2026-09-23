@@ -96,7 +96,7 @@ fn warn(warnings: &mut Vec<String>, message: &str) {
 
 fn from_data(css: &str) -> CssProvider {
     let provider = CssProvider::new();
-    provider.load_from_data(css);
+    provider.load_from_string(css);
     provider
 }
 
