@@ -41,6 +41,8 @@ pub(super) struct DynWorkspaceInfo {
     pub(super) is_static: bool,
     /// Live workspace exists but holds no windows.
     pub(super) is_empty: bool,
+    /// Windows on the live workspace.
+    pub(super) window_count: usize,
     pub(super) name: Option<String>,
     pub(super) ws_name: Option<String>,
     /// Id of the live workspace; `None` when it does not exist.
@@ -58,6 +60,7 @@ impl DynWorkspaceInfo {
             is_urgent: false,
             is_static: false,
             is_empty: false,
+            window_count: 0,
             name: None,
             ws_name: None,
             ws_id: None,
@@ -75,9 +78,13 @@ fn urgent_workspace_ids(windows: &[niri_ipc::Window]) -> HashSet<u64> {
         .collect()
 }
 
-/// Collect workspace IDs that contain at least one window.
-fn occupied_workspace_ids(windows: &[niri_ipc::Window]) -> HashSet<u64> {
-    windows.iter().filter_map(|w| w.workspace_id).collect()
+/// Number of windows on each workspace that has any.
+fn window_counts(windows: &[niri_ipc::Window]) -> HashMap<u64, usize> {
+    let mut counts = HashMap::new();
+    for id in windows.iter().filter_map(|w| w.workspace_id) {
+        *counts.entry(id).or_insert(0) += 1;
+    }
+    counts
 }
 
 fn build_dyn_workspace_infos(
@@ -87,7 +94,8 @@ fn build_dyn_workspace_infos(
 ) -> Vec<DynWorkspaceInfo> {
     let prefix = &config.workspace_prefix;
     let urgent_ws_ids = urgent_workspace_ids(windows);
-    let occupied_ws_ids = occupied_workspace_ids(windows);
+    let counts = window_counts(windows);
+    let count_on = |id| counts.get(&id).copied().unwrap_or(0);
 
     // Find the globally focused workspace
     let focused_ws_id = workspaces.iter().find(|ws| ws.is_focused).map(|ws| ws.id);
@@ -123,7 +131,8 @@ fn build_dyn_workspace_infos(
                 is_uncreated: false,
                 is_urgent,
                 is_static: false,
-                is_empty: !occupied_ws_ids.contains(&ws.id),
+                is_empty: count_on(ws.id) == 0,
+                window_count: count_on(ws.id),
                 name,
                 ws_name: Some(ws_name.clone()),
                 ws_id: Some(ws.id),
@@ -165,7 +174,8 @@ fn build_dyn_workspace_infos(
             is_uncreated: live.is_none(),
             is_urgent: live.is_some_and(|ws| ws.is_urgent || urgent_ws_ids.contains(&ws.id)),
             is_static: true,
-            is_empty: live.is_some_and(|ws| !occupied_ws_ids.contains(&ws.id)),
+            is_empty: live.is_some_and(|ws| count_on(ws.id) == 0),
+            window_count: live.map_or(0, |ws| count_on(ws.id)),
             name: config.workspace_names.get(&ch).cloned(),
             ws_name: Some(target.clone()),
             ws_id: live.map(|ws| ws.id),
@@ -190,7 +200,7 @@ pub(super) fn build_static_workspace_infos(
         .and_then(|ws| ws.output.clone());
 
     let urgent_ws_ids = urgent_workspace_ids(windows);
-    let occupied_ws_ids = occupied_workspace_ids(windows);
+    let counts = window_counts(windows);
 
     workspaces
         .iter()
@@ -212,7 +222,7 @@ pub(super) fn build_static_workspace_infos(
         // Never hide the focused or urgent workspace, even when empty.
         .filter(|ws| {
             !config.hide_empty_static
-                || occupied_ws_ids.contains(&ws.id)
+                || counts.contains_key(&ws.id)
                 || ws.is_focused
                 || ws.is_urgent
                 || urgent_ws_ids.contains(&ws.id)
@@ -223,7 +233,7 @@ pub(super) fn build_static_workspace_infos(
             is_focused: ws.is_focused,
             is_active: !ws.is_focused && ws.is_active,
             is_urgent: ws.is_urgent || urgent_ws_ids.contains(&ws.id),
-            is_empty: !occupied_ws_ids.contains(&ws.id),
+            is_empty: !counts.contains_key(&ws.id),
         })
         .collect()
 }
@@ -266,6 +276,8 @@ struct CardState {
     is_uncreated: bool,
     is_empty: bool,
     is_disabled: bool,
+    /// Delete mode is waiting for a second press on this card.
+    is_confirm: bool,
 }
 
 /// CSS classes for a workspace card; documented in README "Theming", so renaming one is breaking.
@@ -292,6 +304,9 @@ fn card_classes(state: &CardState) -> Vec<&'static str> {
     }
     if state.is_disabled {
         classes.push("disabled");
+    }
+    if state.is_confirm {
+        classes.push("confirm");
     }
     classes
 }
@@ -360,6 +375,7 @@ fn build_key_widget(
         is_uncreated: info.is_uncreated,
         is_empty: info.is_empty,
         is_disabled,
+        is_confirm: mode == Mode::Delete && ctx.session.delete_armed.get() == Some(info.char_id),
     });
 
     let (key_box, inner) = build_card_shell(classes, metrics.key_size);
@@ -458,6 +474,7 @@ fn build_static_card(
         is_uncreated: false,
         is_empty: info.is_empty,
         is_disabled,
+        is_confirm: false,
     });
 
     let (card, inner) = build_card_shell(classes, metrics.key_size);
@@ -605,6 +622,7 @@ pub(super) mod tests {
             hover_preview: true,
             hide_empty_static: false,
             inhibit_compositor_shortcuts: true,
+            confirm_delete: true,
             layout: &LAYOUT_QWERTY,
             theme: crate::config::Theme::default(),
             templates: Vec::new(),
@@ -634,6 +652,22 @@ pub(super) mod tests {
         assert_eq!(infos[0].ws_id, Some(20));
         assert_eq!(infos[1].char_id, 'b');
         assert_eq!(infos[1].ws_id, Some(10));
+    }
+
+    #[test]
+    fn build_dyn_workspace_infos_counts_windows() {
+        let workspaces = vec![
+            test_workspace(10, Some("dyn-a"), true),
+            test_workspace(20, Some("dyn-b"), false),
+        ];
+        let windows = vec![test_window(1, 10, "firefox"), test_window(2, 10, "kitty")];
+
+        let infos = build_dyn_workspace_infos(&workspaces, &windows, &default_test_config());
+
+        assert_eq!(infos[0].window_count, 2);
+        assert!(!infos[0].is_empty);
+        assert_eq!(infos[1].window_count, 0);
+        assert!(infos[1].is_empty);
     }
 
     #[test]
@@ -789,6 +823,7 @@ pub(super) mod tests {
         let infos = build_dyn_workspace_infos(&workspaces, &windows, &config);
 
         assert!(!infos[0].is_empty);
+        assert_eq!(infos[0].window_count, 1);
     }
 
     #[test]
@@ -1086,6 +1121,7 @@ pub(super) mod tests {
             is_uncreated: false,
             is_empty: false,
             is_disabled: false,
+            is_confirm: false,
         }
     }
 
@@ -1120,6 +1156,18 @@ pub(super) mod tests {
         assert_eq!(
             card_classes(&state),
             ["workspace-card", "dynamic", "uncreated", "disabled"]
+        );
+    }
+
+    #[test]
+    fn card_classes_confirm() {
+        let state = CardState {
+            is_confirm: true,
+            ..card_state()
+        };
+        assert_eq!(
+            card_classes(&state),
+            ["workspace-card", "dynamic", "occupied", "confirm"]
         );
     }
 

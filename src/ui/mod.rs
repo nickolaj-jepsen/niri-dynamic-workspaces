@@ -210,6 +210,8 @@ struct OverlaySession {
     /// Keycode of the last selecting press, whose auto-repeat is swallowed
     /// until release so it cannot act again in the view it opened.
     held_key: keys::HeldKey,
+    /// Key whose delete waits for a second press (Delete mode only).
+    delete_armed: Cell<Option<char>>,
     /// Config and theme problems, shown on a line under the hints.
     problems: Vec<String>,
 }
@@ -251,6 +253,7 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
         hover_armed: Cell::new(false),
         in_subview: Cell::new(false),
         held_key: keys::HeldKey::default(),
+        delete_armed: Cell::new(None),
         problems: config
             .diagnostics
             .iter()
@@ -595,6 +598,25 @@ fn build_problems_line(problems: &[String], from_config: usize) -> Option<Label>
     )
 }
 
+/// Whether a Delete-mode press on `ch` only arms it: with confirmation on,
+/// a workspace with windows needs a second press of the same key.
+fn needs_confirmation(enabled: bool, ch: char, window_count: usize, armed: Option<char>) -> bool {
+    enabled && window_count > 0 && armed != Some(ch)
+}
+
+/// The footer's first hint while the delete of `ch` is armed.
+fn confirm_delete_hint(ch: char, window_count: usize) -> String {
+    let windows = if window_count == 1 {
+        "window"
+    } else {
+        "windows"
+    };
+    format!(
+        "press {} again to close {window_count} {windows}",
+        display_key_char(ch)
+    )
+}
+
 /// Build (or rebuild) the overlay content for `mode` inside an existing window.
 ///
 /// If `prefetched_workspaces` is provided, uses them instead of making a fresh IPC call.
@@ -640,6 +662,15 @@ fn populate_overlay(
 
     // Build keyboard
     let infos = Rc::new(build_full_keyboard_info(&workspaces, &windows, config));
+    // An armed delete survives refreshes while its target still has windows.
+    let confirming = session
+        .delete_armed
+        .get()
+        .filter(|_| mode == Mode::Delete)
+        .and_then(|ch| infos.get(&ch))
+        .filter(|i| i.window_count > 0)
+        .map(|i| (i.char_id, i.window_count));
+    session.delete_armed.set(confirming.map(|(ch, _)| ch));
 
     let ctx = ActionContext {
         mode,
@@ -664,10 +695,18 @@ fn populate_overlay(
 
     let keyboard = build_keyboard(&infos, mode, &ctx, &metrics);
     container.append(&keyboard);
-    container.append(&build_hint_footer(
+    let first_hint = confirming.map_or_else(
+        || mode.hint().to_owned(),
+        |(ch, n)| confirm_delete_hint(ch, n),
+    );
+    let footer = build_hint_footer(
         &metrics,
-        &[mode.hint(), "Tab switch mode", "Escape close"],
-    ));
+        &[first_hint.as_str(), "Tab switch mode", "Escape close"],
+    );
+    if let Some(hint) = footer.first_child().filter(|_| confirming.is_some()) {
+        hint.add_css_class("confirm");
+    }
+    container.append(&footer);
     if let Some(line) = build_problems_line(&session.problems, config.diagnostics.len()) {
         container.append(&line);
     }
@@ -787,6 +826,17 @@ fn dispatch_action(ch: char, ctx: &ActionContext) {
             return;
         }
         Mode::Delete => {
+            let window_count = info.map_or(0, |i| i.window_count);
+            let armed = ctx.session.delete_armed.get();
+            if needs_confirmation(config.confirm_delete, ch, window_count, armed) {
+                ctx.session.delete_armed.set(Some(ch));
+                // Deferred like Tab: the rebuild removes the running controller or clicked card.
+                let ctx = ctx.clone();
+                glib::idle_add_local_once(move || {
+                    populate_overlay(&ctx.window, &ctx.session, Mode::Delete, None);
+                });
+                return;
+            }
             let Some(app) = ctx.window.application() else {
                 show_error(ctx, "Failed: window has no application");
                 return;
@@ -1099,6 +1149,41 @@ mod tests {
         assert_eq!(Mode::Normal.css_class(), "switch");
         assert_eq!(Mode::Delete.css_class(), "delete");
         assert_eq!(Mode::MoveWindow.css_class(), "move-window");
+    }
+
+    // --- delete confirmation ---
+
+    #[test]
+    fn needs_confirmation_arms_occupied_workspace() {
+        assert!(needs_confirmation(true, 'a', 2, None));
+    }
+
+    #[test]
+    fn needs_confirmation_same_key_confirms() {
+        assert!(!needs_confirmation(true, 'a', 2, Some('a')));
+    }
+
+    #[test]
+    fn needs_confirmation_other_key_rearms() {
+        assert!(needs_confirmation(true, 'b', 1, Some('a')));
+    }
+
+    #[test]
+    fn needs_confirmation_skipped_when_empty_or_disabled() {
+        assert!(!needs_confirmation(true, 'a', 0, None));
+        assert!(!needs_confirmation(false, 'a', 3, None));
+    }
+
+    #[test]
+    fn confirm_delete_hint_counts_windows() {
+        assert_eq!(
+            confirm_delete_hint('a', 1),
+            "press A again to close 1 window"
+        );
+        assert_eq!(
+            confirm_delete_hint('3', 3),
+            "press 3 again to close 3 windows"
+        );
     }
 
     // --- diagnostics_summary ---

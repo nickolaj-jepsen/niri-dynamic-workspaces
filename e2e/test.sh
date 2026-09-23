@@ -419,6 +419,25 @@ test_overlay_delete_mode() {
     until_true no_ws dyn-d
 }
 
+# The first press on a workspace with windows only arms its delete; the same key again confirms.
+test_overlay_delete_confirms_occupied() {
+    "$h" app switch a && spawn_window || return 1
+    "$h" overlay delete && "$h" key a || return 1
+    sleep 0.5
+    "$h" open && window_on dyn-a || return 1
+    "$h" key a || return 1
+    until_true no_ws dyn-a && "$h" closed
+}
+
+# Held past the repeat delay, the key arms the delete once; its repeats must not confirm it.
+test_held_key_does_not_confirm_delete() {
+    "$h" app switch a && spawn_window || return 1
+    "$h" overlay delete && "$h" type -P a -s 1500 -p a || return 1
+    "$h" open && window_on dyn-a || return 1
+    "$h" type a || return 1
+    until_true no_ws dyn-a && "$h" closed
+}
+
 test_daemon_serves_invocations() {
     "$h" daemon || return 1
     "$h" app switch a || return 1
@@ -552,6 +571,8 @@ tests=(
     held_enter_does_not_submit_form
     overlay_escape_closes
     overlay_delete_mode
+    overlay_delete_confirms_occupied
+    held_key_does_not_confirm_delete
     broken_config_still_opens
     check_reports_problems
     daemon_serves_invocations

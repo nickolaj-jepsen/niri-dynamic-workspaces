@@ -100,6 +100,8 @@ inhibit_compositor_shortcuts = true # suppress niri keybinds while the overlay i
                                    # open, so a still-held Mod+<key> reaches the
                                    # overlay instead of firing compositor binds
                                    # (binds with allow-inhibiting=false still fire)
+confirm_delete = true              # delete mode: a workspace with windows needs a
+                                   # second press of its key before they are closed
 layout = "qwerty"                  # arrangement of the drawn keys (see table
                                    # below); presses follow your XKB layout
 theme = "gtk"                      # follows your GTK theme; or a built-in palette
@@ -348,13 +350,13 @@ For anything variables can't express, style the widgets directly.
 | `.static-workspaces`, `.keyboard`, `.keyboard-row` | the row of static workspaces, the key grid and its rows |
 | `.workspace-card` | a key or a static workspace; contains `.card-title` and `.card-name` |
 | `.mode-tabs`, `.mode-tab` | mode bar; tabs carry `.switch`, `.delete` or `.move-window`, plus `.active` |
-| `.hints`, `.hint`, `.error-message` | footer hints and the error line |
+| `.hints`, `.hint`, `.error-message` | footer hints and the error line; the first hint carries `.confirm` while a delete waits for its second press |
 | `.config-message` | the line under the hints naming config and theme problems; also carries `.error-message` |
 | `.template-picker` | template view: `.template-title`, `.template-list`, `.template-option` (`.selected`) with `.template-key`, `.template-name`, `.template-programs` |
 | `.variable-prompt` | variable view: `.variable-title`, `.variable-form`, `.variable-row`, `.variable-label`, `.variable-entry` (`.loading`) |
 | `.fuzzy-list`, `.fuzzy-option` (`.selected`), `.fuzzy-more` | select-variable options |
 
-`.workspace-card` states: `.static` or `.dynamic`; `.uncreated`, `.empty` or `.occupied`; `.focused`; `.active` (focused, or the visible workspace of another output); `.urgent`; `.disabled` (not a valid target in the current mode).
+`.workspace-card` states: `.static` or `.dynamic`; `.uncreated`, `.empty` or `.occupied`; `.focused`; `.active` (focused, or the visible workspace of another output); `.urgent`; `.disabled` (not a valid target in the current mode); `.confirm` (delete mode: waiting for the second press).
 
 ```css
 window.mode-delete .backdrop { background-color: rgba(60, 0, 0, 0.85); }
@@ -367,7 +369,7 @@ Variable and class names are covered by semver. The widget tree between them is 
 ### Usage
 
 - **`niri-dynamic-workspaces`** or **`niri-dynamic-workspaces switch`** — opens the switcher overlay (press key to switch/create)
-- **`niri-dynamic-workspaces delete`** — opens the delete overlay (press key to delete)
+- **`niri-dynamic-workspaces delete`** — opens the delete overlay (press key to delete; a workspace with windows needs a second press, see `confirm_delete`)
 - **`niri-dynamic-workspaces move-window`** — opens the move-window overlay (press a key to move the window that was focused when it opened)
 - **`niri-dynamic-workspaces daemon`** — starts as a background daemon (no overlay shown)
 - **`niri-dynamic-workspaces check`** — lists config problems and exits non-zero if there are any; needs no display

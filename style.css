@@ -56,6 +56,13 @@ window {
     border: 2px solid var(--urgent);
 }
 
+/* After .active and .urgent: an armed card reads as a pending delete whatever else it is. */
+.workspace-card.confirm {
+    background-color: var(--danger);
+    color: var(--bg);
+    border: 2px solid var(--danger);
+}
+
 .workspace-card.disabled {
     opacity: 0.40;
 }
@@ -109,6 +116,11 @@ window {
     font-size: var(--font-footer);
     color: var(--card-fg);
     opacity: 0.5;
+}
+
+.hint.confirm {
+    color: var(--danger);
+    opacity: 1;
 }
 
 .error-message {
