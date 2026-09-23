@@ -12,6 +12,9 @@
         pkgs.clippy
         pkgs.rustfmt
 
+        # justfile: changelog and release recipes
+        pkgs.just
+
         # e2e harness: nested compositor, input injection, screenshots
         pkgs.niri
         pkgs.cage

@@ -46,11 +46,17 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      notes: ${{ steps.notes.outputs.notes }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.SHA }}
           persist-credentials: false
+
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+        with:
+          # Upstream Nix; the default, Determinate Nix, also logs in to FlakeHub.
+          determinate: false
 
       - name: Read version
         id: version
@@ -58,6 +64,16 @@ jobs:
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
           test -n "$version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # Fails the run before anything is published when the version has no changelog entries.
+      - name: Read release notes
+        id: notes
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          notes=$(nix shell --inputs-from . nixpkgs#just --command just changelog-notes "$VERSION")
+          delimiter=$(openssl rand -hex 16)
+          printf 'notes<<%s\n%s\n%s\n' "$delimiter" "$notes" "$delimiter" >> "$GITHUB_OUTPUT"
 
   publish-crate:
     needs: version
@@ -130,13 +146,15 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      # --generate-notes only lists PRs, so direct pushes to main got a bare changelog link.
+      # The body is the version's CHANGELOG.md section, then a compare link to the previous tag (git describe needs fetch-depth 0).
       - name: Create release
         if: steps.check.outputs.exists == 'false'
+        env:
+          NOTES: ${{ needs.version.outputs.notes }}
         run: |
           prev=$(git describe --tags --abbrev=0 --match 'v*' --exclude "$TAG" "$SHA" 2>/dev/null || true)
           {
-            git log --no-merges --format='- %s' ${prev:+"$prev.."}"$SHA" | grep -v '^- chore: bump version' || true
+            printf '%s\n' "$NOTES"
             if [ -n "$prev" ]; then
               printf '\n**Full Changelog**: %s/%s/compare/%s...%s\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$prev" "$TAG"
             fi
