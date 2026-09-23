@@ -568,6 +568,86 @@ fn move_window_impl(
     Ok(created)
 }
 
+/// The workspace a command acts on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkspaceSelector {
+    /// The dynamic workspace with this key.
+    Key(char),
+    /// The focused workspace, which must be dynamic.
+    Focused,
+}
+
+/// Whether a workspace other than `except_id` is named `name`, as niri compares names.
+fn name_taken(workspaces: &[Workspace], except_id: u64, name: &str) -> bool {
+    workspaces.iter().any(|w| {
+        w.id != except_id
+            && w.name
+                .as_deref()
+                .is_some_and(|n| same_workspace_name(n, name))
+    })
+}
+
+/// Set the title of an existing dynamic workspace, or clear it when `title`
+/// is `None` or blank. The key stays; surrounding whitespace is trimmed.
+///
+/// Returns the workspace's key.
+///
+/// # Errors
+/// When the workspace does not exist or is not dynamic, when another
+/// workspace already has the new name (niri would ignore the rename), or
+/// when an IPC call fails.
+pub fn retitle_workspace(
+    prefix: &str,
+    target: WorkspaceSelector,
+    title: Option<&str>,
+) -> anyhow::Result<char> {
+    retitle_workspace_impl(&mut SocketClient, prefix, target, title)
+}
+
+fn retitle_workspace_impl(
+    client: &mut impl NiriClient,
+    prefix: &str,
+    target: WorkspaceSelector,
+    title: Option<&str>,
+) -> anyhow::Result<char> {
+    let workspaces = list_workspaces_with(client)?;
+    let ws = match target {
+        WorkspaceSelector::Key(ch) => find_workspace_by_char(&workspaces, prefix, ch)
+            .with_context(|| format!("workspace '{prefix}{ch}' does not exist"))?,
+        WorkspaceSelector::Focused => workspaces
+            .iter()
+            .find(|w| w.is_focused)
+            .context("no focused workspace")?,
+    };
+    let current = ws.name.as_deref().unwrap_or_default();
+    let Some((ch, _)) = crate::config::parse_dynamic_name(current, prefix) else {
+        if current.is_empty() {
+            bail!("the focused workspace has no name, so it is not a dynamic workspace");
+        }
+        bail!("workspace '{current}' is not a dynamic workspace");
+    };
+
+    let title = title.map(str::trim).filter(|t| !t.is_empty());
+    let new = crate::config::workspace_name_with_title(prefix, ch, title);
+    if new == current {
+        return Ok(ch);
+    }
+    if name_taken(&workspaces, ws.id, &new) {
+        bail!("another workspace is already named '{new}'");
+    }
+    if same_workspace_name(&new, current) {
+        // niri ignores a name any workspace holds, itself included, so a
+        // change of case goes through the bare name.
+        let bare = crate::config::workspace_name(prefix, ch);
+        if name_taken(&workspaces, ws.id, &bare) {
+            bail!("another workspace is already named '{bare}'");
+        }
+        set_workspace_name_by_id(client, ws.id, &bare)?;
+    }
+    set_workspace_name_by_id(client, ws.id, &new)?;
+    Ok(ch)
+}
+
 /// How long cleanup leaves a workspace created with programs alone, so it is
 /// not removed while they start.
 pub const SPAWN_GRACE: Duration = Duration::from_secs(15);
@@ -1752,6 +1832,165 @@ mod tests {
         let mut unfocused = workspaces_with_trailing_empty();
         unfocused[0].is_focused = false;
         assert!(focused_window_id(&unfocused).is_err());
+    }
+
+    /// Retitle `target` among `workspaces`: the result and every request sent.
+    fn retitle(
+        workspaces: Vec<Workspace>,
+        target: WorkspaceSelector,
+        title: Option<&str>,
+    ) -> (anyhow::Result<char>, Vec<Request>) {
+        let mut client = MockClient::new(vec![
+            Response::Workspaces(workspaces),
+            Response::Handled,
+            Response::Handled,
+        ]);
+        let result = retitle_workspace_impl(&mut client, "dyn-", target, title);
+        (result, client.sent)
+    }
+
+    fn is_named_by_id(request: &Request, id: u64, name: &str) -> bool {
+        matches!(
+            request,
+            Request::Action(Action::SetWorkspaceName {
+                name: n,
+                workspace: Some(WorkspaceReferenceArg::Id(i)),
+            }) if n == name && *i == id
+        )
+    }
+
+    #[test]
+    fn retitle_key_sets_title_by_id() {
+        let (result, sent) = retitle(
+            vec![test_workspace(3, Some("dyn-a"), false)],
+            WorkspaceSelector::Key('a'),
+            Some("Notes"),
+        );
+        assert_eq!(result.unwrap(), 'a');
+        assert_eq!(sent.len(), 2);
+        assert!(is_named_by_id(&sent[1], 3, "dyn-a Notes"), "{sent:?}");
+    }
+
+    #[test]
+    fn retitle_focused_clears_title() {
+        let (result, sent) = retitle(
+            vec![
+                test_workspace(2, Some("dyn-a"), false),
+                test_workspace(3, Some("dyn-b Notes"), true),
+            ],
+            WorkspaceSelector::Focused,
+            None,
+        );
+        assert_eq!(result.unwrap(), 'b');
+        assert_eq!(sent.len(), 2);
+        assert!(is_named_by_id(&sent[1], 3, "dyn-b"), "{sent:?}");
+    }
+
+    #[test]
+    fn retitle_trims_the_title() {
+        for (title, expected) in [("  ", "dyn-a"), (" My title ", "dyn-a My title")] {
+            let (result, sent) = retitle(
+                vec![test_workspace(3, Some("dyn-a Notes"), false)],
+                WorkspaceSelector::Key('a'),
+                Some(title),
+            );
+            assert!(result.is_ok(), "{title:?}");
+            assert!(is_named_by_id(&sent[1], 3, expected), "{title:?}: {sent:?}");
+        }
+    }
+
+    #[test]
+    fn retitle_unchanged_sends_nothing() {
+        let (result, sent) = retitle(
+            vec![test_workspace(3, Some("dyn-a Notes"), false)],
+            WorkspaceSelector::Key('a'),
+            Some("Notes"),
+        );
+        assert_eq!(result.unwrap(), 'a');
+        assert_eq!(sent.len(), 1);
+    }
+
+    #[test]
+    fn retitle_case_only_change_goes_through_bare_name() {
+        let (result, sent) = retitle(
+            vec![test_workspace(3, Some("dyn-a notes"), false)],
+            WorkspaceSelector::Key('a'),
+            Some("Notes"),
+        );
+        assert!(result.is_ok());
+        assert_eq!(sent.len(), 3);
+        assert!(is_named_by_id(&sent[1], 3, "dyn-a"), "{sent:?}");
+        assert!(is_named_by_id(&sent[2], 3, "dyn-a Notes"), "{sent:?}");
+    }
+
+    #[test]
+    fn retitle_refuses_name_held_by_other_workspace() {
+        // Not dynamic (the prefix is case-sensitive), but niri still sees the name as taken.
+        let (result, sent) = retitle(
+            vec![
+                test_workspace(3, Some("dyn-a"), false),
+                test_workspace(4, Some("DYN-a notes"), false),
+            ],
+            WorkspaceSelector::Key('a'),
+            Some("Notes"),
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("already named 'dyn-a Notes'"), "{err}");
+        assert_eq!(sent.len(), 1);
+    }
+
+    #[test]
+    fn retitle_case_only_change_refuses_taken_bare_name() {
+        let (result, sent) = retitle(
+            vec![
+                test_workspace(3, Some("dyn-a notes"), false),
+                test_workspace(4, Some("DYN-A"), false),
+            ],
+            WorkspaceSelector::Key('a'),
+            Some("Notes"),
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("already named 'dyn-a'"), "{err}");
+        assert_eq!(sent.len(), 1);
+    }
+
+    #[test]
+    fn retitle_focused_non_dynamic_errors() {
+        for (name, expected) in [(Some("01"), "'01' is not a dynamic"), (None, "no name")] {
+            let (result, sent) = retitle(
+                vec![test_workspace(1, name, true)],
+                WorkspaceSelector::Focused,
+                Some("x"),
+            );
+            let err = result.unwrap_err().to_string();
+            assert!(err.contains(expected), "{err}");
+            assert_eq!(sent.len(), 1);
+        }
+    }
+
+    #[test]
+    fn retitle_missing_key_errors() {
+        let (result, sent) = retitle(
+            vec![test_workspace(3, Some("dyn-b"), true)],
+            WorkspaceSelector::Key('a'),
+            Some("x"),
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("workspace 'dyn-a' does not exist"), "{err}");
+        assert_eq!(sent.len(), 1);
+    }
+
+    #[test]
+    fn retitle_without_focused_workspace_errors() {
+        let (result, _) = retitle(
+            vec![test_workspace(3, Some("dyn-b"), false)],
+            WorkspaceSelector::Focused,
+            None,
+        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("no focused workspace"));
     }
 
     fn is_unset(request: &Request) -> bool {

@@ -461,6 +461,18 @@ test_missing_workspace_reports_to_caller() {
     [[ $status == 1 && $err == *dyn-z* ]]
 }
 
+test_rename_sets_and_clears_title() {
+    local err status
+    "$h" app switch a && until_true has_ws dyn-a || return 1
+    "$h" app rename a "My title" && until_true has_ws "dyn-a My title" || return 1
+    # niri ignores a name that differs only in case, unless it goes through the bare name first.
+    "$h" app rename a "my title" && until_true has_ws "dyn-a my title" || return 1
+    "$h" app rename focused && until_true has_ws dyn-a || return 1
+    err=$("$h" app rename z x 2>&1 >/dev/null)
+    status=$?
+    [[ $status == 1 && $err == *"workspace 'dyn-z' does not exist"* ]]
+}
+
 test_broken_config_still_opens() {
     local log
     printf '[general\n' | "$h" config && "$h" overlay switch || return 1
@@ -627,6 +639,7 @@ tests=(
     reorder_leaves_focus_alone
     invalid_key_fails_in_caller
     missing_workspace_reports_to_caller
+    rename_sets_and_clears_title
     overlay_card_click_switches
     overlay_move_without_window_stays_open
     overlay_static_card_moves_to_unnamed

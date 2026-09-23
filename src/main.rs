@@ -74,11 +74,29 @@ enum Command {
     Daemon,
     /// Report config problems; exit non-zero if there are any
     Check,
+    /// Set or clear the title of a dynamic workspace
+    Rename {
+        /// Workspace key (a-z, 0-9), or `focused` for the focused workspace
+        #[arg(value_name = "KEY|focused", value_parser = parse_selector)]
+        target: niri::WorkspaceSelector,
+        /// New title; omit it or pass "" to clear the title
+        title: Option<String>,
+    },
 }
 
 /// Parse a workspace key argument, so a bad key fails in the caller's own pre-parse.
 fn parse_key_arg(s: &str) -> Result<char, String> {
     config::parse_workspace_char(s).ok_or_else(|| "must be a single key, a-z or 0-9".to_string())
+}
+
+/// Parse a workspace key, or `focused`.
+fn parse_selector(s: &str) -> Result<niri::WorkspaceSelector, String> {
+    if s == "focused" {
+        return Ok(niri::WorkspaceSelector::Focused);
+    }
+    parse_key_arg(s)
+        .map(niri::WorkspaceSelector::Key)
+        .map_err(|_| "must be `focused` or a single key, a-z or 0-9".to_string())
 }
 
 /// Resolve a relative `path` against `cwd`, the invoking process's directory.
@@ -133,6 +151,46 @@ fn check_config(path: Option<&Path>, report: impl Fn(&str), out: impl Fn(&str)) 
         None => {}
     }
     0
+}
+
+/// Set or clear the title of the `target` workspace, send each message to
+/// `report`, and return the exit status.
+///
+/// Only IPC, so it runs before GTK starts and needs no D-Bus.
+fn run_rename(
+    path: Option<&Path>,
+    target: niri::WorkspaceSelector,
+    title: Option<&str>,
+    report: impl Fn(&str),
+) -> i32 {
+    let cfg = config::load_config(path);
+    for d in &cfg.diagnostics {
+        report(&d.to_string());
+    }
+    if let niri::WorkspaceSelector::Key(ch) = target {
+        if let Some(pinned) = cfg.static_workspaces.get(&ch) {
+            report(&format!(
+                "error: key '{ch}' is pinned to static workspace '{pinned}'; \
+                 rename it in your niri config"
+            ));
+            return 1;
+        }
+    }
+    match niri::retitle_workspace(&cfg.workspace_prefix, target, title) {
+        Ok(ch) => {
+            let titled = title.is_some_and(|t| !t.trim().is_empty());
+            if let Some(name) = cfg.workspace_names.get(&ch).filter(|_| titled) {
+                report(&format!(
+                    "note: the card for '{ch}' shows its configured name '{name}', not the title"
+                ));
+            }
+            0
+        }
+        Err(e) => {
+            report(&format!("error: {e:#}"));
+            1
+        }
+    }
 }
 
 fn handle_direct_action(
@@ -210,13 +268,22 @@ fn main() -> glib::ExitCode {
     // caller before GTK starts (important when a daemon is already running).
     let cli = Cli::try_parse().unwrap_or_else(|e| e.exit());
     // Subcommands that never start GTK, so they need no display or D-Bus.
-    if matches!(cli.command, Some(Command::Check)) {
-        return check_config(
-            cli.config.as_deref(),
-            |msg| eprintln!("{msg}"),
-            |msg| println!("{msg}"),
-        )
-        .into();
+    match cli.command {
+        Some(Command::Check) => {
+            return check_config(
+                cli.config.as_deref(),
+                |msg| eprintln!("{msg}"),
+                |msg| println!("{msg}"),
+            )
+            .into();
+        }
+        Some(Command::Rename { target, ref title }) => {
+            return run_rename(cli.config.as_deref(), target, title.as_deref(), |msg| {
+                eprintln!("{msg}");
+            })
+            .into();
+        }
+        _ => {}
     }
 
     let app = gtk4::Application::builder()
@@ -249,13 +316,18 @@ fn main() -> glib::ExitCode {
             .map(|path| absolutize(path, cmdline.cwd().as_deref()));
 
         let (mode, key) = match cli.command {
-            // main() runs it before GTK starts; only here for exhaustiveness.
+            // main() runs these before GTK starts; only here for exhaustiveness.
             Some(Command::Check) => {
                 return check_config(
                     cli.config.as_deref(),
                     |msg| report(cmdline, msg),
                     |msg| cmdline.print_literal(&format!("{msg}\n")),
                 );
+            }
+            Some(Command::Rename { target, ref title }) => {
+                return run_rename(cli.config.as_deref(), target, title.as_deref(), |msg| {
+                    report(cmdline, msg);
+                });
             }
             Some(Command::Daemon) => {
                 if hold_guard.borrow().is_some() {
@@ -379,6 +451,50 @@ mod tests {
         let (status, reported, _) = run_check(&path);
         assert_eq!(status, 1, "a missing --config file is an error");
         assert!(reported[0].starts_with("config error:"), "{reported:?}");
+    }
+
+    #[test]
+    fn cli_debug_assert() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn cli_parses_rename_key_and_title() {
+        let cli = Cli::try_parse_from(["ndw", "rename", "a", "My title"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Rename {
+                target: niri::WorkspaceSelector::Key('a'),
+                title: Some(ref t),
+            }) if t == "My title"
+        ));
+    }
+
+    #[test]
+    fn cli_parses_rename_focused_without_title() {
+        let cli = Cli::try_parse_from(["ndw", "rename", "focused"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Rename {
+                target: niri::WorkspaceSelector::Focused,
+                title: None,
+            })
+        ));
+    }
+
+    #[test]
+    fn cli_rejects_rename_bad_target() {
+        for args in [
+            &["ndw", "rename", "Q", "x"][..],
+            &["ndw", "rename", "--focused", "x"],
+            &["ndw", "rename"],
+        ] {
+            let Err(e) = Cli::try_parse_from(args) else {
+                panic!("{args:?} must not parse");
+            };
+            assert_eq!(e.exit_code(), 2, "{args:?}");
+        }
     }
 
     #[test]
