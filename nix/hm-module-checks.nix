@@ -1,6 +1,7 @@
 { self, inputs, ... }:
 {
-  # Eval-only assertions for homeModules.default; `nix flake check` runs them.
+  # Checks for homeModules.default, run by `nix flake check`: hm-module only
+  # evaluates, hm-module-config builds generated config files.
   perSystem = { pkgs, lib, ... }:
     let
       hmConfiguration = modules: inputs.home-manager.lib.homeManagerConfiguration {
@@ -31,6 +32,10 @@
       expect = name: actual: expected:
         lib.assertMsg (actual == expected)
           "${name}: expected ${builtins.toJSON expected}, got ${builtins.toJSON actual}";
+
+      configSource = modules:
+        (hmConfiguration modules).config.xdg.configFile."niri-dynamic-workspaces/config.toml".source;
+      misspelled.programs.niri-dynamic-workspaces.settings.general.hover_previw = false;
     in
     {
       checks.hm-module =
@@ -59,5 +64,23 @@
           (withNiriFlake [{ wayland.windowManager.niri.enable = true; }]).programs.niri.settings
           null;
         pkgs.emptyFile;
+
+      checks.hm-module-config = pkgs.linkFarm "hm-module-config" {
+        # themeCss adds a relative theme path, which the check must accept.
+        accepted = configSource [{
+          programs.niri-dynamic-workspaces = {
+            settings.general.layout = "dvorak";
+            themeCss = "window { --accent: red; }";
+          };
+        }];
+        rejected = pkgs.testers.testBuildFailure' {
+          drv = configSource [ misspelled ];
+          expectedBuilderLogEntries = [ "config warning: unknown key 'general.hover_previw'" ];
+        };
+        unchecked = configSource [
+          misspelled
+          { programs.niri-dynamic-workspaces.checkConfig = false; }
+        ];
+      };
     };
 }
