@@ -1,6 +1,7 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::io::{BufRead, BufReader, Write as _};
 use std::os::unix::net::UnixStream;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -566,23 +567,76 @@ fn move_window_impl(
     Ok(created)
 }
 
-/// Remove empty, unfocused dynamic workspaces matching the given prefix.
+/// How long cleanup leaves a workspace created with programs alone, so it is
+/// not removed while they start.
+pub const SPAWN_GRACE: Duration = Duration::from_secs(15);
+
+/// Workspaces the daemon's cleanup must leave alone, each until a deadline.
+struct SpareRegistry {
+    until: BTreeMap<u64, Instant>,
+}
+
+impl SpareRegistry {
+    const fn new() -> Self {
+        Self {
+            until: BTreeMap::new(),
+        }
+    }
+
+    /// Spare `id` until `until`, never shortening an earlier spare.
+    fn spare(&mut self, id: u64, until: Instant) {
+        let deadline = self.until.entry(id).or_insert(until);
+        *deadline = (*deadline).max(until);
+    }
+
+    fn is_spared(&self, id: u64, now: Instant) -> bool {
+        self.until.get(&id).is_some_and(|&until| until > now)
+    }
+
+    /// Forget the spares that ran out and return the earliest one left.
+    fn next_deadline(&mut self, now: Instant) -> Option<Instant> {
+        self.until.retain(|_, until| *until > now);
+        self.until.values().min().copied()
+    }
+}
+
+/// Process-wide: overlay and forwarded CLI actions run in the daemon, next to
+/// its cleanup thread.
+static SPARED: Mutex<SpareRegistry> = Mutex::new(SpareRegistry::new());
+
+fn spared() -> MutexGuard<'static, SpareRegistry> {
+    SPARED.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Keep the daemon's cleanup from removing workspace `id` before `until`.
+///
+/// Only takes effect in the process that runs the cleanup, the daemon.
+pub fn spare_workspace(id: u64, until: Instant) {
+    spared().spare(id, until);
+}
+
+/// Remove empty, unfocused dynamic workspaces matching the given prefix,
+/// except spared ones.
 ///
 /// Best-effort: logs errors to stderr since this runs in the background daemon.
 pub fn cleanup_empty_workspaces(prefix: &str) {
-    if let Err(e) = cleanup_empty_workspaces_inner(prefix) {
+    let is_spared = |id| spared().is_spared(id, Instant::now());
+    if let Err(e) = cleanup_empty_workspaces_impl(
+        &mut SocketClient,
+        prefix,
+        Duration::from_millis(500),
+        &is_spared,
+    ) {
         eprintln!("warning: failed to clean up empty workspaces: {e}");
     }
 }
 
-fn cleanup_empty_workspaces_inner(prefix: &str) -> anyhow::Result<()> {
-    cleanup_empty_workspaces_impl(&mut SocketClient, prefix, Duration::from_millis(500))
-}
-
-/// Collect prefix-matching workspaces that are empty, unfocused, and inactive.
+/// Collect prefix-matching workspaces that are empty, unfocused, inactive and
+/// not spared.
 fn removable_workspaces(
     client: &mut impl NiriClient,
     prefix: &str,
+    is_spared: &impl Fn(u64) -> bool,
 ) -> anyhow::Result<Vec<(u64, String)>> {
     let workspaces = list_workspaces_with(client)?;
     let windows = list_windows_with(client)?;
@@ -597,6 +651,7 @@ fn removable_workspaces(
                 || ws.is_focused
                 || ws.is_active
                 || window_ws_ids.contains(&ws.id)
+                || is_spared(ws.id)
             {
                 return None;
             }
@@ -605,14 +660,17 @@ fn removable_workspaces(
         .collect())
 }
 
+/// `is_spared` is asked again in the confirming pass, so a spare that starts
+/// between the passes still counts.
 fn cleanup_empty_workspaces_impl(
     client: &mut impl NiriClient,
     prefix: &str,
     confirm_delay: Duration,
+    is_spared: &impl Fn(u64) -> bool,
 ) -> anyhow::Result<()> {
     // Two passes: a workspace mid-creation is briefly named but still empty
     // and unfocused, so only unset names that qualify again after a delay.
-    let candidates: HashSet<u64> = removable_workspaces(client, prefix)?
+    let candidates: HashSet<u64> = removable_workspaces(client, prefix, is_spared)?
         .into_iter()
         .map(|(id, _)| id)
         .collect();
@@ -622,7 +680,7 @@ fn cleanup_empty_workspaces_impl(
 
     thread::sleep(confirm_delay);
 
-    for (id, name) in removable_workspaces(client, prefix)? {
+    for (id, name) in removable_workspaces(client, prefix, is_spared)? {
         if !candidates.contains(&id) {
             continue;
         }
@@ -676,11 +734,13 @@ fn connect_event_stream() -> anyhow::Result<BufReader<UnixStream>> {
 
 /// Trailing-edge debounce: due once events have been quiet for `quiet`, or
 /// `max_wait` after the first pending event so a busy stream cannot starve it.
+/// Also due at a [`Debouncer::recheck_at`] time, event or not.
 pub(crate) struct Debouncer {
     quiet: Duration,
     max_wait: Duration,
     /// `(first, last)` event times since the last [`Debouncer::clear`].
     pending: Option<(Instant, Instant)>,
+    recheck: Option<Instant>,
 }
 
 impl Debouncer {
@@ -689,6 +749,7 @@ impl Debouncer {
             quiet,
             max_wait,
             pending: None,
+            recheck: None,
         }
     }
 
@@ -697,14 +758,21 @@ impl Debouncer {
         self.pending = Some((first, now));
     }
 
+    /// Also be due at `at`, until the next [`Debouncer::clear`].
+    pub(crate) fn recheck_at(&mut self, at: Option<Instant>) {
+        self.recheck = at;
+    }
+
     pub(crate) fn due(&self, now: Instant) -> bool {
-        self.pending.is_some_and(|(first, last)| {
-            now.duration_since(last) >= self.quiet || now.duration_since(first) >= self.max_wait
-        })
+        self.recheck.is_some_and(|at| now >= at)
+            || self.pending.is_some_and(|(first, last)| {
+                now.duration_since(last) >= self.quiet || now.duration_since(first) >= self.max_wait
+            })
     }
 
     pub(crate) fn clear(&mut self) {
         self.pending = None;
+        self.recheck = None;
     }
 }
 
@@ -770,6 +838,9 @@ fn event_cleanup_loop(prefix_source: &mut impl FnMut() -> Option<String>) -> any
             if let Some(prefix) = prefix_source() {
                 cleanup_empty_workspaces(&prefix);
             }
+            // A spared workspace can be removable once its spare runs out,
+            // with no event to say so.
+            debouncer.recheck_at(spared().next_deadline(Instant::now()));
         }
     }
 }
@@ -1742,7 +1813,7 @@ mod tests {
             Response::Handled,
         ]);
 
-        cleanup_empty_workspaces_impl(&mut client, "dyn-", Duration::ZERO).unwrap();
+        cleanup_empty_workspaces_impl(&mut client, "dyn-", Duration::ZERO, &|_| false).unwrap();
 
         assert_eq!(client.sent.len(), 5);
         assert!(matches!(
@@ -1762,7 +1833,7 @@ mod tests {
             Response::Windows(vec![test_window(100, 1, "firefox")]),
         ]);
 
-        cleanup_empty_workspaces_impl(&mut client, "dyn-", Duration::ZERO).unwrap();
+        cleanup_empty_workspaces_impl(&mut client, "dyn-", Duration::ZERO, &|_| false).unwrap();
 
         assert_eq!(client.sent.len(), 2);
     }
@@ -1783,13 +1854,112 @@ mod tests {
             Response::Windows(vec![test_window(100, 1, "kitty")]),
         ]);
 
-        cleanup_empty_workspaces_impl(&mut client, "dyn-", Duration::ZERO).unwrap();
+        cleanup_empty_workspaces_impl(&mut client, "dyn-", Duration::ZERO, &|_| false).unwrap();
 
         assert_eq!(client.sent.len(), 4);
         assert!(!client
             .sent
             .iter()
             .any(|r| matches!(r, Request::Action(Action::UnsetWorkspaceName { .. }))));
+    }
+
+    #[test]
+    fn cleanup_leaves_spared_workspaces() {
+        let empty = vec![
+            test_workspace(4, Some("dyn-d"), false),
+            test_workspace(5, Some("dyn-e"), false),
+        ];
+        let mut client = MockClient::new(vec![
+            Response::Workspaces(empty.clone()),
+            Response::Windows(vec![]),
+            Response::Workspaces(empty),
+            Response::Windows(vec![]),
+            Response::Handled,
+        ]);
+
+        cleanup_empty_workspaces_impl(&mut client, "dyn-", Duration::ZERO, &|id| id == 5).unwrap();
+
+        assert_eq!(client.sent.len(), 5);
+        assert!(matches!(
+            &client.sent[4],
+            Request::Action(Action::UnsetWorkspaceName {
+                reference: Some(WorkspaceReferenceArg::Name(n)),
+            }) if n == "dyn-d"
+        ));
+    }
+
+    #[test]
+    fn cleanup_with_only_spared_candidates_skips_second_pass() {
+        let mut client = MockClient::new(vec![
+            Response::Workspaces(vec![test_workspace(4, Some("dyn-d"), false)]),
+            Response::Windows(vec![]),
+        ]);
+
+        cleanup_empty_workspaces_impl(&mut client, "dyn-", Duration::ZERO, &|_| true).unwrap();
+
+        assert_eq!(client.sent.len(), 2);
+    }
+
+    #[test]
+    fn cleanup_honours_a_spare_that_starts_between_passes() {
+        let empty = vec![test_workspace(4, Some("dyn-d"), false)];
+        let mut client = MockClient::new(vec![
+            Response::Workspaces(empty.clone()),
+            Response::Windows(vec![]),
+            Response::Workspaces(empty),
+            Response::Windows(vec![]),
+        ]);
+        let asked = std::cell::Cell::new(0);
+        // Not spared when pass 1 asks, spared when pass 2 does.
+        let is_spared = |_| {
+            asked.set(asked.get() + 1);
+            asked.get() > 1
+        };
+
+        cleanup_empty_workspaces_impl(&mut client, "dyn-", Duration::ZERO, &is_spared).unwrap();
+
+        assert_eq!(asked.get(), 2);
+        assert_eq!(client.sent.len(), 4);
+    }
+
+    #[test]
+    fn spare_registry_spares_until_the_deadline() {
+        let mut registry = SpareRegistry::new();
+        let t0 = Instant::now();
+        registry.spare(4, t0 + SPAWN_GRACE);
+
+        assert!(registry.is_spared(4, t0));
+        assert!(!registry.is_spared(5, t0));
+        assert!(!registry.is_spared(4, t0 + SPAWN_GRACE));
+    }
+
+    #[test]
+    fn spare_registry_keeps_the_later_deadline() {
+        let mut registry = SpareRegistry::new();
+        let t0 = Instant::now();
+        registry.spare(4, t0 + Duration::from_secs(20));
+        registry.spare(4, t0 + Duration::from_secs(5));
+
+        assert!(registry.is_spared(4, t0 + Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn spare_registry_next_deadline_forgets_expired_spares() {
+        let mut registry = SpareRegistry::new();
+        let t0 = Instant::now();
+        registry.spare(4, t0 + Duration::from_secs(5));
+        registry.spare(5, t0 + Duration::from_secs(15));
+
+        assert_eq!(
+            registry.next_deadline(t0),
+            Some(t0 + Duration::from_secs(5))
+        );
+        assert_eq!(
+            registry.next_deadline(t0 + Duration::from_secs(5)),
+            Some(t0 + Duration::from_secs(15))
+        );
+        assert_eq!(registry.until.len(), 1);
+        assert_eq!(registry.next_deadline(t0 + Duration::from_secs(15)), None);
     }
 
     #[test]
@@ -1982,6 +2152,26 @@ mod tests {
         debouncer.clear();
 
         assert!(!debouncer.due(t0 + Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn debouncer_fires_at_recheck_without_events() {
+        let mut debouncer = test_debouncer();
+        let t0 = Instant::now();
+        debouncer.recheck_at(Some(t0 + SPAWN_GRACE));
+
+        assert!(!debouncer.due(t0 + Duration::from_millis(14_900)));
+        assert!(debouncer.due(t0 + SPAWN_GRACE));
+    }
+
+    #[test]
+    fn debouncer_clear_drops_recheck() {
+        let mut debouncer = test_debouncer();
+        let t0 = Instant::now();
+        debouncer.recheck_at(Some(t0 + SPAWN_GRACE));
+        debouncer.clear();
+
+        assert!(!debouncer.due(t0 + SPAWN_GRACE));
     }
 
     /// A reader with a short timeout, and the end niri would write to.

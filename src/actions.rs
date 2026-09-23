@@ -2,6 +2,7 @@
 //! niri IPC call → on-create/on-delete hooks → column reordering.
 
 use std::collections::HashMap;
+use std::time::Instant;
 
 use anyhow::Context as _;
 use gtk4::gio;
@@ -22,6 +23,8 @@ pub struct HookInfo {
 ///
 /// `programs` are command strings; `{{name}}` placeholders are filled from
 /// `hook_info.variables`. A malformed command fails before anything is created.
+/// A new workspace with programs is spared from cleanup for
+/// [`niri::SPAWN_GRACE`].
 ///
 /// Column reordering (needed when 2+ programs spawn) runs on a background
 /// thread; see [`spawn_reorder`].
@@ -45,7 +48,12 @@ pub fn switch_workspace(
     if let Some(request) = reorder {
         spawn_reorder(app, request);
     }
-    if created.is_some() {
+    if let Some(id) = created {
+        // It stays empty until a program maps a window, which the daemon's
+        // cleanup would take for abandoned once the user switches away.
+        if commands.iter().any(|command| !command.is_empty()) {
+            niri::spare_workspace(id, Instant::now() + niri::SPAWN_GRACE);
+        }
         run_create_hooks(config, ch, ws_name, hook_info);
     }
     Ok(())

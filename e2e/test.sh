@@ -407,6 +407,22 @@ test_daemon_deletes_empty_workspaces() {
     until_true_for 15 no_ws dyn-b && has_ws dyn-a && has_ws dyn-c
 }
 
+# The new workspace stays empty until its program maps, and must outlive the user leaving it.
+test_daemon_keeps_workspace_for_slow_program() {
+    local id
+    general auto_delete_empty true && add_config <<'EOF' || return 1
+[workspace.e]
+programs = ["sh -c 'sleep 5; exec foot sleep 60'"]
+EOF
+    "$h" daemon || return 1
+    "$h" app switch e && until_true has_ws dyn-e && id=$(ws_id dyn-e) || return 1
+    "$h" app switch b || return 1
+    # Past the debounce and the confirming pass, which removed it before.
+    sleep 3
+    [[ $(ws_id dyn-e) == "$id" ]] || return 1
+    "$h" app switch e && until_true window_on dyn-e
+}
+
 test_daemon_reloads_config_on_content_change() {
     local config
     config=$(config_toml)
@@ -467,6 +483,7 @@ tests=(
     daemon_serves_invocations
     daemon_forwards_errors_to_caller
     daemon_deletes_empty_workspaces
+    daemon_keeps_workspace_for_slow_program
     daemon_reloads_config_on_content_change
     daemon_frees_closed_overlays
 )
