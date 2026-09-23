@@ -10,7 +10,7 @@ use crate::actions::HookInfo;
 use crate::config::{ResolvedConfig, TemplateVariable};
 
 use super::keys;
-use super::metrics::KeyboardMetrics;
+use super::metrics::{apply_scaled_css, KeyboardMetrics};
 use super::variables::show_variable_input;
 use super::{
     attach_close_on_backdrop_click, build_hint_footer, create_error_revealer, display_key_char,
@@ -150,6 +150,8 @@ pub(super) fn show_template_picker(ch: char, ctx: &ActionContext) {
     let config = &ctx.session.config;
     let metrics =
         KeyboardMetrics::from_monitor_width(ctx.session.monitor_width.get(), config.layout);
+    // The overlay may have moved monitors since the grid applied its sizes.
+    apply_scaled_css(&metrics.scaled_css_variables());
 
     let container = GtkBox::builder()
         .orientation(Orientation::Vertical)

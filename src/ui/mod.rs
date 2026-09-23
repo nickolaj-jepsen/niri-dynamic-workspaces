@@ -351,7 +351,11 @@ fn follow_compositor(
                 if let Some(monitor) = current.as_deref().and_then(find_monitor_for_output) {
                     window.set_monitor(Some(&monitor));
                     session.monitor_width.set(get_monitor_width(Some(&monitor)));
-                    populate_overlay(&window, &session, mode, Some(fresh_workspaces));
+                    // A rebuild would drop the picker or the typed variable
+                    // values; the next view built picks up the new monitor.
+                    if !session.in_subview.get() {
+                        populate_overlay(&window, &session, mode, Some(fresh_workspaces));
+                    }
                     continue;
                 }
             }

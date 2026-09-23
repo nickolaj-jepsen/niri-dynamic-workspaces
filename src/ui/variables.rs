@@ -15,7 +15,7 @@ use gtk4::{
 use crate::actions::HookInfo;
 use crate::config::{Select, VariableType};
 
-use super::metrics::KeyboardMetrics;
+use super::metrics::{apply_scaled_css, KeyboardMetrics};
 use super::picker::{show_template_picker, TemplateOption};
 use super::{
     attach_close_on_backdrop_click, build_hint_footer, create_error_revealer,
@@ -445,6 +445,8 @@ pub(super) fn show_variable_input(
     let config = &ctx.session.config;
     let metrics =
         KeyboardMetrics::from_monitor_width(ctx.session.monitor_width.get(), config.layout);
+    // The overlay may have moved monitors since the last view applied its sizes.
+    apply_scaled_css(&metrics.scaled_css_variables());
 
     let container = GtkBox::builder()
         .orientation(Orientation::Vertical)
