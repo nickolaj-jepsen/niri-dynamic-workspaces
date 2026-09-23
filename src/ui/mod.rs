@@ -143,6 +143,9 @@ struct OverlaySession {
     /// True while a sub-view (template picker / variable form) is showing;
     /// suppresses structural refreshes that would destroy it.
     in_subview: Cell<bool>,
+    /// Keycode of the last selecting press, whose auto-repeat is swallowed
+    /// until release so it cannot act again in the view it opened.
+    held_key: keys::HeldKey,
     /// Config and theme problems, shown on a line under the hints.
     problems: Vec<String>,
 }
@@ -188,6 +191,7 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
         selection_made: Cell::new(false),
         hover_armed: Cell::new(false),
         in_subview: Cell::new(false),
+        held_key: keys::HeldKey::default(),
         problems: config
             .diagnostics
             .iter()
@@ -441,10 +445,19 @@ fn matches_close_keybind(event: &gdk4::KeyEvent, keybinds: &[crate::config::Keyb
         .any(|kb| event.matches(kb.key, kb.modifiers) != gdk4::KeyMatch::None)
 }
 
-fn new_key_controller() -> EventControllerKey {
+/// A view's key controller. Handlers call `session.held_key.hold(keycode)`
+/// before acting on a key whose repeat must not act again.
+fn new_key_controller(session: &Rc<OverlaySession>) -> EventControllerKey {
     let ctrl = EventControllerKey::new();
     ctrl.set_name(Some("ndw-key"));
     ctrl.set_propagation_phase(gtk4::PropagationPhase::Capture);
+    // Connected first: its Stop ends the emission before the view's handler.
+    let held = session.clone();
+    ctrl.connect_key_pressed(move |_, _, keycode, _| {
+        Propagation::from(held.held_key.is_repeat(keycode))
+    });
+    let held = session.clone();
+    ctrl.connect_key_released(move |_, _, keycode, _| held.held_key.release(keycode));
     ctrl
 }
 
@@ -672,8 +685,8 @@ fn dispatch_action(ch: char, ctx: &ActionContext) {
 fn attach_key_handler(ctx: &ActionContext, close_keybinds: &[crate::config::Keybind]) {
     let key_ctx = ctx.clone();
     let close_keybinds = close_keybinds.to_vec();
-    let key_controller = new_key_controller();
-    key_controller.connect_key_pressed(move |ctrl, key, _, _| {
+    let key_controller = new_key_controller(&ctx.session);
+    key_controller.connect_key_pressed(move |ctrl, key, keycode, _| {
         let Some(event) = keys::current_key_event(ctrl) else {
             return Propagation::Proceed;
         };
@@ -698,6 +711,7 @@ fn attach_key_handler(ctx: &ActionContext, close_keybinds: &[crate::config::Keyb
 
         // Workspace key: action depends on mode
         if let Some((ch, _)) = keys::workspace_key_press(&event).filter(|(_, m)| m.is_empty()) {
+            key_ctx.session.held_key.hold(keycode);
             dispatch_action(ch, &key_ctx);
             return Propagation::Stop;
         }

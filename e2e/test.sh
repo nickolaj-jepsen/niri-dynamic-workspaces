@@ -133,6 +133,43 @@ EOF
     "$h" closed && no_ws dyn-q
 }
 
+# add_templates: beta on key 3 without variables, then gamma with a text variable.
+add_templates() {
+    add_config <<'EOF'
+[template.beta]
+programs = ["true"]
+title = "BETA"
+key = "3"
+
+[template.gamma]
+programs = ["true {{path}}"]
+key = "g"
+
+[template.gamma.variables.path]
+type = "text"
+EOF
+}
+
+test_held_key_does_not_pick_template() {
+    add_templates && "$h" overlay switch || return 1
+    # Opens the picker for 3, where 3 is beta's key; held past the repeat delay.
+    "$h" type -P 3 -s 1500 -p 3 || return 1
+    "$h" open && no_ws "dyn-3 BETA" || return 1
+    "$h" type 1 || return 1 # Empty
+    until_true has_ws dyn-3
+}
+
+test_held_enter_does_not_submit_form() {
+    add_templates && "$h" overlay switch || return 1
+    "$h" type 5 && "$h" type -k Down -k Down || return 1 # gamma
+    # Opens gamma's form, held past the repeat delay.
+    "$h" type -P Return -s 1500 -p Return || return 1
+    "$h" open && no_ws dyn-5 || return 1
+    # The release re-arms Enter.
+    "$h" type -k Return || return 1
+    until_true has_ws dyn-5
+}
+
 test_overlay_escape_closes() {
     "$h" overlay switch || return 1
     "$h" escape || return 1
@@ -251,6 +288,8 @@ tests=(
     overlay_close_bind_ignores_caps_lock
     overlay_close_bind_on_cyrillic
     overlay_close_bind_with_shift
+    held_key_does_not_pick_template
+    held_enter_does_not_submit_form
     overlay_escape_closes
     overlay_delete_mode
     broken_config_still_opens

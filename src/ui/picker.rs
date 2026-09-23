@@ -267,13 +267,14 @@ fn attach_template_key_handler(
     let scrolled = scrolled.clone();
     let sel = selected_idx.clone();
 
-    let key_controller = new_key_controller();
-    key_controller.connect_key_pressed(move |ctrl, key, _, _| {
+    let key_controller = new_key_controller(&ctx.session);
+    key_controller.connect_key_pressed(move |ctrl, key, keycode, _| {
         let Some(event) = keys::current_key_event(ctrl) else {
             return Propagation::Proceed;
         };
         // Close keybinds / Escape → go back to main view
         if matches_close_keybind(&event, &close_keybinds) {
+            key_ctx.session.held_key.hold(keycode);
             let ctx = key_ctx.clone();
             glib::idle_add_local_once(move || {
                 populate_overlay(&ctx.window, &ctx.session, Mode::Normal, None);
@@ -294,6 +295,7 @@ fn attach_template_key_handler(
 
         // Enter → confirm selected
         if key == gdk4::Key::Return || key == gdk4::Key::KP_Enter {
+            key_ctx.session.held_key.hold(keycode);
             let idx = sel.get();
             select_template_option(&options[idx], ws_char, &key_ctx);
             return Propagation::Stop;
@@ -303,6 +305,7 @@ fn attach_template_key_handler(
         if let Some((pressed, _)) = keys::workspace_key_press(&event).filter(|(_, m)| m.is_empty())
         {
             if let Some(opt) = options.iter().find(|o| o.key == Some(pressed)) {
+                key_ctx.session.held_key.hold(keycode);
                 select_template_option(opt, ws_char, &key_ctx);
                 return Propagation::Stop;
             }

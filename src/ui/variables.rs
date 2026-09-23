@@ -522,13 +522,14 @@ fn attach_variable_input_key_handler(
     let template_title = option.title.clone();
     let template_variables = option.variables.clone();
 
-    let key_controller = new_key_controller();
-    key_controller.connect_key_pressed(move |ctrl, key, _, _| {
+    let key_controller = new_key_controller(&ctx.session);
+    key_controller.connect_key_pressed(move |ctrl, key, keycode, _| {
         let Some(event) = super::keys::current_key_event(ctrl) else {
             return Propagation::Proceed;
         };
         // Close keybinds / Escape → go back to template picker
         if matches_close_keybind(&event, &close_keybinds) {
+            key_ctx.session.held_key.hold(keycode);
             let ctx_clone = key_ctx.clone();
             glib::idle_add_local_once(move || {
                 show_template_picker(ch, &ctx_clone);
@@ -538,6 +539,7 @@ fn attach_variable_input_key_handler(
 
         // Enter → collect values and create workspace
         if key == gdk4::Key::Return || key == gdk4::Key::KP_Enter {
+            key_ctx.session.held_key.hold(keycode);
             // Ignore Enter while any select source is still resolving.
             if widgets
                 .iter()

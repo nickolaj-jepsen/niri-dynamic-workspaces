@@ -13,6 +13,9 @@ input {
             // us stays active; layout tests pick a group with `niri msg action switch-layout <index>`.
             layout "us,fr,ru"
         }
+        // niri's defaults, pinned: key-repeat tests hold keys past the delay.
+        repeat-delay 600
+        repeat-rate 25
     }
 }
 
