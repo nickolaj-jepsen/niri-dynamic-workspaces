@@ -21,6 +21,13 @@ pub fn test_window(id: u64, workspace_id: u64, app_id: &str) -> Window {
     }
 }
 
+/// A [`test_window`] tiled in the given 1-based column of its workspace.
+pub fn test_tiled_window(id: u64, workspace_id: u64, app_id: &str, column: usize) -> Window {
+    let mut window = test_window(id, workspace_id, app_id);
+    window.layout.pos_in_scrolling_layout = Some((column, 1));
+    window
+}
+
 pub fn test_workspace(id: u64, name: Option<&str>, is_focused: bool) -> Workspace {
     Workspace {
         id,
