@@ -113,6 +113,9 @@ theme = "gtk"                      # follows your GTK theme; or a built-in palet
 close = ["Escape", "Ctrl+c", "Ctrl+w", "Ctrl+q"]  # keys to dismiss the overlay
                                                   # (GTK key names; Caps Lock is
                                                   # ignored, "Ctrl+Shift+q" works)
+# Modifiers: Ctrl/Control, Shift, Alt/Mod1, Super/Mod4/Mod. A letter or digit
+# bound without Ctrl, Shift or Alt ("q", "Mod+q") takes that workspace key and
+# produces a warning. When no bind is valid, the defaults apply.
 
 [workspace.a]                          # key: a-z or 0-9
 name = "Browser"                       # optional display name shown on the key
