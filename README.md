@@ -104,6 +104,8 @@ inhibit_compositor_shortcuts = true # suppress niri keybinds while the overlay i
                                    # (binds with allow-inhibiting=false still fire)
 confirm_delete = true              # delete mode: a workspace with windows needs a
                                    # second press of its key before they are closed
+alt_variants = false               # Alt+key / Alt+click variants of switch and
+                                   # move-window (see Usage)
 layout = "qwerty"                  # arrangement of the drawn keys (see table
                                    # below); presses follow your XKB layout
 theme = "gtk"                      # follows your GTK theme; or a built-in palette
@@ -408,6 +410,13 @@ running another mode's command switches the open overlay to that mode. Keybinds
 behave differently: with `inhibit_compositor_shortcuts` (on by default) the open
 overlay receives niri's keybinds as plain keys, so pressing Mod+D again selects
 workspace d. Press Escape to close the overlay.
+
+With `alt_variants = true`, holding Alt while pressing a key or clicking a card
+picks a variant: in Switch mode a workspace on another monitor is first pulled
+onto the focused one (the footer shows this hint only with more than one
+monitor), and in Move Window mode the window moves without focus following it.
+Delete mode has no variant. It is off by default because with Alt as niri's
+Mod, a Mod still held from opening the overlay would pick the variant too.
 
 While open, the overlay tracks the compositor live: it follows the focused output across monitors and refreshes its cards when workspaces or windows change.
 

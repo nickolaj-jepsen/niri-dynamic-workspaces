@@ -118,7 +118,9 @@ highest one before pressing, which puts each pressed keysym on its code. It
 waits 0.3 s before the first key: niri binds cage's keyboard only once the
 session's first `wtype` has created it, and keys sent before that are lost.
 Pick a group first with `run niri msg action switch-layout <index>`. Name the
-key in a comment next to each `press`, since the codes are opaque.
+key in a comment next to each `press`, since the codes are opaque. A held
+`press` in the background (`press 56 2500 &`, Alt) applies its modifier to a
+`key` click made meanwhile.
 
 ## Click coordinates
 

@@ -25,6 +25,7 @@ use crate::config::ResolvedConfig;
 use crate::niri;
 
 use cards::{build_keyboard, build_static_workspace_row, DynWorkspaceInfo, GridModel};
+use keys::KeyVariant;
 use metrics::{apply_scaled_css, find_monitor_for_output, KeyboardMetrics};
 use picker::{select_template_option, show_template_picker, TemplateOption};
 pub use theme::install_base as install_base_styles;
@@ -86,6 +87,21 @@ impl Mode {
             Self::Normal => "press key to select",
             Self::Delete => "press key to delete (closes its windows)",
             Self::MoveWindow => "press key to move the focused window",
+        }
+    }
+
+    /// Whether Alt gives a key a variant here; Delete has none.
+    const fn has_alt_variant(self) -> bool {
+        !matches!(self, Self::Delete)
+    }
+
+    /// The footer hint for Alt+key where it differs from a plain press:
+    /// bringing a workspace over changes nothing with a single output.
+    const fn alt_hint(self, multi_output: bool) -> Option<&'static str> {
+        match self {
+            Self::Normal if multi_output => Some("Alt+key bring here"),
+            Self::MoveWindow => Some("Alt+key don't follow"),
+            Self::Normal | Self::Delete => None,
         }
     }
 
@@ -225,6 +241,14 @@ struct ActionContext {
     keyboard_infos: Rc<HashMap<char, DynWorkspaceInfo>>,
     /// Output name where the overlay is displayed (for hover-preview gating).
     focused_output: Option<String>,
+}
+
+impl ActionContext {
+    /// Whether Alt picks a key's variant in this view; otherwise an Alt
+    /// press is ignored and an Alt click acts as a plain one.
+    fn alt_variants(&self) -> bool {
+        self.session.config.alt_variants && self.mode.has_alt_variant()
+    }
 }
 
 // --- UI construction ---
@@ -582,6 +606,16 @@ fn wrap_in_backdrop(window: &ApplicationWindow, container: &GtkBox) {
     window.set_child(Some(&overlay));
 }
 
+/// The footer's hints: `first` (what a key does, or a pending confirmation),
+/// the Alt variant when `alt_variants` is on and it does something different,
+/// then Tab and Escape.
+fn footer_hints(first: &str, mode: Mode, alt_variants: bool, multi_output: bool) -> Vec<&str> {
+    let mut hints = vec![first];
+    hints.extend(mode.alt_hint(multi_output).filter(|_| alt_variants));
+    hints.extend(["Tab switch mode", "Escape close"]);
+    hints
+}
+
 fn build_hint_footer(metrics: &KeyboardMetrics, hints: &[&str]) -> GtkBox {
     let footer = GtkBox::builder()
         .orientation(Orientation::Horizontal)
@@ -740,7 +774,7 @@ fn populate_overlay(
     );
     let footer = build_hint_footer(
         &metrics,
-        &[first_hint.as_str(), "Tab switch mode", "Escape close"],
+        &footer_hints(&first_hint, mode, config.alt_variants, grid.multi_output),
     );
     if let Some(hint) = footer.first_child().filter(|_| confirming.is_some()) {
         hint.add_css_class("confirm");
@@ -812,8 +846,10 @@ fn finish(ctx: &ActionContext) {
     ctx.window.close();
 }
 
-fn dispatch_action(ch: char, ctx: &ActionContext) {
+/// Act on key `ch` in the context's mode; `variant` says whether Alt was held.
+fn dispatch_action(ch: char, ctx: &ActionContext, variant: KeyVariant) {
     let config = &ctx.session.config;
+    let follow = variant == KeyVariant::Plain;
 
     // Statically mapped key: act on the pinned workspace directly.
     if let Some(target) = config.static_workspaces.get(&ch) {
@@ -833,7 +869,7 @@ fn dispatch_action(ch: char, ctx: &ActionContext) {
             }
             (Mode::Normal, Some(id)) => focus_selected(ctx, id),
             (Mode::MoveWindow, Some(id)) => window_to_move(ctx)
-                .and_then(|window| niri::move_window_to_workspace_by_id(id, Some(window), true)),
+                .and_then(|window| niri::move_window_to_workspace_by_id(id, Some(window), follow)),
         };
         if let Err(e) = result {
             show_error(ctx, &format!("Failed: {e:#}"));
@@ -860,6 +896,14 @@ fn dispatch_action(ch: char, ctx: &ActionContext) {
                 return;
             }
             let is_uncreated = info.is_none_or(|i| i.is_uncreated);
+            // A new workspace is created on the focused output anyway.
+            if variant == KeyVariant::Alt && !is_uncreated {
+                if let Err(e) = niri::move_workspace_to_focused_output(&config.workspace_prefix, ch)
+                {
+                    show_error(ctx, &format!("Failed: {e:#}"));
+                    return;
+                }
+            }
             if let Some(template) = config.template_for(ch).filter(|_| is_uncreated) {
                 select_template_option(&TemplateOption::from(template), ch, ctx);
                 return;
@@ -896,7 +940,7 @@ fn dispatch_action(ch: char, ctx: &ActionContext) {
             })
         }
         Mode::MoveWindow => window_to_move(ctx).and_then(|window| {
-            crate::actions::move_window(config, ch, &ws_name, Some(window), true)
+            crate::actions::move_window(config, ch, &ws_name, Some(window), follow)
         }),
     };
 
@@ -935,9 +979,12 @@ fn attach_key_handler(ctx: &ActionContext, close_keybinds: &[crate::config::Keyb
         }
 
         // Workspace key: action depends on mode
-        if let Some((ch, _)) = keys::workspace_key_press(&event).filter(|(_, m)| m.is_empty()) {
+        let alt = key_ctx.alt_variants();
+        if let Some((ch, variant)) = keys::workspace_key_press(&event)
+            .and_then(|(ch, mods)| Some((ch, keys::key_variant(mods, alt)?)))
+        {
             key_ctx.session.held_key.hold(keycode);
-            dispatch_action(ch, &key_ctx);
+            dispatch_action(ch, &key_ctx, variant);
             return Propagation::Stop;
         }
 
@@ -1190,6 +1237,37 @@ mod tests {
         assert!(Mode::Delete.hint().contains("closes its windows"));
         let [switch, delete, move_window] = Mode::all().map(Mode::hint);
         assert!(switch != delete && delete != move_window && move_window != switch);
+    }
+
+    // --- Alt variants ---
+
+    #[test]
+    fn footer_hints_switch_single_output_unchanged() {
+        // The theme gallery and README screenshot render this footer.
+        let first = Mode::Normal.hint();
+        let expected = [first, "Tab switch mode", "Escape close"];
+        assert_eq!(footer_hints(first, Mode::Normal, true, false), expected);
+        assert_eq!(footer_hints(first, Mode::Normal, false, true), expected);
+    }
+
+    #[test]
+    fn footer_hints_switch_multi_output_adds_alt() {
+        let hints = footer_hints("x", Mode::Normal, true, true);
+        assert_eq!(hints[..2], ["x", "Alt+key bring here"]);
+    }
+
+    #[test]
+    fn footer_hints_move_window_adds_no_follow() {
+        let hints = footer_hints("x", Mode::MoveWindow, true, false);
+        assert_eq!(hints[..2], ["x", "Alt+key don't follow"]);
+        assert_eq!(footer_hints("x", Mode::MoveWindow, false, true).len(), 3);
+    }
+
+    #[test]
+    fn delete_has_no_alt_variant() {
+        assert!(!Mode::Delete.has_alt_variant());
+        assert!(Mode::Normal.has_alt_variant() && Mode::MoveWindow.has_alt_variant());
+        assert_eq!(footer_hints("x", Mode::Delete, true, true).len(), 3);
     }
 
     #[test]
