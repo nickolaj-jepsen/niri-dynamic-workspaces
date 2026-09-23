@@ -181,6 +181,16 @@ test_overlay_hover_then_delete_returns_to_origin() {
     until_true no_ws dyn-d && "$h" closed && focused_is dyn-a
 }
 
+test_overlay_move_follows_captured_window() {
+    "$h" app switch b && spawn_window on-b || return 1
+    "$h" app switch a && spawn_window on-a || return 1
+    # Focus moves under the open overlay; the window it opened with still moves.
+    "$h" overlay move-window && "$h" run niri msg action focus-workspace dyn-b || return 1
+    until_true focused_is dyn-b || return 1
+    "$h" key c && "$h" closed || return 1
+    until_true window_on dyn-c on-a && window_on dyn-b on-b
+}
+
 test_overlay_key_press_switches() {
     "$h" overlay switch && "$h" type c || return 1
     until_true has_ws dyn-c && "$h" closed || return 1
@@ -388,6 +398,7 @@ tests=(
     overlay_hover_click_commits
     overlay_hover_then_move_moves_origin_window
     overlay_hover_then_delete_returns_to_origin
+    overlay_move_follows_captured_window
     overlay_key_press_switches
     overlay_key_azerty_digit
     overlay_key_azerty_shift_digit

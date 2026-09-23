@@ -340,7 +340,7 @@ Variable and class names are covered by semver. The widget tree between them is 
 
 - **`niri-dynamic-workspaces`** or **`niri-dynamic-workspaces switch`** — opens the switcher overlay (press key to switch/create)
 - **`niri-dynamic-workspaces delete`** — opens the delete overlay (press key to delete)
-- **`niri-dynamic-workspaces move-window`** — opens the move-window overlay (press key to move the focused window)
+- **`niri-dynamic-workspaces move-window`** — opens the move-window overlay (press a key to move the window that was focused when it opened)
 - **`niri-dynamic-workspaces daemon`** — starts as a background daemon (no overlay shown)
 - **`niri-dynamic-workspaces check`** — lists config problems and exits non-zero if there are any; needs no display
 

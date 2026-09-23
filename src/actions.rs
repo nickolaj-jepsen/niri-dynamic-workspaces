@@ -66,11 +66,16 @@ pub fn delete_workspace(config: &ResolvedConfig, ch: char, ws_name: &str) -> any
     Ok(())
 }
 
-/// Move the focused window to a workspace, creating it if needed.
+/// Move a window (`None`: the focused one) to a workspace, creating it if needed.
 ///
-/// Errors, creating nothing, when no window is focused.
-pub fn move_window(config: &ResolvedConfig, ch: char, ws_name: &str) -> anyhow::Result<()> {
-    niri::move_window_to_workspace(&config.workspace_prefix, ch, ws_name)
+/// Errors, creating nothing, when `window_id` is `None` and no window is focused.
+pub fn move_window(
+    config: &ResolvedConfig,
+    ch: char,
+    ws_name: &str,
+    window_id: Option<u64>,
+) -> anyhow::Result<()> {
+    niri::move_window_to_workspace(&config.workspace_prefix, ch, ws_name, window_id)
 }
 
 /// Run column reordering on a blocking thread, holding the application alive

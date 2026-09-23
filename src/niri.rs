@@ -412,21 +412,27 @@ fn reorder_workspace_columns_inner(request: &ReorderRequest) -> anyhow::Result<(
     Ok(())
 }
 
-/// Move the focused window to an existing workspace by id.
-pub fn move_window_to_workspace_by_id(id: u64) -> anyhow::Result<()> {
+/// Move a window to an existing workspace by id; `None` moves the focused window.
+pub fn move_window_to_workspace_by_id(id: u64, window_id: Option<u64>) -> anyhow::Result<()> {
     send_action(Action::MoveWindowToWorkspace {
-        window_id: None,
+        window_id,
         reference: WorkspaceReferenceArg::Id(id),
         focus: true,
     })
 }
 
-/// Move the focused window to a workspace, creating it if it doesn't exist.
+/// Move a window to a workspace, creating it if it doesn't exist; `None`
+/// moves the focused window.
 ///
 /// # Errors
-/// When no window is focused; nothing is created then.
-pub fn move_window_to_workspace(prefix: &str, ch: char, full_name: &str) -> anyhow::Result<()> {
-    move_window_impl(&mut SocketClient, prefix, ch, full_name)
+/// When `window_id` is `None` and no window is focused; nothing is created then.
+pub fn move_window_to_workspace(
+    prefix: &str,
+    ch: char,
+    full_name: &str,
+    window_id: Option<u64>,
+) -> anyhow::Result<()> {
+    move_window_impl(&mut SocketClient, prefix, ch, full_name, window_id)
 }
 
 fn move_window_impl(
@@ -434,10 +440,14 @@ fn move_window_impl(
     prefix: &str,
     ch: char,
     full_name: &str,
+    window_id: Option<u64>,
 ) -> anyhow::Result<()> {
     let workspaces = list_workspaces_with(client)?;
-    // Before naming: niri takes a windowless move as a no-op, leaving an empty named workspace.
-    let window_id = focused_window_id(&workspaces)?;
+    let window_id = match window_id {
+        Some(id) => id,
+        // Before naming: niri takes a windowless move as a no-op, leaving an empty named workspace.
+        None => focused_window_id(&workspaces)?,
+    };
 
     let reference = if let Some(existing) = find_workspace_name(&workspaces, prefix, ch) {
         WorkspaceReferenceArg::Name(existing)
@@ -941,7 +951,7 @@ mod tests {
             Response::Handled,
         ]);
 
-        move_window_impl(&mut client, "dyn-", 'a', "dyn-a").unwrap();
+        move_window_impl(&mut client, "dyn-", 'a', "dyn-a", None).unwrap();
 
         assert_eq!(client.sent.len(), 2);
         assert!(matches!(
@@ -962,7 +972,7 @@ mod tests {
             Response::Handled,
         ]);
 
-        move_window_impl(&mut client, "dyn-", 'a', "dyn-a").unwrap();
+        move_window_impl(&mut client, "dyn-", 'a', "dyn-a", None).unwrap();
 
         assert_eq!(client.sent.len(), 3);
         assert!(matches!(
@@ -994,10 +1004,46 @@ mod tests {
         workspaces[0].active_window_id = None;
         let mut client = MockClient::new(vec![Response::Workspaces(workspaces)]);
 
-        let err = move_window_impl(&mut client, "dyn-", 'x', "dyn-x").unwrap_err();
+        let err = move_window_impl(&mut client, "dyn-", 'x', "dyn-x", None).unwrap_err();
 
         assert!(err.to_string().contains("no focused window"), "{err}");
         assert_eq!(client.sent.len(), 1);
+    }
+
+    #[test]
+    fn move_window_moves_given_window() {
+        let mut client = MockClient::new(vec![
+            Response::Workspaces(workspaces_with_trailing_empty()),
+            Response::Handled,
+            Response::Handled,
+        ]);
+
+        move_window_impl(&mut client, "dyn-", 'a', "dyn-a", Some(7)).unwrap();
+
+        assert_eq!(client.sent.len(), 3);
+        assert!(matches!(
+            &client.sent[2],
+            Request::Action(Action::MoveWindowToWorkspace {
+                window_id: Some(7),
+                reference: WorkspaceReferenceArg::Id(2),
+                focus: true,
+            })
+        ));
+    }
+
+    #[test]
+    fn move_window_given_window_needs_no_focused_one() {
+        let mut workspaces = workspaces_with_trailing_empty();
+        workspaces[0].active_window_id = None;
+        let mut client = MockClient::new(vec![
+            Response::Workspaces(workspaces),
+            Response::Handled,
+            Response::Handled,
+        ]);
+
+        move_window_impl(&mut client, "dyn-", 'a', "dyn-a", Some(7)).unwrap();
+
+        assert_eq!(client.sent.len(), 3);
     }
 
     #[test]
