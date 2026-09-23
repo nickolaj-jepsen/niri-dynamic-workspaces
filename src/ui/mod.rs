@@ -26,7 +26,7 @@ use crate::niri;
 
 use cards::{build_keyboard, build_static_workspace_row, DynWorkspaceInfo, GridModel};
 use metrics::{apply_scaled_css, find_monitor_for_output, KeyboardMetrics};
-use picker::show_template_picker;
+use picker::{select_template_option, show_template_picker, TemplateOption};
 pub use theme::install_base as install_base_styles;
 
 /// Extract the output name of the focused workspace from a pre-fetched list.
@@ -860,6 +860,10 @@ fn dispatch_action(ch: char, ctx: &ActionContext) {
                 return;
             }
             let is_uncreated = info.is_none_or(|i| i.is_uncreated);
+            if let Some(template) = config.template_for(ch).filter(|_| is_uncreated) {
+                select_template_option(&TemplateOption::from(template), ch, ctx);
+                return;
+            }
             if is_uncreated && config.should_show_templates(ch) {
                 show_template_picker(ch, ctx);
                 return;

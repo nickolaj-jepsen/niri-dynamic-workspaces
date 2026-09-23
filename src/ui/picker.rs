@@ -7,7 +7,7 @@ use gtk4::prelude::*;
 use gtk4::{Align, Box as GtkBox, GestureClick, Label, Orientation, PolicyType, ScrolledWindow};
 
 use crate::actions::HookInfo;
-use crate::config::{ResolvedConfig, TemplateVariable};
+use crate::config::{ResolvedConfig, Template, TemplateVariable};
 
 use super::keys;
 use super::metrics::{apply_scaled_css, KeyboardMetrics};
@@ -31,6 +31,19 @@ pub(super) struct TemplateOption {
     pub(super) title: Option<String>,
 }
 
+impl From<&Template> for TemplateOption {
+    fn from(tmpl: &Template) -> Self {
+        Self {
+            key: tmpl.key,
+            name: tmpl.name.clone(),
+            template_name: Some(tmpl.name.clone()),
+            programs: tmpl.programs.clone(),
+            variables: tmpl.variables.clone(),
+            title: tmpl.title.clone(),
+        }
+    }
+}
+
 fn build_template_options(config: &ResolvedConfig) -> Vec<TemplateOption> {
     let mut options = Vec::with_capacity(config.templates.len() + 1);
 
@@ -43,18 +56,7 @@ fn build_template_options(config: &ResolvedConfig) -> Vec<TemplateOption> {
         variables: Vec::new(),
         title: None,
     });
-
-    for tmpl in &config.templates {
-        options.push(TemplateOption {
-            key: tmpl.key,
-            name: tmpl.name.clone(),
-            template_name: Some(tmpl.name.clone()),
-            programs: tmpl.programs.clone(),
-            variables: tmpl.variables.clone(),
-            title: tmpl.title.clone(),
-        });
-    }
-
+    options.extend(config.templates.iter().map(TemplateOption::from));
     options
 }
 
@@ -123,7 +125,8 @@ fn update_selection(option_widgets: &[GtkBox], selected: usize) {
     }
 }
 
-fn select_template_option(option: &TemplateOption, ch: char, ctx: &ActionContext) {
+/// Create the workspace for `ch` from `option`, asking for its variables first if it has any.
+pub(super) fn select_template_option(option: &TemplateOption, ch: char, ctx: &ActionContext) {
     let template_name = option.template_name.clone();
     if option.variables.is_empty() {
         let hook_info = HookInfo {

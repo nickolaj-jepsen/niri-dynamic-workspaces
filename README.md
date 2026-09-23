@@ -120,6 +120,8 @@ close = ["Escape", "Ctrl+c", "Ctrl+w", "Ctrl+q"]  # keys to dismiss the overlay
 [workspace.a]                          # key: a-z or 0-9
 name = "Browser"                       # optional display name shown on the key
 programs = ["firefox", "slack"]        # programs launched on create (replaces defaults)
+# template = "dev"                     # or create it from a template, skipping
+#                                      # the picker (see Templates); replaces programs
 # Configured workspaces that don't exist yet appear as muted keys.
 
 [workspace.b]
@@ -155,7 +157,7 @@ their key instead of in the row above the keyboard.
 
 - Switch and move-window act on the existing workspace directly; nothing is created
 - Delete mode is disabled for pinned keys (remove the workspace from your niri config instead)
-- `programs` has no effect on a pinned key and produces a warning
+- `programs` and `template` have no effect on a pinned key and produce a warning
 - Empty pinned workspaces appear dimmed in switch mode (the key still works)
 - Urgent windows highlight the key, like any other workspace card
 - If the named workspace doesn't exist, the key appears disabled and pressing it shows an error
@@ -197,6 +199,9 @@ depth = 1                        # scan depth (default 1)
 
 [template.browser]
 programs = ["firefox", "slack"]
+
+[workspace.w]
+template = "browser"             # key w always creates from browser
 ```
 
 - Each template needs a `programs` list (templates with empty programs are skipped)
@@ -205,6 +210,7 @@ programs = ["firefox", "slack"]
 - The picker lists templates, and the input form lists variables, in the order they are declared; auto-assigned keys follow the same order. Home Manager writes the file in alphabetical order, so set `key` and `title` explicitly there
 - The picker always includes an "Empty" option that uses `default_programs`
 - Workspaces with per-key `[workspace.KEY].programs` skip the picker and create directly
+- `[workspace.KEY].template = "NAME"` binds a template to a key, which then skips the picker: a template without variables creates at once, and one with variables opens its form, where Escape returns to the keyboard. The template replaces the key's `programs` (with a warning); an unknown template is ignored with a warning
 - Templates can define **variables** with `{{name}}` placeholders in program strings
 - Placeholders are filled in after a program is split into arguments, so a value never breaks out of its argument: `"code {{path}}"` and `"kitty --title 'ws: {{path}}'"` both work with paths containing spaces
 - `{{name|basename}}` inserts only the last component of a path (`/home/user/dev/myproject` → `myproject`). `basename` is the only filter; an unknown one produces a config warning
@@ -434,9 +440,10 @@ A direct `switch` never shows the template picker. `--template NAME` creates
 the workspace from a template, and every variable it declares must be given
 with `--var NAME=VALUE`; a `dir` variable's value may start with `~/`. The title
 comes from the template (see [Templates](#templates)) unless `--title` sets one,
-also without a template; `--title ""` leaves the workspace untitled. The flags
-only apply when the workspace is created: when it exists, `switch` focuses it
-and says so.
+also without a template; `--title ""` leaves the workspace untitled. A key
+bound to a template (`[workspace.KEY].template`) uses it without `--template`,
+so its variables need `--var` too. The flags only apply when the workspace is
+created: when it exists, `switch` focuses it and says so.
 
 Errors and config warnings are printed in the invoking terminal, and a failed
 action exits non-zero, also when a daemon handles the call. A relative

@@ -271,15 +271,19 @@ fn handle_direct_action(
     let ws_name = config::workspace_name(&cfg.workspace_prefix, ch);
     match mode {
         ui::Mode::Normal => {
-            // Checked only when it matters, so a plain switch keeps its IPC sequence.
-            if create.is_set() && niri::dynamic_workspace_exists(&cfg.workspace_prefix, ch)? {
-                report(
-                    cmdline,
-                    &format!(
-                        "note: {ws_name} exists; --template, --var and --title only \
-                         apply when it is created"
-                    ),
-                );
+            // An existing workspace needs no template variables; checked only
+            // then, so a plain switch keeps its IPC sequence.
+            let from_template = create.is_set() || cfg.template_for(ch).is_some();
+            if from_template && niri::dynamic_workspace_exists(&cfg.workspace_prefix, ch)? {
+                if create.is_set() {
+                    report(
+                        cmdline,
+                        &format!(
+                            "note: {ws_name} exists; --template, --var and --title only \
+                             apply when it is created"
+                        ),
+                    );
+                }
                 return actions::switch_workspace(
                     app,
                     &cfg,

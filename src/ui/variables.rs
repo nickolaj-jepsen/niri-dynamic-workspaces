@@ -26,8 +26,9 @@ use super::metrics::{apply_scaled_css, KeyboardMetrics};
 use super::picker::{show_template_picker, TemplateOption};
 use super::{
     attach_close_on_backdrop_click, build_hint_footer, create_error_revealer,
-    format_workspace_display, matches_close_keybind, new_key_controller, remove_app_controllers,
-    scroll_to_child, show_error, switch_and_close, wrap_in_backdrop, wrap_index, ActionContext,
+    format_workspace_display, matches_close_keybind, new_key_controller, populate_overlay,
+    remove_app_controllers, scroll_to_child, show_error, switch_and_close, wrap_in_backdrop,
+    wrap_index, ActionContext, Mode,
 };
 
 /// Filter `options` by fuzzy-matching against `query`, returning indices sorted
@@ -794,13 +795,19 @@ fn attach_variable_input_key_handler(
         let Some(event) = super::keys::current_key_event(ctrl) else {
             return Propagation::Proceed;
         };
-        // Close keybinds / Escape → go back to template picker
+        // Close keybinds / Escape → back to the view that opened the form
         if matches_close_keybind(&event, &close_keybinds) {
             key_ctx.session.held_key.hold(keycode);
             cancel.store(true, Ordering::Relaxed);
             let ctx_clone = key_ctx.clone();
+            // A key with its own template opens the form straight from the keyboard.
+            let from_keyboard = key_ctx.session.config.template_for(ch).is_some();
             glib::idle_add_local_once(move || {
-                show_template_picker(ch, &ctx_clone);
+                if from_keyboard {
+                    populate_overlay(&ctx_clone.window, &ctx_clone.session, Mode::Normal, None);
+                } else {
+                    show_template_picker(ch, &ctx_clone);
+                }
             });
             return Propagation::Stop;
         }

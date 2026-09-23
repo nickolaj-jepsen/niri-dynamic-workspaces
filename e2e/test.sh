@@ -516,6 +516,56 @@ EOF
     [[ $status == 1 && $err == *"pinned to static workspace 'mail'"* ]]
 }
 
+# add_bound_templates: key n creates from notes (no variables), key g from gamma (one variable, path).
+add_bound_templates() {
+    add_config <<'EOF'
+[template.notes]
+programs = ["true"]
+title = "Notes"
+
+[template.gamma]
+programs = ["true {{path}}"]
+
+[template.gamma.variables.path]
+name = "Path"
+
+[workspace.n]
+template = "notes"
+
+[workspace.g]
+template = "gamma"
+EOF
+}
+
+test_cli_switch_bound_template() {
+    local err status
+    add_bound_templates && "$h" app switch n || return 1
+    until_true has_ws "dyn-n Notes" || return 1
+    err=$("$h" app switch g 2>&1 >/dev/null)
+    status=$?
+    [[ $status == 1 && $err == *"template 'gamma' needs --var for: path"* ]] && no_ws dyn-g || return 1
+    "$h" app switch g --var path=proj && until_true has_ws "dyn-g proj" || return 1
+    # An existing workspace needs no variables.
+    "$h" app switch n && until_true focused_is "dyn-n Notes" && "$h" app switch g
+}
+
+test_overlay_bound_template_skips_picker() {
+    add_bound_templates && "$h" overlay switch && "$h" key n || return 1
+    until_true has_ws "dyn-n Notes" && "$h" closed
+}
+
+# Escape in a bound key's form goes back to the keyboard; the picker would not take a.
+test_overlay_bound_template_form() {
+    add_bound_templates && "$h" app switch a && "$h" app switch b || return 1
+    "$h" overlay switch && "$h" type g && "$h" type -k Escape || return 1
+    # GTK keeps sending keys to the removed entry until the rebuilt grid's first frame.
+    sleep 0.5
+    "$h" type a || return 1
+    until_true focused_is dyn-a && "$h" closed || return 1
+    "$h" overlay switch && "$h" type g && "$h" type proj && "$h" type -k Return || return 1
+    until_true has_ws "dyn-g proj" && "$h" closed
+}
+
 test_broken_config_still_opens() {
     local log
     printf '[general\n' | "$h" config && "$h" overlay switch || return 1
@@ -685,7 +735,10 @@ tests=(
     rename_sets_and_clears_title
     cli_switch_template_with_vars
     cli_switch_title
+    cli_switch_bound_template
     overlay_card_click_switches
+    overlay_bound_template_skips_picker
+    overlay_bound_template_form
     overlay_move_without_window_stays_open
     overlay_static_card_moves_to_unnamed
     overlay_static_card_switches_to_unnamed

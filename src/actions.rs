@@ -9,7 +9,7 @@ use anyhow::Context as _;
 use gtk4::gio;
 use gtk4::prelude::*;
 
-use crate::config::{self, ResolvedConfig, Select, VariableType};
+use crate::config::{self, ResolvedConfig, Select, Template, VariableType};
 use crate::niri;
 
 /// Template context passed to on-create hooks.
@@ -27,9 +27,9 @@ pub struct CreateRequest {
     pub hook_info: HookInfo,
 }
 
-/// Resolve how the CLI creates the workspace for `ch`: from `template`
-/// filled with `vars` (`NAME`, `VALUE` pairs, the last one winning), or
-/// from the key's own programs.
+/// Resolve how the CLI creates the workspace for `ch`: from `template`, or
+/// else the key's own template, filled with `vars` (`NAME`, `VALUE` pairs,
+/// the last one winning); without either, from the key's programs.
 ///
 /// `title` replaces the template's title, and a blank one leaves the
 /// workspace untitled.
@@ -45,7 +45,11 @@ pub fn resolve_create_request(
     title: Option<&str>,
 ) -> anyhow::Result<CreateRequest> {
     let title = title.map(str::trim);
-    let Some(name) = template else {
+    let template = match template {
+        Some(name) => Some(find_template(config, name)?),
+        None => config.template_for(ch),
+    };
+    let Some(template) = template else {
         anyhow::ensure!(vars.is_empty(), "--var needs a template");
         return Ok(CreateRequest {
             ws_name: config::workspace_name_with_title(&config.workspace_prefix, ch, title),
@@ -53,13 +57,7 @@ pub fn resolve_create_request(
             hook_info: HookInfo::default(),
         });
     };
-    let Some(template) = config.templates.iter().find(|t| t.name == name) else {
-        let known: Vec<&str> = config.templates.iter().map(|t| t.name.as_str()).collect();
-        if known.is_empty() {
-            anyhow::bail!("unknown template '{name}': no templates are configured");
-        }
-        anyhow::bail!("unknown template '{name}' (known: {})", known.join(", "));
-    };
+    let name = &template.name;
 
     let declared: Vec<&str> = template.variables.iter().map(|v| v.name.as_str()).collect();
     let mut values: HashMap<String, String> = HashMap::new();
@@ -105,6 +103,18 @@ pub fn resolve_create_request(
             variables: values,
         },
     })
+}
+
+/// The template named `name`; the error lists the configured ones.
+fn find_template<'a>(config: &'a ResolvedConfig, name: &str) -> anyhow::Result<&'a Template> {
+    if let Some(template) = config.templates.iter().find(|t| t.name == name) {
+        return Ok(template);
+    }
+    let known: Vec<&str> = config.templates.iter().map(|t| t.name.as_str()).collect();
+    if known.is_empty() {
+        anyhow::bail!("unknown template '{name}': no templates are configured");
+    }
+    anyhow::bail!("unknown template '{name}' (known: {})", known.join(", "))
 }
 
 /// Switch to a workspace (creating it if needed), spawn its programs, and run
@@ -233,10 +243,17 @@ mod tests {
     use super::*;
 
     /// Templates for [`resolve_create_request`]: `dev` with a dir variable and
-    /// a title, `note` with one text variable, `beta` with none.
+    /// a title, `note` with one text variable, `beta` with none. Key x is
+    /// bound to beta and y to note.
     const TEMPLATES: &str = r#"
 [workspace.a]
 programs = ["firefox"]
+
+[workspace.x]
+template = "beta"
+
+[workspace.y]
+template = "note"
 
 [template.dev]
 programs = ["code {{project}}", "kitty {{branch}}"]
@@ -384,6 +401,36 @@ title = "BETA"
             error(request('a', None, &[("topic", "x")], None)),
             "--var needs a template"
         );
+    }
+
+    #[test]
+    fn create_request_uses_bound_template() {
+        let req = request('x', None, &[], None).unwrap();
+        assert_eq!(req.ws_name, "dyn-x BETA");
+        assert_eq!(req.programs, ["true"]);
+        assert_eq!(req.hook_info.template_name.as_deref(), Some("beta"));
+    }
+
+    #[test]
+    fn create_request_explicit_template_beats_binding() {
+        let req = request('x', Some("note"), &[("topic", "groceries")], None).unwrap();
+        assert_eq!(req.ws_name, "dyn-x groceries");
+        assert_eq!(req.hook_info.template_name.as_deref(), Some("note"));
+    }
+
+    #[test]
+    fn create_request_bound_template_with_variables_needs_vars() {
+        assert_eq!(
+            error(request('y', None, &[], None)),
+            "template 'note' needs --var for: topic"
+        );
+    }
+
+    #[test]
+    fn create_request_bound_template_accepts_vars_without_flag() {
+        let req = request('y', None, &[("topic", "groceries")], Some("Shop")).unwrap();
+        assert_eq!(req.ws_name, "dyn-y Shop");
+        assert_eq!(req.hook_info.variables["topic"], "groceries");
     }
 
     #[test]
