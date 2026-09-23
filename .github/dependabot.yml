@@ -15,7 +15,7 @@ updates:
     groups:
       # These only compile when bumped together.
       gtk-rs:
-        patterns: [gtk4, gdk4, glib, gtk4-layer-shell]
+        patterns: [gtk4, gdk4, gio, glib, gtk4-layer-shell]
     ignore:
       # Pinned to the IPC protocol of the niri in flake.lock, and bumped with it.
       - dependency-name: niri-ipc

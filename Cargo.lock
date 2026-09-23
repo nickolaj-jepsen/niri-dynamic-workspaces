@@ -696,6 +696,7 @@ dependencies = [
  "clap",
  "dirs",
  "gdk4",
+ "gio",
  "glib",
  "gtk4",
  "gtk4-layer-shell",

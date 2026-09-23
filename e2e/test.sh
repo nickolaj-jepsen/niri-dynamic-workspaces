@@ -98,6 +98,20 @@ test_overlay_escape_closes() {
     "$h" closed && no_ws dyn-c
 }
 
+test_invalid_key_fails_in_caller() {
+    local err status
+    err=$("$h" app switch Q 2>&1 >/dev/null)
+    status=$?
+    [[ $status == 2 && $err == *"invalid value 'Q'"* ]]
+}
+
+test_missing_workspace_reports_to_caller() {
+    local err status
+    err=$("$h" app delete z 2>&1 >/dev/null)
+    status=$?
+    [[ $status == 1 && $err == *dyn-z* ]]
+}
+
 test_broken_config_still_opens() {
     local log
     printf '[general\n' | "$h" config && "$h" overlay switch || return 1
@@ -122,6 +136,21 @@ test_daemon_serves_invocations() {
     until_true has_ws dyn-c && "$h" closed || return 1
     # A repeat in the same mode closes the overlay, and the hold keeps the daemon up after it.
     "$h" overlay switch && "$h" app switch && "$h" closed && "$h" serving
+}
+
+test_daemon_forwards_errors_to_caller() {
+    local err status
+    general layout '"workman"' && "$h" daemon || return 1
+    # Both the error and the config warning come from the daemon.
+    err=$("$h" app delete z 2>&1 >/dev/null)
+    status=$?
+    [[ $status == 1 && $err == *dyn-z* && $err == *"config warning:"* ]] || return 1
+    err=$("$h" app switch a 2>&1 >/dev/null)
+    status=$?
+    [[ $status == 0 && $err == *"config warning:"* ]] || return 1
+    err=$("$h" app switch Q 2>&1 >/dev/null)
+    status=$?
+    [[ $status == 2 && $err == *"invalid value 'Q'"* ]]
 }
 
 test_daemon_deletes_empty_workspaces() {
@@ -160,12 +189,15 @@ tests=(
     switch_creates_workspace
     delete_removes_workspace
     move_window_moves_it
+    invalid_key_fails_in_caller
+    missing_workspace_reports_to_caller
     overlay_card_click_switches
     overlay_key_press_switches
     overlay_escape_closes
     overlay_delete_mode
     broken_config_still_opens
     daemon_serves_invocations
+    daemon_forwards_errors_to_caller
     daemon_deletes_empty_workspaces
     daemon_reloads_config_on_content_change
     daemon_frees_closed_overlays

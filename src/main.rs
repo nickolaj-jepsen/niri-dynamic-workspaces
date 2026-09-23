@@ -6,12 +6,13 @@ mod test_helpers;
 mod ui;
 
 use std::cell::RefCell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicI32, Ordering};
 
 use clap::{Parser, Subcommand};
+use gio::{ApplicationCommandLine, ApplicationFlags, ApplicationHoldGuard};
 use gtk4::gdk;
-use gtk4::gio::{ApplicationFlags, ApplicationHoldGuard};
 use gtk4::prelude::*;
 
 /// D-Bus name owned by the running instance.
@@ -54,56 +55,89 @@ enum Command {
     /// Switch to or create a workspace [default]
     Switch {
         /// Workspace key (a-z, 0-9) — act directly without overlay
-        key: Option<String>,
+        #[arg(value_parser = parse_key_arg)]
+        key: Option<char>,
     },
     /// Delete a workspace
     Delete {
         /// Workspace key (a-z, 0-9) — act directly without overlay
-        key: Option<String>,
+        #[arg(value_parser = parse_key_arg)]
+        key: Option<char>,
     },
     /// Move the focused window to a workspace
     MoveWindow {
         /// Workspace key (a-z, 0-9) — act directly without overlay
-        key: Option<String>,
+        #[arg(value_parser = parse_key_arg)]
+        key: Option<char>,
     },
     /// Start as a background daemon (for spawn-at-startup)
     Daemon,
 }
 
-fn handle_direct_action(app: &gtk4::Application, cli: &Cli, mode: ui::Mode, key: &str) -> i32 {
-    let Some(ch) = config::parse_workspace_char(key) else {
-        eprintln!("error: invalid workspace key '{key}' (must be a-z or 0-9)");
-        return 1;
-    };
+/// Parse a workspace key argument, so a bad key fails in the caller's own pre-parse.
+fn parse_key_arg(s: &str) -> Result<char, String> {
+    config::parse_workspace_char(s).ok_or_else(|| "must be a single key, a-z or 0-9".to_string())
+}
 
+/// Resolve a relative `path` against `cwd`, the invoking process's directory.
+fn absolutize(path: PathBuf, cwd: Option<&Path>) -> PathBuf {
+    match cwd {
+        Some(cwd) if path.is_relative() => cwd.join(path),
+        _ => path,
+    }
+}
+
+/// Print a line on the invoking process's stderr, also when a daemon handles the call.
+fn report(cmdline: &ApplicationCommandLine, msg: &str) {
+    cmdline.printerr_literal(&format!("{msg}\n"));
+}
+
+/// Exit status for a local invocation that failed after its handler returned.
+static LATE_EXIT_STATUS: AtomicI32 = AtomicI32::new(0);
+
+/// Report a failure from an async completion, after the command-line handler returned.
+///
+/// The completion must hold a clone of `cmdline`: a forwarded caller waits
+/// for its last reference to drop, so it still gets the message and status.
+/// GIO reads a local invocation's status as soon as the handler returns, so
+/// `main` exits with it instead.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "for async actions; none report failures yet")
+)]
+fn fail_later(cmdline: &ApplicationCommandLine, msg: &str) {
+    report(cmdline, msg);
+    cmdline.set_exit_status(1);
+    if !cmdline.is_remote() {
+        LATE_EXIT_STATUS.store(1, Ordering::Relaxed);
+    }
+}
+
+fn handle_direct_action(
+    app: &gtk4::Application,
+    cmdline: &ApplicationCommandLine,
+    cli: &Cli,
+    mode: ui::Mode,
+    ch: char,
+) -> anyhow::Result<()> {
     let cfg = config::load_config(cli.config.as_deref());
     for d in &cfg.diagnostics {
-        eprintln!("{d}");
+        report(cmdline, &d.to_string());
     }
 
     // Statically mapped key: act on the pinned workspace directly.
     if let Some(target) = cfg.static_workspaces.get(&ch) {
-        let result = match mode {
+        return match mode {
             ui::Mode::Normal => niri::focus_workspace_by_name(target),
             ui::Mode::MoveWindow => niri::move_window_to_workspace_by_name(target),
-            ui::Mode::Delete => {
-                eprintln!(
-                    "error: key '{ch}' is pinned to static workspace '{target}', \
-                     which cannot be deleted"
-                );
-                return 1;
-            }
+            ui::Mode::Delete => anyhow::bail!(
+                "key '{ch}' is pinned to static workspace '{target}', which cannot be deleted"
+            ),
         };
-        if let Err(e) = result {
-            eprintln!("error: {e:#}");
-            return 1;
-        }
-        return 0;
     }
 
     let ws_name = config::workspace_name(&cfg.workspace_prefix, ch);
-
-    let result = match mode {
+    match mode {
         ui::Mode::Normal => actions::switch_workspace(
             app,
             &cfg,
@@ -114,37 +148,33 @@ fn handle_direct_action(app: &gtk4::Application, cli: &Cli, mode: ui::Mode, key:
         ),
         ui::Mode::Delete => actions::delete_workspace(&cfg, ch, &ws_name),
         ui::Mode::MoveWindow => actions::move_window(&cfg, ch, &ws_name),
-    };
-
-    if let Err(e) = result {
-        eprintln!("error: {e:#}");
-        return 1;
     }
-
-    0
 }
 
-fn handle_overlay(app: &gtk4::Application, cli: &Cli, mode: ui::Mode) -> i32 {
-    let cfg = Rc::new(config::load_config(cli.config.as_deref()));
-    for d in &cfg.diagnostics {
-        eprintln!("{d}");
-    }
-
+fn handle_overlay(
+    app: &gtk4::Application,
+    cmdline: &ApplicationCommandLine,
+    cli: &Cli,
+    mode: ui::Mode,
+) {
     if let Some(window) = app.active_window() {
         let same_mode = ui::Mode::from_window(&window) == Some(mode);
         window.close();
         if same_mode {
-            return 0;
+            return;
         }
     }
 
+    let cfg = Rc::new(config::load_config(cli.config.as_deref()));
+    for d in &cfg.diagnostics {
+        report(cmdline, &d.to_string());
+    }
     ui::build_ui(app, &cfg, mode);
-    0
 }
 
-fn main() {
-    // Pre-parse so --help / --version print to the caller's stdout and exit
-    // before GTK starts (important when a daemon is already running).
+fn main() -> glib::ExitCode {
+    // Pre-parse so --help / --version and bad arguments are handled in the
+    // caller before GTK starts (important when a daemon is already running).
     if let Err(e) = Cli::try_parse() {
         e.exit();
     }
@@ -160,15 +190,23 @@ fn main() {
 
     let hold_guard: RefCell<Option<ApplicationHoldGuard>> = RefCell::default();
 
+    // The return value is the caller's exit status, forwarded ones included.
     app.connect_command_line(move |app, cmdline| {
-        let args: Vec<std::ffi::OsString> = cmdline.arguments();
-        let cli = match Cli::try_parse_from(args) {
+        let mut cli = match Cli::try_parse_from(cmdline.arguments()) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("{e}");
-                return 1;
+                let text = e.render().to_string();
+                if e.use_stderr() {
+                    cmdline.printerr_literal(&text);
+                } else {
+                    cmdline.print_literal(&text);
+                }
+                return e.exit_code();
             }
         };
+        cli.config = cli
+            .config
+            .map(|path| absolutize(path, cmdline.cwd().as_deref()));
 
         let (mode, key) = match cli.command {
             Some(Command::Daemon) => {
@@ -187,17 +225,85 @@ fn main() {
                 return 0;
             }
             None => (ui::Mode::Normal, None),
-            Some(Command::Switch { ref key }) => (ui::Mode::Normal, key.as_deref()),
-            Some(Command::Delete { ref key }) => (ui::Mode::Delete, key.as_deref()),
-            Some(Command::MoveWindow { ref key }) => (ui::Mode::MoveWindow, key.as_deref()),
+            Some(Command::Switch { key }) => (ui::Mode::Normal, key),
+            Some(Command::Delete { key }) => (ui::Mode::Delete, key),
+            Some(Command::MoveWindow { key }) => (ui::Mode::MoveWindow, key),
         };
 
-        if let Some(key) = key {
-            return handle_direct_action(app, &cli, mode, key);
+        if let Some(ch) = key {
+            return match handle_direct_action(app, cmdline, &cli, mode, ch) {
+                Ok(()) => 0,
+                Err(e) => {
+                    report(cmdline, &format!("error: {e:#}"));
+                    1
+                }
+            };
         }
 
-        handle_overlay(app, &cli, mode)
+        handle_overlay(app, cmdline, &cli, mode);
+        0
     });
 
-    app.run();
+    let status = app.run();
+    // See fail_later: only main sees a local invocation's late failure.
+    if status == glib::ExitCode::SUCCESS {
+        LATE_EXIT_STATUS.load(Ordering::Relaxed).into()
+    } else {
+        status
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn absolutize_relative_uses_caller_cwd() {
+        assert_eq!(
+            absolutize("cfg.toml".into(), Some(Path::new("/home/u"))),
+            PathBuf::from("/home/u/cfg.toml")
+        );
+    }
+
+    #[test]
+    fn absolutize_keeps_absolute() {
+        assert_eq!(
+            absolutize("/etc/cfg.toml".into(), Some(Path::new("/home/u"))),
+            PathBuf::from("/etc/cfg.toml")
+        );
+    }
+
+    #[test]
+    fn absolutize_without_cwd_is_unchanged() {
+        assert_eq!(
+            absolutize("cfg.toml".into(), None),
+            PathBuf::from("cfg.toml")
+        );
+    }
+
+    #[test]
+    fn cli_rejects_invalid_key() {
+        let Err(e) = Cli::try_parse_from(["ndw", "switch", "Q"]) else {
+            panic!("an uppercase key must not parse");
+        };
+        assert_eq!(e.exit_code(), 2);
+        assert!(e.to_string().contains("invalid value 'Q'"), "{e}");
+
+        let cli = Cli::try_parse_from(["ndw", "switch", "a"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Switch { key: Some('a') })
+        ));
+    }
+
+    #[test]
+    fn fail_later_records_a_local_failure() {
+        let cmdline: ApplicationCommandLine = glib::Object::builder()
+            .property("arguments", vec![b"ndw\0".to_vec()].to_variant())
+            .build();
+        assert!(!cmdline.is_remote());
+        fail_later(&cmdline, "error: late");
+        assert_eq!(cmdline.exit_status(), 1);
+        assert_eq!(LATE_EXIT_STATUS.load(Ordering::Relaxed), 1);
+    }
 }
