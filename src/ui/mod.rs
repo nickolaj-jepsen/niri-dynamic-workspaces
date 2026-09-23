@@ -11,6 +11,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use anyhow::Context as _;
 use glib::Propagation;
 use gtk4::prelude::*;
 use gtk4::{
@@ -39,6 +40,13 @@ fn focused_output_from(workspaces: &[niri_ipc::Workspace]) -> Option<String> {
 /// Id of the focused workspace in a pre-fetched list.
 fn focused_workspace_id_from(workspaces: &[niri_ipc::Workspace]) -> Option<u64> {
     workspaces.iter().find(|w| w.is_focused).map(|w| w.id)
+}
+
+/// Active window of the focused workspace in a pre-fetched list.
+///
+/// Layout-based: `Window::is_focused` is false while the overlay has keyboard focus.
+fn focused_window_from(workspaces: &[niri_ipc::Workspace]) -> Option<u64> {
+    workspaces.iter().find(|w| w.is_focused)?.active_window_id
 }
 
 fn format_workspace_display(ch: char, config: &ResolvedConfig) -> String {
@@ -180,6 +188,8 @@ struct OverlaySession {
     /// Width of the monitor the overlay currently occupies.
     monitor_width: Cell<i32>,
     preview: HoverPreview,
+    /// The window Move Window moves: focused at open, or after the last output change.
+    origin_window: Cell<Option<u64>>,
     /// Set once an action succeeded (skip the hover-preview restore on close).
     selection_made: Cell<bool>,
     /// Armed after the first real mouse movement; prevents hover-preview from
@@ -227,6 +237,7 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
         config: config.clone(),
         monitor_width: Cell::new(get_monitor_width(focused_monitor.as_ref())),
         preview: HoverPreview::new(focused_workspace_id_from(&workspaces)),
+        origin_window: Cell::new(focused_window_from(&workspaces)),
         selection_made: Cell::new(false),
         hover_armed: Cell::new(false),
         in_subview: Cell::new(false),
@@ -321,6 +332,10 @@ fn follow_compositor(
                 session
                     .preview
                     .rebase(focused_workspace_id_from(&fresh_workspaces));
+                // The grid now shows that output, so Move Window acts on its window.
+                session
+                    .origin_window
+                    .set(focused_window_from(&fresh_workspaces));
                 if let Some(monitor) = current.as_deref().and_then(find_monitor_for_output) {
                     window.set_monitor(Some(&monitor));
                     session.monitor_width.set(get_monitor_width(Some(&monitor)));
@@ -688,6 +703,14 @@ fn focus_selected(ctx: &ActionContext, id: u64) -> anyhow::Result<()> {
     niri::focus_workspace_by_id(id)
 }
 
+/// The window Move Window moves: the captured one, so later focus changes do not redirect it.
+fn window_to_move(ctx: &ActionContext) -> anyhow::Result<u64> {
+    ctx.session
+        .origin_window
+        .get()
+        .context("no focused window to move")
+}
+
 /// Close the overlay after a successful action, keeping the new focus.
 fn finish(ctx: &ActionContext) {
     ctx.session.selection_made.set(true);
@@ -714,7 +737,8 @@ fn dispatch_action(ch: char, ctx: &ActionContext) {
                 return;
             }
             (Mode::Normal, Some(id)) => focus_selected(ctx, id),
-            (Mode::MoveWindow, Some(id)) => niri::move_window_to_workspace_by_id(id),
+            (Mode::MoveWindow, Some(id)) => window_to_move(ctx)
+                .and_then(|window| niri::move_window_to_workspace_by_id(id, Some(window))),
         };
         if let Err(e) = result {
             show_error(ctx, &format!("Failed: {e:#}"));
@@ -750,7 +774,8 @@ fn dispatch_action(ch: char, ctx: &ActionContext) {
             return;
         }
         Mode::Delete => crate::actions::delete_workspace(config, ch, &ws_name),
-        Mode::MoveWindow => crate::actions::move_window(config, ch, &ws_name),
+        Mode::MoveWindow => window_to_move(ctx)
+            .and_then(|window| crate::actions::move_window(config, ch, &ws_name, Some(window))),
     };
 
     if let Err(e) = result {
@@ -912,6 +937,16 @@ mod tests {
     fn focused_workspace_id_from_returns_none_when_unfocused() {
         let workspaces = vec![test_workspace(1, Some("ws-1"), false)];
         assert_eq!(focused_workspace_id_from(&workspaces), None);
+    }
+
+    #[test]
+    fn focused_window_from_is_the_focused_workspaces_active_window() {
+        let mut focused = test_workspace(2, None, true);
+        focused.active_window_id = Some(7);
+        let mut other = test_workspace(1, Some("ws-1"), false);
+        other.active_window_id = Some(3);
+        assert_eq!(focused_window_from(&[other.clone(), focused]), Some(7));
+        assert_eq!(focused_window_from(&[other]), None);
     }
 
     // --- HoverPreview ---

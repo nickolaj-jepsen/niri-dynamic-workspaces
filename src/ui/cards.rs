@@ -9,8 +9,8 @@ use crate::niri;
 
 use super::metrics::KeyboardMetrics;
 use super::{
-    dispatch_action, display_key_char, finish, focus_selected, show_error, ActionContext, Mode,
-    OverlaySession,
+    dispatch_action, display_key_char, finish, focus_selected, show_error, window_to_move,
+    ActionContext, Mode, OverlaySession,
 };
 
 #[expect(
@@ -477,7 +477,8 @@ fn build_static_card(
         click.connect_released(move |_, _, _, _| {
             let result = match click_ctx.mode {
                 Mode::Normal => focus_selected(&click_ctx, id),
-                Mode::MoveWindow => niri::move_window_to_workspace_by_id(id),
+                Mode::MoveWindow => window_to_move(&click_ctx)
+                    .and_then(|window| niri::move_window_to_workspace_by_id(id, Some(window))),
                 Mode::Delete => return,
             };
             if let Err(e) = result {

@@ -158,9 +158,8 @@ fn handle_direct_action(
             ui::Mode::Normal => {
                 niri::workspace_id_by_name(target).and_then(niri::focus_workspace_by_id)
             }
-            ui::Mode::MoveWindow => {
-                niri::workspace_id_by_name(target).and_then(niri::move_window_to_workspace_by_id)
-            }
+            ui::Mode::MoveWindow => niri::workspace_id_by_name(target)
+                .and_then(|id| niri::move_window_to_workspace_by_id(id, None)),
             ui::Mode::Delete => anyhow::bail!(
                 "key '{ch}' is pinned to static workspace '{target}', which cannot be deleted"
             ),
@@ -178,7 +177,7 @@ fn handle_direct_action(
             &actions::HookInfo::default(),
         ),
         ui::Mode::Delete => actions::delete_workspace(&cfg, ch, &ws_name),
-        ui::Mode::MoveWindow => actions::move_window(&cfg, ch, &ws_name),
+        ui::Mode::MoveWindow => actions::move_window(&cfg, ch, &ws_name, None),
     }
 }
 
