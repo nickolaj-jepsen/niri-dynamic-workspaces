@@ -34,7 +34,7 @@ populate() {
 # check_warnings <label>: an unknown theme or broken CSS still opens the overlay, just with the wrong colours.
 check_warnings() {
     local warnings
-    warnings=$("$harness" logs 50 | grep "config warning:\|theme warning:\|Theme pars" | sort -u || true)
+    warnings=$("$harness" logs 50 | grep "config error:\|config warning:\|theme warning:\|Theme pars" | sort -u || true)
     if [[ -n $warnings ]]; then
         echo "$warnings" >&2
         echo "${0##*/}: '$1' did not load cleanly" >&2

@@ -592,6 +592,7 @@ pub(super) mod tests {
             theme: crate::config::Theme::default(),
             templates: Vec::new(),
             hooks: crate::config::HookConfig::default(),
+            diagnostics: Vec::new(),
         }
     }
 
