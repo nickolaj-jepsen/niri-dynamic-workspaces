@@ -204,6 +204,7 @@ programs = ["firefox", "slack"]
 - Each template needs a `programs` list (templates with empty programs are skipped)
 - The optional `key` field assigns a hotkey (a-z or 0-9) for quick selection in the picker; a digit can be written as a number (`key = 2`)
 - Templates without a `key` get one auto-assigned (2-9 then a-z; `1` is reserved for the "Empty" option)
+- The picker lists templates, and the input form lists variables, in the order they are declared; auto-assigned keys follow the same order. Home Manager writes the file in alphabetical order, so set `key` and `title` explicitly there
 - The picker always includes an "Empty" option that uses `default_programs`
 - Workspaces with per-key `[workspace.KEY].programs` skip the picker and create directly
 - Templates can define **variables** with `{{name}}` placeholders in program strings
@@ -219,7 +220,7 @@ programs = ["firefox", "slack"]
 - Templates without variables create immediately as before
 - The optional `title` field sets a display name on the workspace (shown on the key card):
   - Supports `{{var}}` substitution from template variables
-  - If omitted and the template has variables, the first variable's value is used automatically
+  - If omitted and the template has variables, the first declared variable's value is used automatically
   - For `dir`-type variables, the basename is extracted (e.g. `/home/user/dev/myproject` → `myproject`)
   - The full workspace name becomes `{prefix}{key} {title}` (e.g. `dyn-a myproject`)
 
