@@ -576,6 +576,10 @@ fn populate_overlay(
     mode: Mode,
     prefetched_workspaces: Option<Vec<niri_ipc::Workspace>>,
 ) {
+    // The other modes act on the origin: undo the preview before reading focus.
+    if mode != Mode::Normal {
+        end_preview(session);
+    }
     let config = &session.config;
     session.in_subview.set(false);
     window.set_widget_name(mode.widget_name());

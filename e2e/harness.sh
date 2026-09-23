@@ -207,7 +207,7 @@ usage: harness.sh <command>
   key <char>       click the card for a-z / 0-9
   hover <char>     move the pointer onto that card, which previews it
   static <i> [n]   click the i-th of n cards in the static row
-  mode <name>      click switch | delete | move
+  mode <name>      click switch | delete | move, wait for the new grid
   click <x> <y>    click anywhere
   type <args...>   press keys with wtype (c, -M ctrl -k c, ...)
   press <codes> [ms]  press evdev codes through niri's layout (46 = c, 29+46 = Ctrl+c), held ms
@@ -247,7 +247,9 @@ click)   click_at "$1" "$2" ;;
 key)     click_at $(key_position "$1") ;;
 hover)   move_to $(key_position "$1") ;;
 static)  click_at $(static_position "$1" "${2:-1}") ;;
-mode)    click_at $(mode_position "$1") ;;
+mode)    click_at $(mode_position "$1")
+         # The rebuilt grid is not yet laid out; an early click can miss.
+         sleep 0.5 ;;
 shot)    in_env grim "$out_dir/${1:-shot}.png" && echo "$out_dir/${1:-shot}.png" ;;
 state)   in_env niri msg -j workspaces ;;
 open)    overlay_open ;;
