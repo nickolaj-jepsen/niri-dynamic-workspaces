@@ -99,10 +99,6 @@ pub fn list_workspaces() -> anyhow::Result<Vec<Workspace>> {
     list_workspaces_with(&mut SocketClient)
 }
 
-fn find_workspace_by_name<'a>(workspaces: &'a [Workspace], name: &str) -> Option<&'a Workspace> {
-    workspaces.iter().find(|w| w.name.as_deref() == Some(name))
-}
-
 /// Find a workspace by prefix and key character.
 ///
 /// Matches workspaces whose name starts with `{prefix}{ch}` followed by end-of-string
@@ -136,15 +132,6 @@ pub fn list_windows() -> anyhow::Result<Vec<Window>> {
     list_windows_with(&mut SocketClient)
 }
 
-/// Focus an existing workspace or create a new one.
-///
-/// Finds existing workspaces by prefix+char (to handle titled names).
-/// When creating, uses `full_name` for the workspace name.
-/// Returns `true` if a new workspace was created, `false` if an existing one was focused.
-pub fn focus_or_create_workspace(prefix: &str, ch: char, full_name: &str) -> anyhow::Result<bool> {
-    focus_or_create_impl(&mut SocketClient, prefix, ch, full_name)
-}
-
 /// Find the trailing empty workspace on the focused output.
 ///
 /// Target it by id: focus can move between IPC calls.
@@ -176,12 +163,16 @@ fn set_workspace_name_by_id(
     )
 }
 
+/// Focus the workspace for `ch`, or create it as `full_name` when none exists.
+///
+/// Existing workspaces are found by prefix+char, so titled names match.
+/// Returns the created workspace's id, or `None` when an existing one was focused.
 fn focus_or_create_impl(
     client: &mut impl NiriClient,
     prefix: &str,
     ch: char,
     full_name: &str,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<Option<u64>> {
     let workspaces = list_workspaces_with(client)?;
 
     if let Some(existing_name) = find_workspace_name(&workspaces, prefix, ch) {
@@ -191,7 +182,7 @@ fn focus_or_create_impl(
                 reference: WorkspaceReferenceArg::Name(existing_name),
             },
         )?;
-        return Ok(false);
+        return Ok(None);
     }
 
     // Focus before naming: the cleanup daemon unsets names of empty
@@ -205,73 +196,97 @@ fn focus_or_create_impl(
     )?;
     set_workspace_name_by_id(client, target_id, full_name)?;
 
-    Ok(true)
+    Ok(Some(target_id))
 }
 
-/// Switch to a workspace (creating it if needed) and spawn programs on creation.
+/// Switch to the workspace for `ch`; when none exists, create it as
+/// `full_name` and spawn `commands` (argument vectors) there.
 ///
-/// Combines [`focus_or_create_workspace`] with [`spawn_workspace_programs`].
-/// Returns `(created, reorder_request)` where `created` indicates whether a new
-/// workspace was made, and `reorder_request` is present when multiple programs
-/// were spawned.
+/// Returns the created workspace's id (`None` when an existing one was
+/// focused) and, when two or more programs spawned, a [`ReorderRequest`] for
+/// [`reorder_workspace_columns`].
 pub fn switch_workspace(
     prefix: &str,
     ch: char,
     full_name: &str,
     commands: &[Vec<String>],
-) -> anyhow::Result<(bool, Option<ReorderRequest>)> {
-    let created = focus_or_create_workspace(prefix, ch, full_name)?;
-    if created {
-        return Ok((true, spawn_workspace_programs(full_name, commands)?));
-    }
-    Ok((false, None))
+) -> anyhow::Result<(Option<u64>, Option<ReorderRequest>)> {
+    switch_workspace_with(&mut SocketClient, prefix, ch, full_name, commands)
 }
 
-/// Spawn programs (as argument vectors) for a newly created workspace via niri IPC.
+fn switch_workspace_with(
+    client: &mut impl NiriClient,
+    prefix: &str,
+    ch: char,
+    full_name: &str,
+    commands: &[Vec<String>],
+) -> anyhow::Result<(Option<u64>, Option<ReorderRequest>)> {
+    let Some(ws_id) = focus_or_create_impl(client, prefix, ch, full_name)? else {
+        return Ok((None, None));
+    };
+    Ok((Some(ws_id), spawn_programs_with(client, ws_id, commands)?))
+}
+
+/// Spawn the non-empty `commands` in order for the new workspace `workspace_id`.
 ///
-/// If two or more programs are launched, returns a [`ReorderRequest`] that the
-/// caller should pass to [`reorder_workspace_columns`] (either synchronously
-/// or in a background thread).
-pub fn spawn_workspace_programs(
-    workspace_name: &str,
+/// Returns a [`ReorderRequest`] when two or more programs spawned.
+fn spawn_programs_with(
+    client: &mut impl NiriClient,
+    workspace_id: u64,
     commands: &[Vec<String>],
 ) -> anyhow::Result<Option<ReorderRequest>> {
     let commands: Vec<Vec<String>> = commands.iter().filter(|c| !c.is_empty()).cloned().collect();
-    let needs_reorder = commands.len() >= 2;
-    let existing_ids = if needs_reorder {
-        snapshot_workspace_window_ids(workspace_name)
-    } else {
-        HashSet::new()
-    };
-
     for command in &commands {
-        spawn_program(command).with_context(|| format!("failed to spawn '{}'", command[0]))?;
+        spawn_with(client, command).with_context(|| format!("failed to spawn '{}'", command[0]))?;
     }
-
-    if needs_reorder {
-        Ok(Some(ReorderRequest {
-            workspace_name: workspace_name.to_string(),
-            commands,
-            existing_window_ids: existing_ids,
-        }))
-    } else {
-        Ok(None)
-    }
+    Ok((commands.len() >= 2).then_some(ReorderRequest {
+        workspace_id,
+        commands,
+    }))
 }
 
-pub fn spawn_program(command: &[String]) -> anyhow::Result<()> {
-    send_action(Action::Spawn {
-        command: command.to_vec(),
-    })
+/// Have niri spawn `command`, an argument vector (no shell involved).
+///
+/// The window opens on whichever workspace is focused when it maps.
+pub(crate) fn spawn_with(client: &mut impl NiriClient, command: &[String]) -> anyhow::Result<()> {
+    send_action_with(
+        client,
+        Action::Spawn {
+            command: command.to_vec(),
+        },
+    )
 }
 
+/// Programs spawned on a new workspace, whose columns should follow `commands`.
 #[derive(Debug)]
 pub struct ReorderRequest {
-    pub workspace_name: String,
+    workspace_id: u64,
     /// Non-empty argument vectors, in the desired column order.
-    pub commands: Vec<Vec<String>>,
-    pub existing_window_ids: HashSet<u64>,
+    commands: Vec<Vec<String>>,
 }
+
+/// Poll budgets for [`reorder_workspace_columns`], counted in window listings.
+struct ReorderTiming {
+    poll_interval: Duration,
+    /// Pause after each focus or move so niri applies it before the next.
+    action_delay: Duration,
+    /// Listings spent waiting for every program's window to appear.
+    appear_polls: u32,
+    /// Listings in all, including those waiting for the windows to settle.
+    total_polls: u32,
+}
+
+/// 5 s for the windows to appear, 8 s in all.
+const REORDER_TIMING: ReorderTiming = ReorderTiming {
+    poll_interval: Duration::from_millis(200),
+    action_delay: Duration::from_millis(50),
+    appear_polls: 25,
+    total_polls: 40,
+};
+
+/// Unchanged listings in a row that count as settled: apps like VS Code
+/// remap and resize during startup.
+const STABLE_POLLS: u32 = 3;
 
 /// The executable name of a command: its first argument without any leading path.
 fn executable_name(program: &str) -> &str {
@@ -286,130 +301,112 @@ fn app_id_matches(app_id: &str, exe: &str) -> bool {
         .any(|segment| segment.eq_ignore_ascii_case(exe))
 }
 
-/// Poll for newly spawned windows on a workspace and reorder columns to match config order.
+/// Wait for the programs' windows on the new workspace, then move their
+/// columns into command order.
 ///
-/// Best-effort: logs errors to stderr since the overlay is already closed.
+/// Blocks for up to 8 s. Best-effort: logs errors to stderr since the overlay
+/// is already closed.
 pub fn reorder_workspace_columns(request: &ReorderRequest) {
-    if let Err(e) = reorder_workspace_columns_inner(request) {
+    if let Err(e) = reorder_columns_impl(&mut SocketClient, request, &REORDER_TIMING) {
         eprintln!("warning: failed to reorder columns: {e}");
     }
 }
 
-fn new_workspace_windows<'a>(
-    windows: &'a [Window],
-    ws_id: u64,
-    existing_ids: &'a HashSet<u64>,
-) -> impl Iterator<Item = &'a Window> {
+fn new_workspace_windows(windows: &[Window], ws_id: u64) -> impl Iterator<Item = &Window> {
     windows
         .iter()
         .filter(move |w| w.workspace_id == Some(ws_id))
-        .filter(move |w| !existing_ids.contains(&w.id))
 }
 
-fn reorder_workspace_columns_inner(request: &ReorderRequest) -> anyhow::Result<()> {
-    let expected_count = request.commands.len();
-
-    // Find the workspace ID
-    let workspaces = list_workspaces()?;
-    let ws_id = find_workspace_by_name(&workspaces, &request.workspace_name)
-        .map(|w| w.id)
-        .ok_or_else(|| anyhow::anyhow!("workspace '{}' not found", request.workspace_name))?;
-
-    // Poll for new windows (200ms interval, 5s timeout)
-    let poll_interval = Duration::from_millis(200);
-    let timeout = Duration::from_secs(5);
-    let start = Instant::now();
-
-    // Phase 1: wait for all expected windows to appear
-    let new_windows = loop {
-        let windows = list_windows()?;
-        let new: Vec<&Window> =
-            new_workspace_windows(&windows, ws_id, &request.existing_window_ids).collect();
-
-        if new.len() >= expected_count || start.elapsed() >= timeout {
-            let result: Vec<(u64, String)> = new
-                .iter()
-                .map(|w| (w.id, w.app_id.clone().unwrap_or_default()))
-                .collect();
-            break result;
-        }
-
-        thread::sleep(poll_interval);
-    };
-
-    // Phase 2: wait for windows to stabilize (same set of IDs for several cycles)
-    // This handles apps like VS Code that remap/resize during startup.
-    let stable_target = 3;
-    let mut stable_count = 0u32;
-    let mut last_ids: HashSet<u64> = new_windows.iter().map(|(id, _)| *id).collect();
-    let stable_timeout = Duration::from_secs(8);
-
-    while stable_count < stable_target && start.elapsed() < stable_timeout {
-        thread::sleep(poll_interval);
-        let windows = list_windows()?;
-        let current_ids: HashSet<u64> =
-            new_workspace_windows(&windows, ws_id, &request.existing_window_ids)
-                .map(|w| w.id)
-                .collect();
-
-        if current_ids == last_ids {
-            stable_count += 1;
-        } else {
-            last_ids = current_ids;
-            stable_count = 0;
-        }
-    }
-
-    // Re-fetch the final set of new windows after stabilization
-    let windows = list_windows()?;
-    let new_windows: Vec<(u64, String)> =
-        new_workspace_windows(&windows, ws_id, &request.existing_window_ids)
-            .map(|w| (w.id, w.app_id.clone().unwrap_or_default()))
-            .collect();
-
-    if new_windows.is_empty() {
+fn reorder_columns_impl(
+    client: &mut impl NiriClient,
+    request: &ReorderRequest,
+    timing: &ReorderTiming,
+) -> anyhow::Result<()> {
+    let windows = settled_windows(client, request.workspace_id, request.commands.len(), timing)?;
+    if windows.is_empty() {
         return Ok(());
     }
+    let ordered = match_windows(&request.commands, &windows);
 
-    // Match each command to a new window by executable name / app_id
-    let exe_names: Vec<&str> = request
-        .commands
-        .iter()
-        .map(|c| executable_name(&c[0]))
-        .collect();
-
-    let mut used_window_ids: HashSet<u64> = HashSet::new();
-    let mut ordered_ids: Vec<Option<u64>> = Vec::with_capacity(expected_count);
-
-    for exe in &exe_names {
-        let matched = new_windows
-            .iter()
-            .find(|(id, app_id)| !used_window_ids.contains(id) && app_id_matches(app_id, exe));
-        if let Some((id, _)) = matched {
-            used_window_ids.insert(*id);
-            ordered_ids.push(Some(*id));
-        } else {
-            ordered_ids.push(None);
-        }
-    }
-
-    let action_delay = Duration::from_millis(50);
-
-    // Reorder: focus each window and move its column to the target index (1-based)
-    for (i, window_id) in ordered_ids.iter().enumerate() {
-        let Some(id) = window_id else { continue };
-        if let Err(e) = send_action(Action::FocusWindow { id: *id }) {
+    // Focus each window and move its column to the target index (1-based).
+    for (i, window_id) in ordered.iter().enumerate() {
+        let Some(id) = *window_id else { continue };
+        if let Err(e) = send_action_with(client, Action::FocusWindow { id }) {
             eprintln!("warning: failed to focus window {id}: {e}");
             continue;
         }
-        thread::sleep(action_delay);
-        if let Err(e) = send_action(Action::MoveColumnToIndex { index: i + 1 }) {
+        thread::sleep(timing.action_delay);
+        if let Err(e) = send_action_with(client, Action::MoveColumnToIndex { index: i + 1 }) {
             eprintln!("warning: failed to move column to index {}: {e}", i + 1);
         }
-        thread::sleep(action_delay);
+        thread::sleep(timing.action_delay);
     }
 
     Ok(())
+}
+
+/// The windows on workspace `ws_id` once `expected` of them appeared (or the
+/// appear budget ran out) and the set then stayed unchanged for
+/// [`STABLE_POLLS`] listings (or the total budget ran out).
+fn settled_windows(
+    client: &mut impl NiriClient,
+    ws_id: u64,
+    expected: usize,
+    timing: &ReorderTiming,
+) -> anyhow::Result<Vec<Window>> {
+    let ids = |windows: &[Window]| -> HashSet<u64> {
+        new_workspace_windows(windows, ws_id)
+            .map(|w| w.id)
+            .collect()
+    };
+
+    let mut polls = 0;
+    let mut windows = loop {
+        let windows = list_windows_with(client)?;
+        polls += 1;
+        if new_workspace_windows(&windows, ws_id).count() >= expected
+            || polls >= timing.appear_polls
+        {
+            break windows;
+        }
+        thread::sleep(timing.poll_interval);
+    };
+
+    let mut last_ids = ids(&windows);
+    let mut stable = 0;
+    while stable < STABLE_POLLS && polls < timing.total_polls {
+        thread::sleep(timing.poll_interval);
+        windows = list_windows_with(client)?;
+        polls += 1;
+        let current_ids = ids(&windows);
+        if current_ids == last_ids {
+            stable += 1;
+        } else {
+            last_ids = current_ids;
+            stable = 0;
+        }
+    }
+
+    Ok(new_workspace_windows(&windows, ws_id).cloned().collect())
+}
+
+/// Pair each command with a distinct window whose app id matches its
+/// executable name, greedily in command order; `None` where none matches.
+fn match_windows(commands: &[Vec<String>], windows: &[Window]) -> Vec<Option<u64>> {
+    let mut used = HashSet::new();
+    commands
+        .iter()
+        .map(|command| {
+            let exe = executable_name(command.first()?);
+            let window = windows.iter().find(|w| {
+                !used.contains(&w.id)
+                    && app_id_matches(w.app_id.as_deref().unwrap_or_default(), exe)
+            })?;
+            used.insert(window.id);
+            Some(window.id)
+        })
+        .collect()
 }
 
 /// Move a window to an existing workspace by id; `None` moves the focused window.
@@ -746,27 +743,6 @@ fn overlay_event_loop(
     Ok(())
 }
 
-/// Snapshot all window IDs currently on a named workspace.
-///
-/// Returns an empty set if the workspace doesn't exist or IPC fails.
-pub fn snapshot_workspace_window_ids(workspace_name: &str) -> HashSet<u64> {
-    let Ok(workspaces) = list_workspaces() else {
-        return HashSet::new();
-    };
-    let ws_id = match find_workspace_by_name(&workspaces, workspace_name) {
-        Some(w) => w.id,
-        None => return HashSet::new(),
-    };
-    let Ok(windows) = list_windows() else {
-        return HashSet::new();
-    };
-    windows
-        .iter()
-        .filter(|w| w.workspace_id == Some(ws_id))
-        .map(|w| w.id)
-        .collect()
-}
-
 /// Run hook commands in a background thread via `sh -c`.
 ///
 /// Each command runs sequentially with the given environment variables set.
@@ -842,7 +818,7 @@ mod tests {
     use std::collections::VecDeque;
 
     use super::*;
-    use crate::test_helpers::{test_window, test_workspace};
+    use crate::test_helpers::{test_tiled_window, test_window, test_workspace};
 
     /// Scripted [`NiriClient`] that records every request it receives.
     struct MockClient {
@@ -877,7 +853,7 @@ mod tests {
 
         let created = focus_or_create_impl(&mut client, "dyn-", 'a', "dyn-a").unwrap();
 
-        assert!(!created);
+        assert_eq!(created, None);
         assert_eq!(client.sent.len(), 2);
         assert!(matches!(
             &client.sent[1],
@@ -907,7 +883,7 @@ mod tests {
 
         let created = focus_or_create_impl(&mut client, "dyn-", 'a', "dyn-a").unwrap();
 
-        assert!(created);
+        assert_eq!(created, Some(2));
         assert_eq!(client.sent.len(), 3);
         // Focus precedes naming so cleanup never sees it named but unfocused.
         assert!(matches!(
@@ -937,6 +913,308 @@ mod tests {
 
         assert!(err.to_string().contains("no empty workspace"));
         assert_eq!(client.sent.len(), 1);
+    }
+
+    fn commands(argvs: &[&[&str]]) -> Vec<Vec<String>> {
+        argvs
+            .iter()
+            .map(|argv| argv.iter().map(|word| (*word).to_string()).collect())
+            .collect()
+    }
+
+    fn is_spawn(request: &Request) -> bool {
+        matches!(request, Request::Action(Action::Spawn { .. }))
+    }
+
+    #[test]
+    fn switch_workspace_creates_then_spawns_in_order() {
+        let mut client = MockClient::new(vec![
+            Response::Workspaces(workspaces_with_trailing_empty()),
+            Response::Handled,
+            Response::Handled,
+            Response::Handled,
+            Response::Handled,
+        ]);
+
+        let (created, reorder) = switch_workspace_with(
+            &mut client,
+            "dyn-",
+            'a',
+            "dyn-a",
+            &commands(&[&["foot"], &["kitty"]]),
+        )
+        .unwrap();
+
+        assert_eq!(created, Some(2));
+        let reorder = reorder.unwrap();
+        assert_eq!(reorder.workspace_id, 2);
+        assert_eq!(reorder.commands.len(), 2);
+        assert_eq!(client.sent.len(), 5);
+        assert!(matches!(
+            &client.sent[1],
+            Request::Action(Action::FocusWorkspace {
+                reference: WorkspaceReferenceArg::Id(2),
+            })
+        ));
+        assert!(matches!(
+            &client.sent[2],
+            Request::Action(Action::SetWorkspaceName {
+                workspace: Some(WorkspaceReferenceArg::Id(2)),
+                ..
+            })
+        ));
+        assert!(matches!(
+            &client.sent[3],
+            Request::Action(Action::Spawn { command }) if command == &["foot"]
+        ));
+        assert!(matches!(
+            &client.sent[4],
+            Request::Action(Action::Spawn { command }) if command == &["kitty"]
+        ));
+    }
+
+    #[test]
+    fn switch_workspace_existing_spawns_nothing() {
+        let mut client = MockClient::new(vec![
+            Response::Workspaces(vec![test_workspace(1, Some("dyn-a"), false)]),
+            Response::Handled,
+        ]);
+
+        let (created, reorder) = switch_workspace_with(
+            &mut client,
+            "dyn-",
+            'a',
+            "dyn-a",
+            &commands(&[&["foot"], &["kitty"]]),
+        )
+        .unwrap();
+
+        assert_eq!(created, None);
+        assert!(reorder.is_none());
+        assert_eq!(client.sent.len(), 2);
+        assert!(!client.sent.iter().any(is_spawn));
+    }
+
+    #[test]
+    fn switch_workspace_one_program_needs_no_reorder() {
+        let mut client = MockClient::new(vec![
+            Response::Workspaces(workspaces_with_trailing_empty()),
+            Response::Handled,
+            Response::Handled,
+            Response::Handled,
+        ]);
+
+        let (created, reorder) = switch_workspace_with(
+            &mut client,
+            "dyn-",
+            'a',
+            "dyn-a",
+            &commands(&[&[], &["foot"]]),
+        )
+        .unwrap();
+
+        assert_eq!(created, Some(2));
+        assert!(reorder.is_none());
+        assert_eq!(client.sent.iter().filter(|r| is_spawn(r)).count(), 1);
+    }
+
+    /// Appear within 3 listings, 6 in all, and no waiting.
+    const TEST_TIMING: ReorderTiming = ReorderTiming {
+        poll_interval: Duration::ZERO,
+        action_delay: Duration::ZERO,
+        appear_polls: 3,
+        total_polls: 6,
+    };
+
+    /// Programs spawned on workspace 2.
+    fn reorder_request(argvs: &[&[&str]]) -> ReorderRequest {
+        ReorderRequest {
+            workspace_id: 2,
+            commands: commands(argvs),
+        }
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum Step {
+        Focus(u64),
+        Move(usize),
+    }
+
+    /// The window focuses and column moves sent, in order.
+    fn reorder_steps(sent: &[Request]) -> Vec<Step> {
+        sent.iter()
+            .filter_map(|request| match request {
+                Request::Action(Action::FocusWindow { id }) => Some(Step::Focus(*id)),
+                Request::Action(Action::MoveColumnToIndex { index }) => Some(Step::Move(*index)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn window_listings(sent: &[Request]) -> usize {
+        sent.iter()
+            .filter(|r| matches!(r, Request::Windows))
+            .count()
+    }
+
+    fn repeat<T: Clone>(item: &T, n: usize) -> impl Iterator<Item = T> + '_ {
+        std::iter::repeat_n(item, n).cloned()
+    }
+
+    #[test]
+    fn reorder_moves_windows_into_command_order() {
+        let windows = Response::Windows(vec![
+            test_tiled_window(11, 2, "kitty", 1),
+            test_tiled_window(10, 2, "foot", 2),
+            test_tiled_window(12, 1, "firefox", 1),
+        ]);
+        let mut client = MockClient::new(
+            repeat(&windows, 4)
+                .chain(repeat(&Response::Handled, 4))
+                .collect(),
+        );
+
+        reorder_columns_impl(
+            &mut client,
+            &reorder_request(&[&["foot"], &["kitty"]]),
+            &TEST_TIMING,
+        )
+        .unwrap();
+
+        assert_eq!(client.sent.len(), 8);
+        assert_eq!(
+            reorder_steps(&client.sent),
+            [
+                Step::Focus(10),
+                Step::Move(1),
+                Step::Focus(11),
+                Step::Move(2)
+            ]
+        );
+    }
+
+    #[test]
+    fn reorder_waits_for_a_late_window() {
+        let both = Response::Windows(vec![
+            test_tiled_window(11, 2, "kitty", 1),
+            test_tiled_window(10, 2, "foot", 2),
+        ]);
+        let mut client = MockClient::new(
+            std::iter::once(Response::Windows(vec![test_tiled_window(10, 2, "foot", 1)]))
+                .chain(repeat(&both, 4))
+                .chain(repeat(&Response::Handled, 4))
+                .collect(),
+        );
+
+        reorder_columns_impl(
+            &mut client,
+            &reorder_request(&[&["foot"], &["kitty"]]),
+            &TEST_TIMING,
+        )
+        .unwrap();
+
+        assert_eq!(window_listings(&client.sent), 5);
+        assert_eq!(
+            reorder_steps(&client.sent),
+            [
+                Step::Focus(10),
+                Step::Move(1),
+                Step::Focus(11),
+                Step::Move(2)
+            ]
+        );
+    }
+
+    #[test]
+    fn reorder_settles_for_the_windows_that_appeared() {
+        let foot = Response::Windows(vec![test_tiled_window(10, 2, "foot", 1)]);
+        let mut client = MockClient::new(
+            repeat(&foot, 6)
+                .chain(repeat(&Response::Handled, 2))
+                .collect(),
+        );
+
+        reorder_columns_impl(
+            &mut client,
+            &reorder_request(&[&["kitty"], &["foot"]]),
+            &TEST_TIMING,
+        )
+        .unwrap();
+
+        // The appear budget runs out after 3 listings, then 3 more settle.
+        assert_eq!(window_listings(&client.sent), 6);
+        assert_eq!(
+            reorder_steps(&client.sent),
+            [Step::Focus(10), Step::Move(2)]
+        );
+    }
+
+    #[test]
+    fn reorder_restarts_stability_when_windows_change() {
+        let two = Response::Windows(vec![
+            test_tiled_window(11, 2, "kitty", 1),
+            test_tiled_window(10, 2, "foot", 2),
+        ]);
+        let three = Response::Windows(vec![
+            test_tiled_window(11, 2, "kitty", 1),
+            test_tiled_window(10, 2, "foot", 2),
+            test_tiled_window(12, 2, "firefox", 3),
+        ]);
+        let mut client = MockClient::new(
+            repeat(&two, 2)
+                .chain(repeat(&three, 4))
+                .chain(repeat(&Response::Handled, 4))
+                .collect(),
+        );
+
+        reorder_columns_impl(
+            &mut client,
+            &reorder_request(&[&["foot"], &["kitty"]]),
+            &TEST_TIMING,
+        )
+        .unwrap();
+
+        // Without the reset, the first three listings after the appearance would settle it.
+        assert_eq!(window_listings(&client.sent), 6);
+        assert_eq!(
+            reorder_steps(&client.sent),
+            [
+                Step::Focus(10),
+                Step::Move(1),
+                Step::Focus(11),
+                Step::Move(2)
+            ]
+        );
+    }
+
+    #[test]
+    fn reorder_gives_duplicate_programs_distinct_windows() {
+        let windows = Response::Windows(vec![
+            test_tiled_window(10, 2, "foot", 2),
+            test_tiled_window(11, 2, "foot", 1),
+        ]);
+        let mut client = MockClient::new(
+            repeat(&windows, 4)
+                .chain(repeat(&Response::Handled, 4))
+                .collect(),
+        );
+
+        reorder_columns_impl(
+            &mut client,
+            &reorder_request(&[&["foot"], &["foot"]]),
+            &TEST_TIMING,
+        )
+        .unwrap();
+
+        assert_eq!(
+            reorder_steps(&client.sent),
+            [
+                Step::Focus(10),
+                Step::Move(1),
+                Step::Focus(11),
+                Step::Move(2)
+            ]
+        );
     }
 
     #[test]
@@ -1215,46 +1493,19 @@ mod tests {
             test_window(3, 20, "slack"),
             test_window(4, 10, "code"),
         ];
-        let existing = HashSet::from([1]);
 
-        let result: Vec<u64> = new_workspace_windows(&windows, 10, &existing)
-            .map(|w| w.id)
-            .collect();
+        let result: Vec<u64> = new_workspace_windows(&windows, 10).map(|w| w.id).collect();
 
-        assert_eq!(result, vec![2, 4]);
+        assert_eq!(result, vec![1, 2, 4]);
     }
 
     #[test]
     fn new_workspace_windows_empty() {
         let windows = vec![test_window(1, 20, "firefox"), test_window(2, 30, "kitty")];
-        let existing = HashSet::new();
 
-        let result: Vec<u64> = new_workspace_windows(&windows, 10, &existing)
-            .map(|w| w.id)
-            .collect();
+        let result: Vec<u64> = new_workspace_windows(&windows, 10).map(|w| w.id).collect();
 
         assert!(result.is_empty());
-    }
-
-    #[test]
-    fn find_workspace_by_name_variants() {
-        let workspaces = vec![
-            test_workspace(1, Some("dyn-a"), false),
-            test_workspace(2, Some("dyn-b"), true),
-            test_workspace(3, None, false),
-        ];
-
-        // Found
-        let ws = find_workspace_by_name(&workspaces, "dyn-a");
-        assert_eq!(ws.map(|w| w.id), Some(1));
-
-        // Not found
-        let ws = find_workspace_by_name(&workspaces, "dyn-z");
-        assert!(ws.is_none());
-
-        // None-named workspaces are never matched
-        let ws = find_workspace_by_name(&workspaces, "");
-        assert!(ws.is_none());
     }
 
     #[test]

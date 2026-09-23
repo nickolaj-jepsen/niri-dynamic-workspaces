@@ -45,7 +45,7 @@ pub fn switch_workspace(
     if let Some(request) = reorder {
         spawn_reorder(app, request);
     }
-    if created {
+    if created.is_some() {
         let hooks = config::collect_create_hooks(config, hook_info.template_name.as_deref());
         let env = config::build_hook_env(
             ws_name,
