@@ -8,6 +8,8 @@ animations {
 }
 
 input {
+    // Re-focusing the active workspace jumps back, so tests see any the overlay sends.
+    workspace-auto-back-and-forth
     keyboard {
         xkb {
             // us stays active; layout tests pick a group with `niri msg action switch-layout <index>`.

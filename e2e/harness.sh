@@ -205,6 +205,7 @@ usage: harness.sh <command>
   config [file]    replace its config.toml with file, or stdin
   overlay [mode]   open the overlay in the background, wait until it is mapped
   key <char>       click the card for a-z / 0-9
+  hover <char>     move the pointer onto that card, which previews it
   static <i> [n]   click the i-th of n cards in the static row
   mode <name>      click switch | delete | move
   click <x> <y>    click anywhere
@@ -244,6 +245,7 @@ press)   press_codes "$1" "${2:-}" ;;
 escape)  in_env wtype -k Escape ;;
 click)   click_at "$1" "$2" ;;
 key)     click_at $(key_position "$1") ;;
+hover)   move_to $(key_position "$1") ;;
 static)  click_at $(static_position "$1" "${2:-1}") ;;
 mode)    click_at $(mode_position "$1") ;;
 shot)    in_env grim "$out_dir/${1:-shot}.png" && echo "$out_dir/${1:-shot}.png" ;;

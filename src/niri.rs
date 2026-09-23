@@ -40,13 +40,6 @@ fn send_action(action: Action) -> anyhow::Result<()> {
     send_action_with(&mut SocketClient, action)
 }
 
-/// Focus an existing workspace by name (no creation).
-pub fn focus_workspace_by_name(name: &str) -> anyhow::Result<()> {
-    send_action(Action::FocusWorkspace {
-        reference: WorkspaceReferenceArg::Name(name.to_string()),
-    })
-}
-
 /// Focus an existing workspace by id (no creation).
 ///
 /// niri answers `Handled` even when no workspace has that id.

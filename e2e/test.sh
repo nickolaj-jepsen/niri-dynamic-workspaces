@@ -136,6 +136,33 @@ EOF
     "$h" open
 }
 
+test_overlay_hover_escape_restores_unnamed() {
+    local unnamed
+    spawn_window one && unnamed=$(focused_id) || return 1
+    "$h" app switch b && "$h" run niri msg action focus-workspace 1 || return 1
+    until_true focused_id_is "$unnamed" || return 1
+    "$h" overlay switch && "$h" hover b || return 1
+    until_true focused_is dyn-b || return 1
+    "$h" escape && "$h" closed || return 1
+    until_true focused_id_is "$unnamed"
+}
+
+# The fixture's workspace-auto-back-and-forth turns re-focusing the active workspace into a jump.
+test_overlay_escape_keeps_focus() {
+    "$h" app switch a && "$h" app switch b || return 1
+    "$h" overlay switch && "$h" escape && "$h" closed || return 1
+    sleep 0.3
+    focused_is dyn-b
+}
+
+test_overlay_hover_click_commits() {
+    "$h" app switch b && "$h" app switch a || return 1
+    # The pointer previews dyn-b on its way to the click.
+    "$h" overlay switch && "$h" key b && "$h" closed || return 1
+    sleep 0.3
+    focused_is dyn-b
+}
+
 test_overlay_key_press_switches() {
     "$h" overlay switch && "$h" type c || return 1
     until_true has_ws dyn-c && "$h" closed || return 1
@@ -338,6 +365,9 @@ tests=(
     overlay_static_card_moves_to_unnamed
     overlay_static_card_switches_to_unnamed
     overlay_missing_pin_errors
+    overlay_hover_escape_restores_unnamed
+    overlay_escape_keeps_focus
+    overlay_hover_click_commits
     overlay_key_press_switches
     overlay_key_azerty_digit
     overlay_key_azerty_shift_digit
