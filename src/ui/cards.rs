@@ -1237,6 +1237,19 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn card_classes_active_on_other_output() {
+        // style.css outlines .active and fills only .focused.
+        let state = CardState {
+            is_active: true,
+            ..card_state()
+        };
+        assert_eq!(
+            card_classes(&state),
+            ["workspace-card", "dynamic", "active", "occupied"]
+        );
+    }
+
+    #[test]
     fn card_classes_uncreated_is_not_empty() {
         let state = CardState {
             is_uncreated: true,

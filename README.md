@@ -328,7 +328,7 @@ All variables are set on `window`. The five primaries are enough for a full them
 | `--card-fg` | `--fg` |
 | `--card-border`, `--card-border-hover` | `--card-fg` at 15% / 30% opacity |
 | `--accent-fg` | `--bg` (text on `--accent`) |
-| `--accent-text` | `--accent` (accent used as a text colour) |
+| `--accent-text` | `--accent` (accent used as a text colour and outline) |
 | `--urgent-fg` | `--bg` (text on `--urgent`) |
 
 Under `theme = "gtk"`, `--card-bg`, `--card-fg`, `--accent-fg`, `--accent-text` and `--urgent-fg` come from the GTK theme instead.
@@ -357,7 +357,7 @@ For anything variables can't express, style the widgets directly.
 | `.variable-prompt` | variable view: `.variable-title`, `.variable-form`, `.variable-row`, `.variable-label`, `.variable-entry` (`.loading`) |
 | `.fuzzy-list`, `.fuzzy-option` (`.selected`), `.fuzzy-more` | select-variable options; `.fuzzy-more` holds the hidden-match count or the no-match hint |
 
-`.workspace-card` states: `.static` or `.dynamic`; `.uncreated`, `.empty` or `.occupied`; `.focused`; `.active` (focused, or the visible workspace of another output); `.urgent`; `.disabled` (not a valid target in the current mode); `.confirm` (delete mode: waiting for the second press).
+`.workspace-card` states: `.static` or `.dynamic`; `.uncreated`, `.empty` or `.occupied`; `.focused`; `.active` (focused, or the visible workspace of another output; by default `.focused` is filled with `--accent` and the other `.active` cards get an `--accent-text` outline); `.urgent`; `.disabled` (not a valid target in the current mode); `.confirm` (delete mode: waiting for the second press).
 
 ```css
 window.mode-delete .backdrop { background-color: rgba(60, 0, 0, 0.85); }
