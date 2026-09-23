@@ -302,7 +302,7 @@ fn app_id_matches(app_id: &str, exe: &str) -> bool {
 }
 
 /// Wait for the programs' windows on the new workspace, then move their
-/// columns into command order.
+/// columns into command order unless the user has left the workspace.
 ///
 /// Blocks for up to 8 s. Best-effort: logs errors to stderr since the overlay
 /// is already closed.
@@ -328,21 +328,74 @@ fn reorder_columns_impl(
         return Ok(());
     }
     let ordered = match_windows(&request.commands, &windows);
+    apply_column_order(client, request.workspace_id, &ordered, timing.action_delay)
+}
 
-    // Focus each window and move its column to the target index (1-based).
-    for (i, window_id) in ordered.iter().enumerate() {
-        let Some(id) = *window_id else { continue };
+fn focused_workspace_id(client: &mut impl NiriClient) -> anyhow::Result<Option<u64>> {
+    Ok(list_workspaces_with(client)?
+        .iter()
+        .find(|w| w.is_focused)
+        .map(|w| w.id))
+}
+
+fn focused_window_with(client: &mut impl NiriClient) -> anyhow::Result<Option<Window>> {
+    match client.send(Request::FocusedWindow)? {
+        Response::FocusedWindow(window) => Ok(window),
+        other => bail!("unexpected response: {other:?}"),
+    }
+}
+
+/// Move the column of each `ordered` window to its 1-based slot on
+/// workspace `ws_id`, then give focus back to the window that had it.
+///
+/// Stops as soon as the user is on another workspace: niri can only move the
+/// focused column, and focusing a window would pull them back. Skips windows
+/// that are gone, floating, or already in their slot.
+fn apply_column_order(
+    client: &mut impl NiriClient,
+    ws_id: u64,
+    ordered: &[Option<u64>],
+    action_delay: Duration,
+) -> anyhow::Result<()> {
+    let restore = focused_window_with(client)?
+        .filter(|w| w.workspace_id == Some(ws_id))
+        .map(|w| w.id);
+    let mut focus_moved = false;
+
+    for (i, id) in ordered.iter().enumerate() {
+        let Some(id) = *id else { continue };
+        // Narrows the race with a user switching away, but cannot close it.
+        if focused_workspace_id(client)? != Some(ws_id) {
+            return Ok(());
+        }
+        // Earlier moves shift columns, so read the current layout.
+        let column = list_windows_with(client)?
+            .iter()
+            .find(|w| w.id == id && w.workspace_id == Some(ws_id))
+            .and_then(|w| w.layout.pos_in_scrolling_layout)
+            .map(|(column, _)| column);
+        if column.is_none_or(|column| column == i + 1) {
+            continue;
+        }
+
         if let Err(e) = send_action_with(client, Action::FocusWindow { id }) {
             eprintln!("warning: failed to focus window {id}: {e}");
             continue;
         }
-        thread::sleep(timing.action_delay);
+        focus_moved = true;
+        thread::sleep(action_delay);
+        // niri clamps the index to the column count.
         if let Err(e) = send_action_with(client, Action::MoveColumnToIndex { index: i + 1 }) {
             eprintln!("warning: failed to move column to index {}: {e}", i + 1);
         }
-        thread::sleep(timing.action_delay);
+        thread::sleep(action_delay);
     }
 
+    if let Some(id) = restore.filter(|_| focus_moved) {
+        if focused_workspace_id(client)? == Some(ws_id) {
+            send_action_with(client, Action::FocusWindow { id })?;
+        }
+    }
     Ok(())
 }
 
@@ -1026,12 +1079,20 @@ mod tests {
         total_polls: 6,
     };
 
-    /// Programs spawned on workspace 2.
-    fn reorder_request(argvs: &[&[&str]]) -> ReorderRequest {
-        ReorderRequest {
+    /// Reorder `argvs` spawned on workspace 2 against `script`, which it must use up.
+    fn reorder(argvs: &[&[&str]], script: Vec<Response>) -> MockClient {
+        let mut client = MockClient::new(script);
+        let request = ReorderRequest {
             workspace_id: 2,
             commands: commands(argvs),
-        }
+        };
+        reorder_columns_impl(&mut client, &request, &TEST_TIMING).unwrap();
+        assert!(
+            client.responses.is_empty(),
+            "unused: {:?}",
+            client.responses
+        );
+        client
     }
 
     #[derive(Debug, PartialEq)]
@@ -1051,8 +1112,10 @@ mod tests {
             .collect()
     }
 
-    fn window_listings(sent: &[Request]) -> usize {
+    /// Window listings before the reorder starts acting.
+    fn settle_listings(sent: &[Request]) -> usize {
         sent.iter()
+            .take_while(|r| !matches!(r, Request::FocusedWindow))
             .filter(|r| matches!(r, Request::Windows))
             .count()
     }
@@ -1061,129 +1124,129 @@ mod tests {
         std::iter::repeat_n(item, n).cloned()
     }
 
-    #[test]
-    fn reorder_moves_windows_into_command_order() {
-        let windows = Response::Windows(vec![
+    /// Workspace 1 and the new workspace 2, with `focused` focused.
+    fn focus_on(focused: u64) -> Response {
+        Response::Workspaces(vec![
+            test_workspace(1, Some("dyn-b"), focused == 1),
+            test_workspace(2, Some("dyn-c"), focused == 2),
+        ])
+    }
+
+    /// kitty 11 left of foot 10 on workspace 2, plus any `others`.
+    fn kitty_then_foot(others: &[Window]) -> Response {
+        let mut windows = vec![
             test_tiled_window(11, 2, "kitty", 1),
             test_tiled_window(10, 2, "foot", 2),
-            test_tiled_window(12, 1, "firefox", 1),
-        ]);
-        let mut client = MockClient::new(
-            repeat(&windows, 4)
-                .chain(repeat(&Response::Handled, 4))
+        ];
+        windows.extend_from_slice(others);
+        Response::Windows(windows)
+    }
+
+    /// [`kitty_then_foot`] once foot 10 moved to the first column.
+    fn foot_then_kitty(others: &[Window]) -> Response {
+        let mut windows = vec![
+            test_tiled_window(10, 2, "foot", 1),
+            test_tiled_window(11, 2, "kitty", 2),
+        ];
+        windows.extend_from_slice(others);
+        Response::Windows(windows)
+    }
+
+    #[test]
+    fn reorder_moves_windows_into_command_order() {
+        let firefox = [test_tiled_window(12, 1, "firefox", 1)];
+        let before = kitty_then_foot(&firefox);
+        let client = reorder(
+            &[&["foot"], &["kitty"]],
+            repeat(&before, 4)
+                .chain([
+                    Response::FocusedWindow(Some(test_tiled_window(11, 2, "kitty", 1))),
+                    focus_on(2),
+                    before.clone(),
+                    Response::Handled,
+                    Response::Handled,
+                    focus_on(2),
+                    foot_then_kitty(&firefox),
+                    focus_on(2),
+                    Response::Handled,
+                ])
                 .collect(),
         );
 
-        reorder_columns_impl(
-            &mut client,
-            &reorder_request(&[&["foot"], &["kitty"]]),
-            &TEST_TIMING,
-        )
-        .unwrap();
-
-        assert_eq!(client.sent.len(), 8);
+        assert_eq!(client.sent.len(), 13);
+        // Moving foot puts kitty in its slot; kitty then gets its focus back.
         assert_eq!(
             reorder_steps(&client.sent),
-            [
-                Step::Focus(10),
-                Step::Move(1),
-                Step::Focus(11),
-                Step::Move(2)
-            ]
+            [Step::Focus(10), Step::Move(1), Step::Focus(11)]
         );
     }
 
     #[test]
     fn reorder_waits_for_a_late_window() {
-        let both = Response::Windows(vec![
-            test_tiled_window(11, 2, "kitty", 1),
-            test_tiled_window(10, 2, "foot", 2),
-        ]);
-        let mut client = MockClient::new(
+        let both = kitty_then_foot(&[]);
+        let client = reorder(
+            &[&["foot"], &["kitty"]],
             std::iter::once(Response::Windows(vec![test_tiled_window(10, 2, "foot", 1)]))
                 .chain(repeat(&both, 4))
-                .chain(repeat(&Response::Handled, 4))
+                .chain([
+                    Response::FocusedWindow(None),
+                    focus_on(2),
+                    both.clone(),
+                    Response::Handled,
+                    Response::Handled,
+                    focus_on(2),
+                    foot_then_kitty(&[]),
+                ])
                 .collect(),
         );
 
-        reorder_columns_impl(
-            &mut client,
-            &reorder_request(&[&["foot"], &["kitty"]]),
-            &TEST_TIMING,
-        )
-        .unwrap();
-
-        assert_eq!(window_listings(&client.sent), 5);
+        assert_eq!(settle_listings(&client.sent), 5);
         assert_eq!(
             reorder_steps(&client.sent),
-            [
-                Step::Focus(10),
-                Step::Move(1),
-                Step::Focus(11),
-                Step::Move(2)
-            ]
+            [Step::Focus(10), Step::Move(1)]
         );
     }
 
     #[test]
     fn reorder_settles_for_the_windows_that_appeared() {
         let foot = Response::Windows(vec![test_tiled_window(10, 2, "foot", 1)]);
-        let mut client = MockClient::new(
+        let client = reorder(
+            &[&["foot"], &["kitty"]],
             repeat(&foot, 6)
-                .chain(repeat(&Response::Handled, 2))
+                .chain([Response::FocusedWindow(None), focus_on(2), foot.clone()])
                 .collect(),
         );
 
-        reorder_columns_impl(
-            &mut client,
-            &reorder_request(&[&["kitty"], &["foot"]]),
-            &TEST_TIMING,
-        )
-        .unwrap();
-
         // The appear budget runs out after 3 listings, then 3 more settle.
-        assert_eq!(window_listings(&client.sent), 6);
-        assert_eq!(
-            reorder_steps(&client.sent),
-            [Step::Focus(10), Step::Move(2)]
-        );
+        assert_eq!(settle_listings(&client.sent), 6);
+        assert_eq!(reorder_steps(&client.sent), []);
     }
 
     #[test]
     fn reorder_restarts_stability_when_windows_change() {
-        let two = Response::Windows(vec![
-            test_tiled_window(11, 2, "kitty", 1),
-            test_tiled_window(10, 2, "foot", 2),
-        ]);
-        let three = Response::Windows(vec![
-            test_tiled_window(11, 2, "kitty", 1),
-            test_tiled_window(10, 2, "foot", 2),
-            test_tiled_window(12, 2, "firefox", 3),
-        ]);
-        let mut client = MockClient::new(
-            repeat(&two, 2)
+        let firefox = [test_tiled_window(12, 2, "firefox", 3)];
+        let three = kitty_then_foot(&firefox);
+        let client = reorder(
+            &[&["foot"], &["kitty"]],
+            repeat(&kitty_then_foot(&[]), 2)
                 .chain(repeat(&three, 4))
-                .chain(repeat(&Response::Handled, 4))
+                .chain([
+                    Response::FocusedWindow(None),
+                    focus_on(2),
+                    three.clone(),
+                    Response::Handled,
+                    Response::Handled,
+                    focus_on(2),
+                    foot_then_kitty(&firefox),
+                ])
                 .collect(),
         );
 
-        reorder_columns_impl(
-            &mut client,
-            &reorder_request(&[&["foot"], &["kitty"]]),
-            &TEST_TIMING,
-        )
-        .unwrap();
-
         // Without the reset, the first three listings after the appearance would settle it.
-        assert_eq!(window_listings(&client.sent), 6);
+        assert_eq!(settle_listings(&client.sent), 6);
         assert_eq!(
             reorder_steps(&client.sent),
-            [
-                Step::Focus(10),
-                Step::Move(1),
-                Step::Focus(11),
-                Step::Move(2)
-            ]
+            [Step::Focus(10), Step::Move(1)]
         );
     }
 
@@ -1193,27 +1256,133 @@ mod tests {
             test_tiled_window(10, 2, "foot", 2),
             test_tiled_window(11, 2, "foot", 1),
         ]);
-        let mut client = MockClient::new(
+        let client = reorder(
+            &[&["foot"], &["foot"]],
             repeat(&windows, 4)
-                .chain(repeat(&Response::Handled, 4))
+                .chain([
+                    Response::FocusedWindow(None),
+                    focus_on(2),
+                    windows.clone(),
+                    Response::Handled,
+                    Response::Handled,
+                    focus_on(2),
+                    Response::Windows(vec![
+                        test_tiled_window(10, 2, "foot", 1),
+                        test_tiled_window(11, 2, "foot", 2),
+                    ]),
+                ])
                 .collect(),
         );
 
-        reorder_columns_impl(
-            &mut client,
-            &reorder_request(&[&["foot"], &["foot"]]),
-            &TEST_TIMING,
-        )
-        .unwrap();
+        // Had both matched 10, it would be moved again to slot 2.
+        assert_eq!(
+            reorder_steps(&client.sent),
+            [Step::Focus(10), Step::Move(1)]
+        );
+    }
+
+    #[test]
+    fn reorder_does_nothing_after_user_left() {
+        let client = reorder(
+            &[&["foot"], &["kitty"]],
+            repeat(&kitty_then_foot(&[]), 4)
+                .chain([
+                    Response::FocusedWindow(Some(test_tiled_window(20, 1, "firefox", 1))),
+                    focus_on(1),
+                ])
+                .collect(),
+        );
+
+        assert_eq!(reorder_steps(&client.sent), []);
+    }
+
+    #[test]
+    fn reorder_stops_when_user_leaves_midway() {
+        let client = reorder(
+            &[&["foot"], &["kitty"]],
+            repeat(&kitty_then_foot(&[]), 4)
+                .chain([
+                    Response::FocusedWindow(Some(test_tiled_window(11, 2, "kitty", 1))),
+                    focus_on(2),
+                    kitty_then_foot(&[]),
+                    Response::Handled,
+                    Response::Handled,
+                    focus_on(1),
+                ])
+                .collect(),
+        );
+
+        // No focus given back either: that would pull the user back.
+        assert_eq!(
+            reorder_steps(&client.sent),
+            [Step::Focus(10), Step::Move(1)]
+        );
+    }
+
+    #[test]
+    fn reorder_skips_windows_already_in_place() {
+        let windows = foot_then_kitty(&[]);
+        let client = reorder(
+            &[&["foot"], &["kitty"]],
+            repeat(&windows, 4)
+                .chain([
+                    Response::FocusedWindow(Some(test_tiled_window(11, 2, "kitty", 2))),
+                    focus_on(2),
+                    windows.clone(),
+                    focus_on(2),
+                    windows.clone(),
+                ])
+                .collect(),
+        );
+
+        assert_eq!(reorder_steps(&client.sent), []);
+    }
+
+    #[test]
+    fn reorder_skips_floating_windows() {
+        let mut floating = test_window(10, 2, "foot");
+        floating.is_floating = true;
+        let windows = Response::Windows(vec![test_tiled_window(11, 2, "kitty", 1), floating]);
+        let client = reorder(
+            &[&["kitty"], &["foot"]],
+            repeat(&windows, 4)
+                .chain([
+                    Response::FocusedWindow(None),
+                    focus_on(2),
+                    windows.clone(),
+                    focus_on(2),
+                    windows.clone(),
+                ])
+                .collect(),
+        );
+
+        assert_eq!(reorder_steps(&client.sent), []);
+    }
+
+    #[test]
+    fn reorder_refocuses_the_users_window() {
+        let firefox = [test_tiled_window(12, 2, "firefox", 3)];
+        let before = kitty_then_foot(&firefox);
+        let client = reorder(
+            &[&["foot"], &["kitty"]],
+            repeat(&before, 4)
+                .chain([
+                    Response::FocusedWindow(Some(firefox[0].clone())),
+                    focus_on(2),
+                    before.clone(),
+                    Response::Handled,
+                    Response::Handled,
+                    focus_on(2),
+                    foot_then_kitty(&firefox),
+                    focus_on(2),
+                    Response::Handled,
+                ])
+                .collect(),
+        );
 
         assert_eq!(
             reorder_steps(&client.sent),
-            [
-                Step::Focus(10),
-                Step::Move(1),
-                Step::Focus(11),
-                Step::Move(2)
-            ]
+            [Step::Focus(10), Step::Move(1), Step::Focus(12)]
         );
     }
 
