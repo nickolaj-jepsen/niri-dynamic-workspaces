@@ -399,6 +399,8 @@ spawn-at-startup "niri-dynamic-workspaces" "daemon"
 
 The daemon keeps GTK initialized and subsequent `switch`/`delete`/`move-window` invocations are forwarded to it over D-Bus, skipping startup overhead.
 
+With `auto_delete_empty`, the daemon also removes dynamic workspaces that are empty and unfocused. A workspace created with programs is left alone for its first 15 seconds, so switching away while they start does not remove it.
+
 Config changes are picked up automatically: the daemon reloads the config file whenever its contents change, including on a Home Manager switch, so no restart is needed. If an edit breaks the file, auto-delete keeps following the last config that loaded, while the overlay opens with the defaults and names the problem.
 
 The Home Manager module enables daemon mode by default, as a user service that
