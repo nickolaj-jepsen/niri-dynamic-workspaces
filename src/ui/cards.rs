@@ -402,19 +402,25 @@ fn attach_hover_preview(widget: &GtkBox, ws_id: u64, session: &Rc<OverlaySession
     widget.add_controller(motion);
 }
 
+/// Whether pressing the key in `mode` does nothing or fails, which `.disabled`
+/// promises themes. Uncreated keys are valid targets: pressing one creates it.
+fn key_disabled(info: &DynWorkspaceInfo, mode: Mode) -> bool {
+    let missing_target = info.is_static && info.is_uncreated;
+    match mode {
+        Mode::Normal => missing_target,
+        // The window being moved is already on the focused workspace.
+        Mode::MoveWindow => info.is_focused || missing_target,
+        Mode::Delete => info.is_uncreated || info.is_static,
+    }
+}
+
 fn build_key_widget(
     info: &DynWorkspaceInfo,
     mode: Mode,
     ctx: &ActionContext,
     metrics: &KeyboardMetrics,
 ) -> GtkBox {
-    let is_disabled = match mode {
-        Mode::MoveWindow => info.is_uncreated || info.is_focused,
-        Mode::Delete => info.is_uncreated || info.is_static,
-        // Empty pinned workspaces render dimmed like the static row, but the
-        // key still switches to them.
-        Mode::Normal => info.is_uncreated || (info.is_static && info.is_empty),
-    };
+    let is_disabled = key_disabled(info, mode);
     let classes = card_classes(&CardState {
         is_static: info.is_static,
         is_focused: info.is_focused,
@@ -1201,6 +1207,64 @@ pub(super) mod tests {
         let workspaces = vec![test_workspace(10, Some("dyn-a"), true), other];
         assert!(GridModel::new(&workspaces, &[], &config).multi_output);
         assert!(!GridModel::new(&[], &[], &config).multi_output);
+    }
+
+    // --- key_disabled ---
+
+    fn live_key(ch: char) -> DynWorkspaceInfo {
+        DynWorkspaceInfo {
+            is_uncreated: false,
+            ws_id: Some(1),
+            ..DynWorkspaceInfo::uncreated(ch)
+        }
+    }
+
+    /// A pinned key whose target exists (empty) or is missing.
+    fn pinned_key(exists: bool) -> DynWorkspaceInfo {
+        DynWorkspaceInfo {
+            is_static: true,
+            is_uncreated: !exists,
+            is_empty: exists,
+            ws_id: exists.then_some(5),
+            ..DynWorkspaceInfo::uncreated('q')
+        }
+    }
+
+    #[test]
+    fn key_disabled_switch_only_missing_pinned_target() {
+        assert!(!key_disabled(
+            &DynWorkspaceInfo::uncreated('a'),
+            Mode::Normal
+        ));
+        assert!(key_disabled(&pinned_key(false), Mode::Normal));
+        assert!(!key_disabled(&pinned_key(true), Mode::Normal));
+        assert!(!key_disabled(&live_key('a'), Mode::Normal));
+    }
+
+    #[test]
+    fn key_disabled_move_window_focused_or_missing_target() {
+        let focused = DynWorkspaceInfo {
+            is_focused: true,
+            ..live_key('a')
+        };
+        assert!(!key_disabled(
+            &DynWorkspaceInfo::uncreated('a'),
+            Mode::MoveWindow
+        ));
+        assert!(key_disabled(&focused, Mode::MoveWindow));
+        assert!(!key_disabled(&live_key('b'), Mode::MoveWindow));
+        assert!(key_disabled(&pinned_key(false), Mode::MoveWindow));
+        assert!(!key_disabled(&pinned_key(true), Mode::MoveWindow));
+    }
+
+    #[test]
+    fn key_disabled_delete_uncreated_or_pinned() {
+        assert!(key_disabled(
+            &DynWorkspaceInfo::uncreated('a'),
+            Mode::Delete
+        ));
+        assert!(key_disabled(&pinned_key(true), Mode::Delete));
+        assert!(!key_disabled(&live_key('a'), Mode::Delete));
     }
 
     fn card_state() -> CardState {

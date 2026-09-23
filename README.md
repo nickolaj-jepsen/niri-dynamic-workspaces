@@ -357,7 +357,7 @@ For anything variables can't express, style the widgets directly.
 | `.variable-prompt` | variable view: `.variable-title`, `.variable-form`, `.variable-row`, `.variable-label`, `.variable-entry` (`.loading`) |
 | `.fuzzy-list`, `.fuzzy-option` (`.selected`), `.fuzzy-more` | select-variable options; `.fuzzy-more` holds the hidden-match count or the no-match hint |
 
-`.workspace-card` states: `.static` or `.dynamic`; `.uncreated`, `.empty` or `.occupied`; `.focused`; `.active` (focused, or the visible workspace of another output; by default `.focused` is filled with `--accent` and the other `.active` cards get an `--accent-text` outline); `.urgent`; `.disabled` (not a valid target in the current mode); `.confirm` (delete mode: waiting for the second press).
+`.workspace-card` states: `.static` or `.dynamic`; `.uncreated`, `.empty` or `.occupied`; `.focused`; `.active` (focused, or the visible workspace of another output; by default `.focused` is filled with `--accent` and the other `.active` cards get an `--accent-text` outline); `.urgent`; `.disabled` (pressing it does nothing or fails in the current mode); `.confirm` (delete mode: waiting for the second press). By default `.uncreated` and `.disabled` cards, and empty pinned keys in switch mode, are dimmed.
 
 ```css
 window.mode-delete .backdrop { background-color: rgba(60, 0, 0, 0.85); }

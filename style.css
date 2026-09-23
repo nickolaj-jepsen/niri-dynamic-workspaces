@@ -68,7 +68,10 @@ window {
     border: 2px solid var(--danger);
 }
 
-.workspace-card.disabled {
+/* Empty pinned keys still switch, so they are dimmed without being .disabled. */
+.workspace-card.uncreated,
+.workspace-card.disabled,
+window.mode-switch .workspace-card.static.empty {
     opacity: 0.40;
 }
 
