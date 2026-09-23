@@ -578,6 +578,28 @@ fn is_read_timeout(e: &std::io::Error) -> bool {
     )
 }
 
+/// Read the next line of a niri event stream and parse it as an [`Event`].
+///
+/// Returns `Ok(None)` when the read times out or the line does not parse
+/// (e.g. a variant from a newer niri). On a timeout the partial line stays in
+/// `buf` for the next call; `buf` holds bytes, so a UTF-8 sequence cut by the
+/// timeout survives. `buf` must be empty on the first call.
+///
+/// # Errors
+/// When the stream closes or a read fails with anything but a timeout.
+fn read_event(reader: &mut impl BufRead, buf: &mut Vec<u8>) -> anyhow::Result<Option<Event>> {
+    match reader.read_until(b'\n', buf) {
+        Ok(0) => bail!("niri event stream closed"),
+        Ok(_) => {
+            let event = serde_json::from_slice(buf).ok();
+            buf.clear();
+            Ok(event)
+        }
+        Err(e) if is_read_timeout(&e) => Ok(None),
+        Err(e) => Err(e).context("failed to read from niri socket"),
+    }
+}
+
 fn event_cleanup_loop(prefix_source: &mut impl FnMut() -> Option<String>) -> anyhow::Result<()> {
     let mut reader = connect_event_stream()?;
     // The timeout lets a pending cleanup fire when no further event arrives.
@@ -587,23 +609,11 @@ fn event_cleanup_loop(prefix_source: &mut impl FnMut() -> Option<String>) -> any
         .context("failed to set read timeout")?;
 
     let mut debouncer = Debouncer::new(Duration::from_millis(500), Duration::from_secs(2));
-    // Bytes, not String: a timeout mid-line must keep a partial UTF-8 sequence.
     let mut buf = Vec::new();
 
     loop {
-        match reader.read_until(b'\n', &mut buf) {
-            Ok(0) => bail!("niri event stream closed"),
-            Ok(_) => {
-                // Skip events that don't deserialize (e.g. new variants from a newer niri)
-                if let Ok(event) = serde_json::from_slice::<Event>(&buf) {
-                    if triggers_cleanup(&event) {
-                        debouncer.on_event(Instant::now());
-                    }
-                }
-                buf.clear();
-            }
-            Err(e) if is_read_timeout(&e) => {}
-            Err(e) => return Err(e).context("failed to read from niri socket"),
+        if read_event(&mut reader, &mut buf)?.is_some_and(|event| triggers_cleanup(&event)) {
+            debouncer.on_event(Instant::now());
         }
 
         if debouncer.due(Instant::now()) {
@@ -671,22 +681,13 @@ fn overlay_event_loop(
         .set_read_timeout(Some(Duration::from_millis(500)))
         .context("failed to set read timeout")?;
 
-    let mut buf = String::new();
+    let mut buf = Vec::new();
     while alive.load(std::sync::atomic::Ordering::Relaxed) {
-        match reader.read_line(&mut buf) {
-            Ok(0) => bail!("niri event stream closed"),
-            Ok(_) => {
-                // Skip events that don't deserialize (e.g. newer niri variants)
-                if let Ok(event) = serde_json::from_str::<Event>(&buf) {
-                    if let Some(overlay_event) = classify_event(&event) {
-                        on_event(overlay_event);
-                    }
-                }
-                buf.clear();
-            }
-            // Timeout: keep any partial line in buf and re-check `alive`.
-            Err(e) if is_read_timeout(&e) => {}
-            Err(e) => return Err(e).context("failed to read from niri socket"),
+        if let Some(event) = read_event(reader, &mut buf)?
+            .as_ref()
+            .and_then(classify_event)
+        {
+            on_event(event);
         }
     }
     Ok(())
@@ -1193,5 +1194,63 @@ mod tests {
         debouncer.clear();
 
         assert!(!debouncer.due(t0 + Duration::from_secs(10)));
+    }
+
+    /// A reader with a short timeout, and the end niri would write to.
+    fn event_stream_pair() -> (BufReader<UnixStream>, UnixStream) {
+        let (reader, writer) = UnixStream::pair().unwrap();
+        reader
+            .set_read_timeout(Some(Duration::from_millis(10)))
+            .unwrap();
+        (BufReader::new(reader), writer)
+    }
+
+    fn event_line(event: &Event) -> Vec<u8> {
+        let mut line = serde_json::to_vec(event).unwrap();
+        line.push(b'\n');
+        line
+    }
+
+    #[test]
+    fn read_event_keeps_a_line_split_mid_codepoint() {
+        let (mut reader, mut writer) = event_stream_pair();
+        let workspaces = vec![test_workspace(1, Some("dyn-a Caf\u{e9}"), true)];
+        let line = event_line(&Event::WorkspacesChanged {
+            workspaces: workspaces.clone(),
+        });
+        // Just after the lead byte of the two-byte 'é'.
+        let split = line.iter().position(|&b| b == 0xC3).unwrap() + 1;
+        let mut buf = Vec::new();
+
+        writer.write_all(&line[..split]).unwrap();
+        assert!(read_event(&mut reader, &mut buf).unwrap().is_none());
+
+        writer.write_all(&line[split..]).unwrap();
+        let event = read_event(&mut reader, &mut buf).unwrap();
+        assert!(
+            matches!(event, Some(Event::WorkspacesChanged { workspaces: got }) if got == workspaces)
+        );
+
+        drop(writer);
+        assert!(read_event(&mut reader, &mut buf).is_err());
+    }
+
+    #[test]
+    fn read_event_skips_unparseable_lines() {
+        let (mut reader, mut writer) = event_stream_pair();
+        writer.write_all(b"{\"NotAnEvent\":{}}\n").unwrap();
+        writer
+            .write_all(&event_line(&Event::WorkspaceActivated {
+                id: 1,
+                focused: true,
+            }))
+            .unwrap();
+        let mut buf = Vec::new();
+
+        assert!(read_event(&mut reader, &mut buf).unwrap().is_none());
+        assert!(matches!(
+            read_event(&mut reader, &mut buf).unwrap(),
+            Some(Event::WorkspaceActivated { id: 1, .. })
+        ));
     }
 }
