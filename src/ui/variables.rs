@@ -443,8 +443,7 @@ pub(super) fn show_variable_input(
     remove_app_controllers(window);
 
     let config = &ctx.session.config;
-    let metrics =
-        KeyboardMetrics::from_monitor_width(ctx.session.monitor_width.get(), config.layout);
+    let metrics = ctx.session.metrics.get();
     // The overlay may have moved monitors since the last view applied its sizes.
     apply_scaled_css(&metrics.scaled_css_variables());
 

@@ -28,7 +28,7 @@ use cards::{
     build_full_keyboard_info, build_keyboard, build_static_workspace_infos,
     build_static_workspace_row, DynWorkspaceInfo,
 };
-use metrics::{apply_scaled_css, find_monitor_for_output, get_monitor_width, KeyboardMetrics};
+use metrics::{apply_scaled_css, find_monitor_for_output, KeyboardMetrics};
 use picker::show_template_picker;
 pub use theme::install_base as install_base_styles;
 
@@ -194,8 +194,8 @@ impl HoverPreview {
 /// threaded through every repopulation and sub-view.
 struct OverlaySession {
     config: Rc<ResolvedConfig>,
-    /// Width of the monitor the overlay currently occupies.
-    monitor_width: Cell<i32>,
+    /// Sizes for the monitor the overlay currently occupies.
+    metrics: Cell<KeyboardMetrics>,
     preview: HoverPreview,
     /// The window Move Window moves: focused at open, or after the last output change.
     origin_window: Cell<Option<u64>>,
@@ -246,7 +246,10 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
 
     let session = Rc::new(OverlaySession {
         config: config.clone(),
-        monitor_width: Cell::new(get_monitor_width(focused_monitor.as_ref())),
+        metrics: Cell::new(KeyboardMetrics::for_monitor(
+            focused_monitor.as_ref(),
+            config.layout,
+        )),
         preview: HoverPreview::new(focused_workspace_id_from(&workspaces)),
         origin_window: Cell::new(focused_window_from(&workspaces)),
         selection_made: Cell::new(false),
@@ -350,7 +353,10 @@ fn follow_compositor(
                     .set(focused_window_from(&fresh_workspaces));
                 if let Some(monitor) = current.as_deref().and_then(find_monitor_for_output) {
                     window.set_monitor(Some(&monitor));
-                    session.monitor_width.set(get_monitor_width(Some(&monitor)));
+                    session.metrics.set(KeyboardMetrics::for_monitor(
+                        Some(&monitor),
+                        session.config.layout,
+                    ));
                     // A rebuild would drop the picker or the typed variable
                     // values; the next view built picks up the new monitor.
                     if !session.in_subview.get() {
@@ -655,8 +661,7 @@ fn populate_overlay(
     // Error label + revealer (built first so ActionContext is available for keys)
     let (error_label, error_revealer) = create_error_revealer();
 
-    // Compute metrics from monitor size and apply scaled CSS
-    let metrics = KeyboardMetrics::from_monitor_width(session.monitor_width.get(), config.layout);
+    let metrics = session.metrics.get();
     apply_scaled_css(&metrics.scaled_css_variables());
 
     // Use pre-fetched workspaces or fetch fresh; always fetch windows fresh.
