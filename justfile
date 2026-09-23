@@ -3,11 +3,69 @@ set no-exit-message
 
 just := quote(just_executable()) + " --justfile " + quote(justfile())
 
+# Recipes enter the dev shell themselves unless one is already active.
+dev := if env("IN_NIX_SHELL", "") == "" { "nix develop --command" } else { "" }
+
 [private]
 default:
     @{{ just }} --list
 
+# Build the debug binary; `--release` for an optimised one
+[group('dev')]
+build *args:
+    {{ dev }} cargo build "$@"
+
+# Run the binary, e.g. `just run switch`
+[group('dev')]
+run *args:
+    {{ dev }} cargo run -- "$@"
+
+# Format the code; `--check` only reports
+[group('dev')]
+fmt *args:
+    {{ dev }} cargo fmt "$@"
+
+# Clippy with warnings as errors, as CI runs it
+[group('dev')]
+lint:
+    {{ dev }} cargo clippy -- -D warnings
+
+# Run the unit tests, optionally filtered by name
+[group('dev')]
+test *args:
+    {{ dev }} cargo test "$@"
+
+# Everything CI's check job gates on except `cargo package`
+[group('dev')]
+check: (fmt "--check") lint test changelog-check
+
+# Build the Nix package (with its tests) and evaluate the HM module checks
+[group('dev')]
+flake-check:
+    nix flake check -L
+
+# Run the end-to-end suite in a nested niri, or only the named tests
+[group('e2e')]
+e2e *tests: build
+    {{ dev }} ./e2e/test.sh "$@"
+
+# Drive the nested niri by hand, e.g. `just harness start` (see e2e/README.md)
+[group('e2e')]
+harness *args:
+    {{ dev }} ./e2e/harness.sh "$@"
+
+# Regenerate docs/themes.md and docs/themes/*.png after style.css or themes/ change
+[group('docs')]
+render-themes: build
+    {{ dev }} ./e2e/render-themes.sh
+
+# Regenerate docs/readme.png after the overlay's look changes
+[group('docs')]
+render-readme: build
+    {{ dev }} ./e2e/render-readme.sh
+
 # Print a version's CHANGELOG.md section without its heading (also takes Unreleased)
+[group('release')]
 changelog-notes version:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -19,6 +77,7 @@ changelog-notes version:
     printf '%s\n' "$notes"
 
 # Check CHANGELOG.md's structure and that it has a section for the Cargo.toml version
+[group('release')]
 changelog-check:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -68,6 +127,7 @@ changelog-check:
     echo "CHANGELOG.md OK (current version $version)"
 
 # Roll Unreleased into a new version, bump Cargo.toml/Cargo.lock and commit (never pushes)
+[group('release')]
 release version:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -95,9 +155,9 @@ release version:
     if [[ -n $(git status --porcelain --untracked-files=no -- ':(exclude)CHANGELOG.md') ]]; then
         fail "tracked files other than CHANGELOG.md have changes; commit or stash them first"
     fi
-    command -v cargo >/dev/null || fail "cargo not found; run through nix develop"
+    {{ dev }} cargo --version >/dev/null || fail "cargo not found"
     # Without a cached registry index the real update fails after the edits.
-    cargo update --workspace --offline --dry-run --quiet || fail "cargo can't update Cargo.lock offline; run cargo fetch first"
+    {{ dev }} cargo update --workspace --offline --dry-run --quiet || fail "cargo can't update Cargo.lock offline; run cargo fetch first"
     {{ just }} changelog-check >/dev/null
     if ! {{ just }} changelog-notes Unreleased >/dev/null 2>&1; then
         fail "nothing to release: ## [Unreleased] has no entries"
@@ -122,7 +182,7 @@ release version:
     awk -v new="$new" '!done && /^version = "/ { $0 = "version = \"" new "\""; done = 1 } { print }' \
         Cargo.toml >Cargo.toml.new
     mv Cargo.toml.new Cargo.toml
-    cargo update --workspace --offline --quiet
+    {{ dev }} cargo update --workspace --offline --quiet
     if [[ $(git diff --numstat -- Cargo.lock) != $'1\t1\tCargo.lock' ]]; then
         fail "cargo changed more of Cargo.lock than its own version; see git diff"
     fi

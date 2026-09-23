@@ -352,7 +352,7 @@ window {
 }
 ```
 
-[`themes/dark.css`](themes/dark.css) is a complete palette to copy from. To contribute one, add `themes/<name>.css` — every file there becomes a built-in name — and run `./e2e/render-themes.sh`.
+[`themes/dark.css`](themes/dark.css) is a complete palette to copy from. To contribute one, add `themes/<name>.css` — every file there becomes a built-in name — and run `just render-themes`.
 
 #### Variables
 
@@ -549,20 +549,18 @@ stderr, which for the Home Manager service is
 
 ## Development
 
-Enter the dev shell and build:
+Common tasks are [just](https://just.systems) recipes (`just --list`). They
+enter the Nix dev shell (`nix develop`) themselves unless one is active, so they
+work from any shell with `just` installed; the dev shell provides it too.
 
 ```bash
-nix develop
-cargo build
-```
-
-Lint and test:
-
-```bash
-cargo fmt -- --check   # check formatting
-cargo clippy           # lint (clippy all + pedantic)
-cargo test             # run unit tests
-nix flake check        # build the Nix package, check the Home Manager module
+just build           # debug build; `just build --release` for an optimised one
+just run switch      # run the binary with arguments
+just fmt             # format the code
+just lint            # clippy (all + pedantic), warnings as errors
+just test            # unit tests, optionally filtered by name
+just check           # fmt --check, lint, test and changelog-check, as CI gates
+just flake-check     # build the Nix package, check the Home Manager module
 ```
 
 ### End-to-end tests
@@ -572,12 +570,32 @@ key presses and screenshots, so the IPC choreography is exercised against a real
 compositor:
 
 ```bash
-cargo build
-./e2e/test.sh
+just e2e                           # build, then run the whole suite
+just e2e check_reports_problems    # only the named tests
+just harness start                 # a session to drive by hand
 ```
 
 See [e2e/README.md](e2e/README.md) for the harness verbs, how to drive a session
-by hand, and how key presses are injected.
+by hand, and how key presses are injected. `just render-themes` and
+`just render-readme` regenerate the theme gallery and the README screenshot;
+rerun them after changing `style.css`, `themes/` or the overlay's look.
+
+### Changelog and releases
+
+Every user-visible change adds an entry under `## [Unreleased]` in
+[CHANGELOG.md](CHANGELOG.md), in the same commit, whether or not it lands through
+a pull request. CI fails when the current version has no changelog section.
+
+```bash
+just release minor   # or patch, major, X.Y.Z
+git push             # CI passes -> crates.io and a GitHub release
+```
+
+`release` moves the Unreleased entries into a dated section for the new version,
+bumps `Cargo.toml` and `Cargo.lock`, and commits; it refuses when Unreleased is
+empty or other files have changes, and it never pushes or tags. Once CI passes
+on main, the release workflow publishes the crate and creates the GitHub release
+with that section as its notes.
 
 ### Testing against a running daemon
 

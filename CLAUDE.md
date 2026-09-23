@@ -24,13 +24,15 @@ nix develop --command cargo test             # run unit tests
 
 All three must pass clean before committing.
 
+The `justfile` wraps these and the e2e scripts (`just --list`); its recipes enter the dev shell themselves unless one is active. `just check` runs fmt, clippy with `-D warnings` (as CI does), tests and `changelog-check`.
+
 ## Changelog & Releases
 
 `CHANGELOG.md` follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Every user-visible change adds an entry under `## [Unreleased]` in the commit that makes it: anything a user of the binary, config file, or Home Manager module would notice (CLI, config keys and defaults, overlay behaviour, themes, HM options, packaging and minimum versions). Skip docs/test/refactor/ci/chore-only changes and fixes to things not yet released. Entries that break an existing config, CLI invocation, hook script, or environment start with `**Breaking:**` and say what to change.
 
 ```bash
-nix develop --command just changelog-check                     # CI gate
-nix develop --command just release <X.Y.Z|patch|minor|major>   # roll Unreleased, bump Cargo.toml/Cargo.lock, commit
+just changelog-check                     # CI gate
+just release <X.Y.Z|patch|minor|major>   # roll Unreleased, bump Cargo.toml/Cargo.lock, commit
 ```
 
 `release` never pushes or tags. Pushing its commit to main releases once CI is green: `release.yml` publishes the crate and uses the version's changelog section as the GitHub release body. All changelog parsing lives in the `justfile`.
