@@ -236,8 +236,9 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
     let theme_warnings = theme::apply(&config.theme);
 
     // Single IPC fetch — derive focused output, monitor, and workspace id from it.
-    let workspaces = niri::list_workspaces().unwrap_or_default();
-    let focused_output = focused_output_from(&workspaces);
+    let workspaces = niri::list_workspaces();
+    let listed = workspaces.as_deref().unwrap_or_default();
+    let focused_output = focused_output_from(listed);
     let focused_monitor = focused_output.as_deref().and_then(find_monitor_for_output);
     window.set_monitor(focused_monitor.as_ref());
 
@@ -250,8 +251,8 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
             config.layout,
         )),
         grid: RefCell::new(None),
-        preview: HoverPreview::new(focused_workspace_id_from(&workspaces)),
-        origin_window: Cell::new(focused_window_from(&workspaces)),
+        preview: HoverPreview::new(focused_workspace_id_from(listed)),
+        origin_window: Cell::new(focused_window_from(listed)),
         selection_made: Cell::new(false),
         hover_armed: Cell::new(false),
         in_subview: Cell::new(false),
@@ -280,12 +281,11 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
         window.add_controller(motion);
     }
 
-    populate_overlay(
-        &window,
-        &session,
-        mode,
-        fetch_grid(config, Some(workspaces)).ok(),
-    );
+    // On a failed listing populate_overlay fetches again and shows why.
+    let grid = workspaces
+        .ok()
+        .and_then(|workspaces| fetch_grid(config, Some(workspaces)).ok());
+    populate_overlay(&window, &session, mode, grid);
     free_on_close(&window);
     connect_session_close(&window, &session);
     follow_compositor(&window, session, focused_output);
@@ -341,7 +341,10 @@ fn follow_compositor(
                 break;
             };
 
-            let fresh_workspaces = niri::list_workspaces().unwrap_or_default();
+            // A failed listing keeps the current cards and output.
+            let Ok(fresh_workspaces) = niri::list_workspaces() else {
+                continue;
+            };
             let current = focused_output_from(&fresh_workspaces);
             let mode = Mode::from_window(window.upcast_ref()).unwrap_or(Mode::Normal);
 
@@ -656,7 +659,8 @@ fn fetch_grid(
 
 /// Build (or rebuild) the overlay content for `mode` inside an existing window.
 ///
-/// Renders `grid`, or fetches one when it is `None`.
+/// Renders `grid`, or fetches one when it is `None`; a failed fetch renders
+/// an empty grid with the error.
 fn populate_overlay(
     window: &ApplicationWindow,
     session: &Rc<OverlaySession>,
@@ -691,9 +695,10 @@ fn populate_overlay(
     let metrics = session.metrics.get();
     apply_scaled_css(&metrics.scaled_css_variables());
 
-    let grid = grid.unwrap_or_else(|| {
-        fetch_grid(config, None).unwrap_or_else(|_| GridModel::new(&[], &[], config))
-    });
+    let (grid, fetch_error) = match grid.map_or_else(|| fetch_grid(config, None), Ok) {
+        Ok(grid) => (grid, None),
+        Err(e) => (GridModel::new(&[], &[], config), Some(e)),
+    };
 
     // An armed delete survives refreshes while its target still has windows.
     let confirming = session
@@ -749,6 +754,9 @@ fn populate_overlay(
 
     attach_key_handler(&ctx, &config.close_keybinds);
     attach_close_on_backdrop_click(window, &container);
+    if let Some(e) = fetch_error {
+        show_error(&ctx, &format!("Failed: {e:#}"));
+    }
     *session.grid.borrow_mut() = Some(grid);
 }
 
