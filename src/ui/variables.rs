@@ -166,7 +166,8 @@ fn run_options_command(cmd: &str) -> Vec<String> {
 /// Recursively collect child directories up to `remaining` levels deep.
 ///
 /// Skips hidden entries (names starting with `.`). Only directories are
-/// included. Results are pushed as absolute paths.
+/// included; a symlink to a directory counts and is listed under its link
+/// path. Results are pushed as absolute paths.
 fn collect_children(current: &std::path::Path, remaining: u32, results: &mut Vec<String>) {
     if remaining == 0 {
         return;
@@ -177,7 +178,11 @@ fn collect_children(current: &std::path::Path, remaining: u32, results: &mut Vec
     let mut child_dirs: Vec<std::path::PathBuf> = entries
         .filter_map(Result::ok)
         .filter(|e| e.file_name().to_str().is_some_and(|n| !n.starts_with('.')))
-        .filter(|e| e.file_type().is_ok_and(|ft| ft.is_dir()))
+        // file_type() does not follow links; is_dir() does, so only links pay a stat.
+        .filter(|e| {
+            e.file_type()
+                .is_ok_and(|ft| ft.is_dir() || (ft.is_symlink() && e.path().is_dir()))
+        })
         .map(|e| e.path())
         .collect();
     child_dirs.sort();
@@ -730,6 +735,32 @@ mod tests {
                 format!("{base}/a"),
                 format!("{base}/a/child"),
                 format!("{base}/b"),
+            ]
+        );
+    }
+
+    #[test]
+    fn scan_dir_options_follows_symlinked_dirs() {
+        let tmp = TempDir::new("ndw_test_scan_symlink");
+        let target = TempDir::new("ndw_test_scan_symlink_target");
+        tmp.mkdir("real");
+        tmp.touch("file.txt");
+        target.mkdir("inner");
+        let link = |dest: &std::path::Path, name: &str| {
+            std::os::unix::fs::symlink(dest, tmp.0.join(name)).unwrap();
+        };
+        link(&target.0, "linked");
+        link(&tmp.0.join("file.txt"), "file_link");
+        link(std::path::Path::new("/nonexistent_ndw_target"), "dangling");
+
+        let result = scan_dir_options(&[tmp.path_str()], 2);
+        let base = tmp.path_str();
+        assert_eq!(
+            result,
+            vec![
+                format!("{base}/linked"),
+                format!("{base}/linked/inner"),
+                format!("{base}/real"),
             ]
         );
     }

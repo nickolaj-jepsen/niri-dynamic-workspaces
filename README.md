@@ -203,7 +203,7 @@ programs = ["firefox", "slack"]
   - `"text"` — free-form text input (default); outputs whatever the user types
   - `"options"` — dropdown from a static list (`options` field); outputs the selected option string
   - `"command"` — dropdown from shell command output (`command` field); outputs the selected stdout line
-  - `"dir"` — dropdown from directory scan (`dirs` field; hidden dirs excluded; `depth` controls scan depth, default 1); outputs the absolute path of the selected directory (e.g. `/home/user/dev/myproject`)
+  - `"dir"` — dropdown from directory scan (`dirs` field; hidden dirs excluded; symlinks to directories are included under their link path; `depth` controls scan depth, default 1); outputs the absolute path of the selected directory (e.g. `/home/user/dev/myproject`)
 - If the source resolves to zero options at runtime, the variable falls back to free-form text input
 - Templates with variables show an input form before creating the workspace
 - Templates without variables create immediately as before
