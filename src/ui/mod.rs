@@ -83,6 +83,15 @@ impl Mode {
         }
     }
 
+    /// The footer's first hint: what a key press does in this mode.
+    const fn hint(self) -> &'static str {
+        match self {
+            Self::Normal => "press key to select",
+            Self::Delete => "press key to delete (closes its windows)",
+            Self::MoveWindow => "press key to move the focused window",
+        }
+    }
+
     const fn next(self) -> Self {
         match self {
             Self::Normal => Self::Delete,
@@ -657,7 +666,7 @@ fn populate_overlay(
     container.append(&keyboard);
     container.append(&build_hint_footer(
         &metrics,
-        &["press key to select", "Tab switch mode", "Escape close"],
+        &[mode.hint(), "Tab switch mode", "Escape close"],
     ));
     if let Some(line) = build_problems_line(&session.problems, config.diagnostics.len()) {
         container.append(&line);
@@ -1063,6 +1072,15 @@ mod tests {
         assert_eq!(Mode::Normal.prev(), Mode::MoveWindow);
         assert_eq!(Mode::MoveWindow.prev(), Mode::Delete);
         assert_eq!(Mode::Delete.prev(), Mode::Normal);
+    }
+
+    #[test]
+    fn mode_hint_is_mode_specific() {
+        // The theme gallery and README screenshot render Switch mode.
+        assert_eq!(Mode::Normal.hint(), "press key to select");
+        assert!(Mode::Delete.hint().contains("closes its windows"));
+        let [switch, delete, move_window] = Mode::all().map(Mode::hint);
+        assert!(switch != delete && delete != move_window && move_window != switch);
     }
 
     #[test]
