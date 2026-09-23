@@ -97,7 +97,7 @@ press_codes() {
     WAYLAND_DISPLAY=$(cat "$run_dir/cage.display") wtype "${args[@]}"
 }
 
-overlay_open() { [[ $(in_env niri msg -j layers | jq length) -gt 0 ]]; }
+overlay_open() { in_env niri msg -j layers | jq -e 'any(.namespace == "niri-dynamic-workspaces")' >/dev/null; }
 output_width() { in_env niri msg -j outputs | jq '.[].logical.width'; }
 output_resized() { [[ $(output_width) != "$1" ]]; }
 overlay_closed() { ! overlay_open; }
