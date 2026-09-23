@@ -158,6 +158,8 @@ their key instead of in the row above the keyboard.
 - Urgent windows highlight the key, like any other workspace card
 - If the named workspace doesn't exist, the key appears disabled and pressing it shows an error
 - Names match case-insensitively, as in niri
+- A name made of digits can be written as a number (`static = 1`); quote one
+  with a leading zero (`static = "01"`)
 
 #### Templates
 
@@ -194,7 +196,7 @@ programs = ["firefox", "slack"]
 ```
 
 - Each template needs a `programs` list (templates with empty programs are skipped)
-- The optional `key` field assigns a hotkey (a-z or 0-9) for quick selection in the picker
+- The optional `key` field assigns a hotkey (a-z or 0-9) for quick selection in the picker; a digit can be written as a number (`key = 2`)
 - Templates without a `key` get one auto-assigned (2-9 then a-z; `1` is reserved for the "Empty" option)
 - The picker always includes an "Empty" option that uses `default_programs`
 - Workspaces with per-key `[workspace.KEY].programs` skip the picker and create directly
