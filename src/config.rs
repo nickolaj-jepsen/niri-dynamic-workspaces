@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use gdk4::{Key, ModifierType};
+use indexmap::IndexMap;
 use serde::Deserialize;
 
 use crate::niri::CleanupConfig;
@@ -16,7 +17,8 @@ struct Config {
     keybinds: KeybindsConfig,
     hooks: HooksConfig,
     workspace: HashMap<String, WorkspaceEntry>,
-    template: HashMap<String, TemplateEntry>,
+    /// In declaration order, which sets the picker order and automatic keys.
+    template: IndexMap<String, TemplateEntry>,
 }
 
 #[derive(Default, Deserialize)]
@@ -57,7 +59,8 @@ struct TemplateEntry {
     programs: Vec<String>,
     #[serde(deserialize_with = "string_or_integer")]
     key: Option<String>,
-    variables: HashMap<String, VariableEntry>,
+    /// In declaration order: the form's order, and the first fills in the title.
+    variables: IndexMap<String, VariableEntry>,
     on_create: Vec<String>,
     title: Option<String>,
 }
@@ -688,13 +691,7 @@ impl Config {
         // Reserve '1' for the "Empty" option in the template picker.
         let mut used_hotkeys: HashSet<char> = HashSet::from(['1']);
 
-        // Collect and sort template names for deterministic ordering
-        let mut template_names: Vec<String> = self.template.keys().cloned().collect();
-        template_names.sort();
-
-        for name in &template_names {
-            let entry = &self.template[name];
-
+        for (name, entry) in &self.template {
             if entry.programs.is_empty() {
                 warnings.push(format!(
                     "ignoring template '{name}': programs list is empty"
@@ -735,7 +732,7 @@ impl Config {
             };
 
             // Resolve variables
-            let mut variables: Vec<TemplateVariable> = entry
+            let variables: Vec<TemplateVariable> = entry
                 .variables
                 .iter()
                 .map(|(var_name, var_entry)| {
@@ -756,7 +753,6 @@ impl Config {
                     }
                 })
                 .collect();
-            variables.sort_by(|a, b| a.name.cmp(&b.name));
 
             // Warn about variables whose values would overwrite each other in hooks
             let mut env_names: HashMap<String, &str> = HashMap::new();
@@ -1925,7 +1921,7 @@ layout = "dvorak"
 
     #[test]
     fn resolve_templates_basic() {
-        let mut template = HashMap::new();
+        let mut template = IndexMap::new();
         template.insert(
             "dev".to_string(),
             TemplateEntry {
@@ -1949,18 +1945,18 @@ layout = "dvorak"
         let (resolved, warnings) = config.resolve();
         assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
         assert_eq!(resolved.templates.len(), 2);
-        // Sorted alphabetically
-        assert_eq!(resolved.templates[0].name, "browser");
-        assert_eq!(resolved.templates[1].name, "dev");
+        // In insertion order
+        assert_eq!(resolved.templates[0].name, "dev");
+        assert_eq!(resolved.templates[1].name, "browser");
         // Explicit key preserved
-        assert_eq!(resolved.templates[1].key, Some('d'));
+        assert_eq!(resolved.templates[0].key, Some('d'));
         // Auto-assigned key (starts at '2', since '1' is reserved for Empty)
-        assert_eq!(resolved.templates[0].key, Some('2'));
+        assert_eq!(resolved.templates[1].key, Some('2'));
     }
 
     #[test]
     fn resolve_templates_empty_programs_warns() {
-        let mut template = HashMap::new();
+        let mut template = IndexMap::new();
         template.insert(
             "empty".to_string(),
             TemplateEntry {
@@ -1982,7 +1978,7 @@ layout = "dvorak"
 
     #[test]
     fn resolve_templates_hotkey_validation() {
-        let mut template = HashMap::new();
+        let mut template = IndexMap::new();
         template.insert(
             "good".to_string(),
             TemplateEntry {
@@ -2022,7 +2018,7 @@ layout = "dvorak"
 
     #[test]
     fn resolve_templates_duplicate_hotkey_warns() {
-        let mut template = HashMap::new();
+        let mut template = IndexMap::new();
         template.insert(
             "alpha".to_string(),
             TemplateEntry {
@@ -2046,7 +2042,7 @@ layout = "dvorak"
         let (resolved, warnings) = config.resolve();
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("duplicate hotkey"));
-        // First alphabetically keeps the key, second gets auto-assigned
+        // The first declared keeps the key, the second gets auto-assigned
         let alpha = resolved
             .templates
             .iter()
@@ -2072,7 +2068,7 @@ layout = "dvorak"
         // With templates, no per-workspace programs → true
         config = Config {
             template: {
-                let mut m = HashMap::new();
+                let mut m = IndexMap::new();
                 m.insert(
                     "dev".to_string(),
                     TemplateEntry {
@@ -2091,7 +2087,7 @@ layout = "dvorak"
         // With per-workspace programs → false (picker skipped)
         config = Config {
             template: {
-                let mut m = HashMap::new();
+                let mut m = IndexMap::new();
                 m.insert(
                     "dev".to_string(),
                     TemplateEntry {
@@ -2122,7 +2118,7 @@ layout = "dvorak"
 
     #[test]
     fn resolve_templates_auto_shortcut_assignment() {
-        let mut template = HashMap::new();
+        let mut template = IndexMap::new();
         template.insert(
             "alpha".to_string(),
             TemplateEntry {
@@ -2178,7 +2174,7 @@ layout = "dvorak"
 
     #[test]
     fn resolve_templates_key_1_reserved_for_empty() {
-        let mut template = HashMap::new();
+        let mut template = IndexMap::new();
         template.insert(
             "mytemplate".to_string(),
             TemplateEntry {
@@ -2219,10 +2215,55 @@ programs = ["firefox"]
         let (resolved, warnings) = config.resolve();
         assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
         assert_eq!(resolved.templates.len(), 2);
-        assert_eq!(resolved.templates[0].name, "browser");
-        assert_eq!(resolved.templates[1].name, "dev");
-        assert_eq!(resolved.templates[1].key, Some('d'));
-        assert_eq!(resolved.templates[1].programs, vec!["kitty", "code ."]);
+        assert_eq!(resolved.templates[0].name, "dev");
+        assert_eq!(resolved.templates[1].name, "browser");
+        assert_eq!(resolved.templates[0].key, Some('d'));
+        assert_eq!(resolved.templates[0].programs, vec!["kitty", "code ."]);
+    }
+
+    #[test]
+    fn toml_templates_keep_declaration_order() {
+        let config = parse_config(
+            "[template.zeta]\nprograms = [\"z\"]\n\n[template.alpha]\nprograms = [\"a\"]\n",
+            Path::new("c.toml"),
+        );
+        let names: Vec<_> = config.templates.iter().map(|t| t.name.as_str()).collect();
+        let keys: Vec<_> = config.templates.iter().map(|t| t.key).collect();
+        assert_eq!(names, ["zeta", "alpha"]);
+        assert_eq!(keys, [Some('2'), Some('3')]);
+    }
+
+    #[test]
+    fn toml_variables_keep_declaration_order_for_title() {
+        let config = parse_config(
+            r#"
+[template.dev]
+programs = ["code {{project}}", "git switch {{branch}}"]
+
+[template.dev.variables.project]
+name = "Project"
+type = "dir"
+dirs = ["~/dev"]
+
+[template.dev.variables.branch]
+name = "Branch"
+type = "options"
+options = ["main"]
+"#,
+            Path::new("c.toml"),
+        );
+        assert!(config.diagnostics.is_empty(), "{:?}", config.diagnostics);
+        let variables = &config.templates[0].variables;
+        assert_eq!(variables[0].name, "project");
+        assert_eq!(variables[1].name, "branch");
+        let values = HashMap::from([
+            ("project".to_string(), "/home/me/dev/ndw".to_string()),
+            ("branch".to_string(), "main".to_string()),
+        ]);
+        assert_eq!(
+            resolve_workspace_title(None, variables, &values),
+            Some("ndw".to_string())
+        );
     }
 
     #[test]
@@ -2864,7 +2905,7 @@ name = "Note"
 
     #[test]
     fn resolve_templates_with_variables() {
-        let mut variables = HashMap::new();
+        let mut variables = IndexMap::new();
         variables.insert(
             "path".to_string(),
             VariableEntry {
@@ -2881,7 +2922,7 @@ name = "Note"
                 ..VariableEntry::default()
             },
         );
-        let mut template = HashMap::new();
+        let mut template = IndexMap::new();
         template.insert(
             "dev".to_string(),
             TemplateEntry {
@@ -2902,12 +2943,12 @@ name = "Note"
         assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
         let tmpl = &resolved.templates[0];
         assert_eq!(tmpl.variables.len(), 2);
-        // Sorted by name
-        assert_eq!(tmpl.variables[0].name, "branch");
-        assert_eq!(tmpl.variables[0].label, "Git branch");
+        // In insertion order
+        assert_eq!(tmpl.variables[0].name, "path");
+        assert_eq!(tmpl.variables[0].label, "Project path");
         assert_eq!(tmpl.variables[0].var_type, VariableType::Text);
-        assert_eq!(tmpl.variables[1].name, "path");
-        assert_eq!(tmpl.variables[1].label, "Project path");
+        assert_eq!(tmpl.variables[1].name, "branch");
+        assert_eq!(tmpl.variables[1].label, "Git branch");
     }
 
     // --- Variable type resolution ---
@@ -2915,9 +2956,9 @@ name = "Note"
     /// Resolve a single variable entry through config resolution and return
     /// the resulting `(VariableType, Vec<warnings>)`.
     fn resolve_single_variable(var_entry: VariableEntry) -> (VariableType, Vec<String>) {
-        let mut variables = HashMap::new();
+        let mut variables = IndexMap::new();
         variables.insert("project".to_string(), var_entry);
-        let mut template = HashMap::new();
+        let mut template = IndexMap::new();
         template.insert(
             "dev".to_string(),
             TemplateEntry {
@@ -3012,7 +3053,7 @@ options = ["main", "develop", "staging"]
 
     #[test]
     fn resolve_templates_empty_variable_name_warns() {
-        let mut variables = HashMap::new();
+        let mut variables = IndexMap::new();
         variables.insert(
             "path".to_string(),
             VariableEntry {
@@ -3021,7 +3062,7 @@ options = ["main", "develop", "staging"]
                 ..VariableEntry::default()
             },
         );
-        let mut template = HashMap::new();
+        let mut template = IndexMap::new();
         template.insert(
             "dev".to_string(),
             TemplateEntry {
@@ -3043,7 +3084,7 @@ options = ["main", "develop", "staging"]
 
     #[test]
     fn resolve_templates_unreferenced_variable_warns() {
-        let mut variables = HashMap::new();
+        let mut variables = IndexMap::new();
         variables.insert(
             "unused".to_string(),
             VariableEntry {
@@ -3052,7 +3093,7 @@ options = ["main", "develop", "staging"]
                 ..VariableEntry::default()
             },
         );
-        let mut template = HashMap::new();
+        let mut template = IndexMap::new();
         template.insert(
             "dev".to_string(),
             TemplateEntry {
@@ -3211,7 +3252,7 @@ name = "Path"
 
     #[test]
     fn resolve_templates_undefined_reference_warns() {
-        let mut template = HashMap::new();
+        let mut template = IndexMap::new();
         template.insert(
             "dev".to_string(),
             TemplateEntry {
@@ -3479,7 +3520,7 @@ type = "text"
 
     #[test]
     fn resolve_template_on_create() {
-        let mut template = HashMap::new();
+        let mut template = IndexMap::new();
         template.insert(
             "dev".to_string(),
             TemplateEntry {
