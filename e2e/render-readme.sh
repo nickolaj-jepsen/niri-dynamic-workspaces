@@ -65,6 +65,11 @@ cat >"$run/config/gtk-4.0/gtk.css" <<'CSS'
 @define-color window_fg_color #dad8ce;
 @define-color accent_bg_color #cf6a4c;
 CSS
+# Without the settings portal GTK adds minimize and maximize; keep GNOME's close-only title bar.
+cat >"$run/config/gtk-4.0/settings.ini" <<'INI'
+[Settings]
+gtk-decoration-layout=appmenu:close
+INI
 
 populate
 # An editor beside a column of stacked terminals.
