@@ -1,5 +1,5 @@
-//! Layout-independent key resolution and the held-key guard shared by the
-//! overlay views.
+//! Layout-independent key resolution, the Alt variants of workspace keys, and
+//! the held-key guard shared by the overlay views.
 
 use std::cell::Cell;
 
@@ -71,6 +71,38 @@ fn keymap_workspace_char(group: u32, entries: &[KeymapEntry]) -> Option<char> {
 
 fn deliberate_mods(state: gdk4::ModifierType, consumed: gdk4::ModifierType) -> gdk4::ModifierType {
     state & !consumed & ACTION_MODS
+}
+
+/// How a workspace key acts, set by the modifier held with it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum KeyVariant {
+    Plain,
+    /// Switch brings the workspace to the focused output first; Move Window
+    /// leaves focus where it is.
+    Alt,
+}
+
+/// The variant a key press with modifiers `mods` selects; `None` when it
+/// selects nothing. Alt counts only when `alt` allows it.
+pub(super) fn key_variant(mods: gdk4::ModifierType, alt: bool) -> Option<KeyVariant> {
+    let mods = mods & ACTION_MODS;
+    if mods.is_empty() {
+        Some(KeyVariant::Plain)
+    } else if alt && mods == gdk4::ModifierType::ALT_MASK {
+        Some(KeyVariant::Alt)
+    } else {
+        None
+    }
+}
+
+/// The variant a click with modifiers `mods` selects. Only Alt, when `alt`
+/// allows it, changes it: other modifiers click as if none were held.
+pub(super) fn click_variant(mods: gdk4::ModifierType, alt: bool) -> KeyVariant {
+    if alt && mods & ACTION_MODS == gdk4::ModifierType::ALT_MASK {
+        KeyVariant::Alt
+    } else {
+        KeyVariant::Plain
+    }
 }
 
 /// Keycode of the last selecting press. GTK repeats a held key client-side
@@ -159,6 +191,44 @@ mod tests {
             deliberate_mods(ModifierType::ALT_MASK, ModifierType::empty()),
             ModifierType::ALT_MASK
         );
+    }
+
+    #[test]
+    fn key_variant_cases() {
+        let alt = ModifierType::ALT_MASK;
+        for (mods, expected) in [
+            (ModifierType::empty(), Some(KeyVariant::Plain)),
+            (alt, Some(KeyVariant::Alt)),
+            (ModifierType::SUPER_MASK, Some(KeyVariant::Plain)),
+            (ModifierType::BUTTON1_MASK, Some(KeyVariant::Plain)),
+            (ModifierType::CONTROL_MASK, None),
+            (alt | ModifierType::SHIFT_MASK, None),
+        ] {
+            assert_eq!(key_variant(mods, true), expected, "{mods:?}");
+        }
+        // Without Alt variants an Alt press is ignored, as any other modifier.
+        assert_eq!(key_variant(alt, false), None);
+        assert_eq!(
+            key_variant(ModifierType::empty(), false),
+            Some(KeyVariant::Plain)
+        );
+    }
+
+    #[test]
+    fn click_variant_cases() {
+        let button = ModifierType::BUTTON1_MASK;
+        let alt = ModifierType::ALT_MASK;
+        assert_eq!(click_variant(button | alt, true), KeyVariant::Alt);
+        assert_eq!(click_variant(button | alt, false), KeyVariant::Plain);
+        assert_eq!(
+            click_variant(button | ModifierType::SHIFT_MASK, true),
+            KeyVariant::Plain
+        );
+        assert_eq!(
+            click_variant(alt | ModifierType::CONTROL_MASK, true),
+            KeyVariant::Plain
+        );
+        assert_eq!(click_variant(button, true), KeyVariant::Plain);
     }
 
     #[test]

@@ -7,6 +7,7 @@ use gtk4::{Align, Box as GtkBox, EventControllerMotion, GestureClick, Label, Ori
 use crate::config::ResolvedConfig;
 use crate::niri;
 
+use super::keys::{click_variant, KeyVariant};
 use super::metrics::KeyboardMetrics;
 use super::{
     dispatch_action, display_key_char, finish, focus_selected, focused_output_from, show_error,
@@ -459,8 +460,9 @@ fn build_key_widget(
     let ch = info.char_id;
     let click_ctx = ctx.clone();
     let click = GestureClick::new();
-    click.connect_released(move |_, _, _, _| {
-        dispatch_action(ch, &click_ctx);
+    click.connect_released(move |gesture, _, _, _| {
+        let variant = click_variant(gesture.current_event_state(), click_ctx.alt_variants());
+        dispatch_action(ch, &click_ctx, variant);
     });
     key_box.add_controller(click);
 
@@ -551,11 +553,14 @@ fn build_static_card(
         let id = info.id;
         let click_ctx = ctx.clone();
         let click = GestureClick::new();
-        click.connect_released(move |_, _, _, _| {
+        click.connect_released(move |gesture, _, _, _| {
+            // Only Move Window has a variant here: the row holds this output's workspaces alone.
+            let follow = click_variant(gesture.current_event_state(), click_ctx.alt_variants())
+                == KeyVariant::Plain;
             let result = match click_ctx.mode {
                 Mode::Normal => focus_selected(&click_ctx, id),
                 Mode::MoveWindow => window_to_move(&click_ctx).and_then(|window| {
-                    niri::move_window_to_workspace_by_id(id, Some(window), true)
+                    niri::move_window_to_workspace_by_id(id, Some(window), follow)
                 }),
                 Mode::Delete => return,
             };
@@ -685,6 +690,7 @@ pub(super) mod tests {
             hide_empty_static: false,
             inhibit_compositor_shortcuts: true,
             confirm_delete: true,
+            alt_variants: false,
             layout: &LAYOUT_QWERTY,
             theme: crate::config::Theme::default(),
             templates: Vec::new(),

@@ -344,6 +344,34 @@ EOF
     "$h" closed && no_ws dyn-q
 }
 
+test_overlay_alt_key_moves_without_following() {
+    general alt_variants true && "$h" app switch a && spawn_window || return 1
+    "$h" overlay move-window && "$h" press 56+46 || return 1 # Alt+c
+    until_true window_on dyn-c && "$h" closed && stays_focused dyn-a 1
+}
+
+test_overlay_alt_click_moves_without_following() {
+    local alt status
+    general alt_variants true && "$h" app switch a && spawn_window || return 1
+    "$h" overlay move-window || return 1
+    "$h" press 56 2500 & # hold Alt while clicking
+    alt=$!
+    sleep 1 && "$h" key c
+    status=$?
+    wait "$alt" && ((status == 0)) || return 1
+    until_true window_on dyn-c && "$h" closed && stays_focused dyn-a 1
+}
+
+# Off by default: a niri Mod of Alt, still held from the launch bind, must not pick the variant.
+test_overlay_alt_key_ignored_by_default() {
+    "$h" app switch a && spawn_window || return 1
+    "$h" overlay move-window && "$h" press 56+46 || return 1 # Alt+c
+    sleep 0.5
+    "$h" open && no_ws dyn-c || return 1
+    "$h" press 46 || return 1 # c
+    until_true window_on dyn-c && "$h" closed && until_true focused_is dyn-c
+}
+
 # add_templates: beta on key 3 without variables, then gamma with a text variable.
 add_templates() {
     add_config <<'EOF'
@@ -766,6 +794,9 @@ tests=(
     overlay_close_bind_ignores_caps_lock
     overlay_close_bind_on_cyrillic
     overlay_close_bind_with_shift
+    overlay_alt_key_moves_without_following
+    overlay_alt_click_moves_without_following
+    overlay_alt_key_ignored_by_default
     held_key_does_not_pick_template
     held_enter_does_not_submit_form
     form_refuses_unmatched_option

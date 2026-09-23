@@ -115,6 +115,7 @@ struct GeneralConfig {
     hide_empty_static: bool,
     inhibit_compositor_shortcuts: bool,
     confirm_delete: bool,
+    alt_variants: bool,
     theme: String,
 }
 
@@ -129,6 +130,7 @@ impl Default for GeneralConfig {
             hide_empty_static: false,
             inhibit_compositor_shortcuts: true,
             confirm_delete: true,
+            alt_variants: false,
             theme: "gtk".to_string(),
         }
     }
@@ -181,6 +183,10 @@ pub struct ResolvedConfig {
     pub inhibit_compositor_shortcuts: bool,
     /// Delete mode asks for a second press before closing a workspace's windows.
     pub confirm_delete: bool,
+    /// Alt+key or Alt+click brings a workspace over (Switch) or moves a
+    /// window without following it (Move Window). Off by default: an Alt
+    /// niri Mod still held from the launch bind would trigger it.
+    pub alt_variants: bool,
     pub layout: &'static KeyboardLayout,
     pub theme: Theme,
     pub templates: Vec<Template>,
@@ -889,6 +895,7 @@ impl Config {
             hide_empty_static: self.general.hide_empty_static,
             inhibit_compositor_shortcuts: self.general.inhibit_compositor_shortcuts,
             confirm_delete: self.general.confirm_delete,
+            alt_variants: self.general.alt_variants,
             layout,
             theme,
             templates,
@@ -1331,6 +1338,7 @@ const GENERAL_KEYS: &[&str] = &[
     "hide_empty_static",
     "inhibit_compositor_shortcuts",
     "confirm_delete",
+    "alt_variants",
     "theme",
 ];
 
@@ -1623,6 +1631,7 @@ mod tests {
         assert!(!resolved.hide_empty_static);
         assert!(resolved.inhibit_compositor_shortcuts);
         assert!(resolved.confirm_delete);
+        assert!(!resolved.alt_variants);
     }
 
     #[test]
@@ -1651,6 +1660,20 @@ mod tests {
         let (resolved, warnings) = config.resolve();
         assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
         assert!(!resolved.confirm_delete);
+    }
+
+    #[test]
+    fn resolve_alt_variants_enabled() {
+        let config = Config {
+            general: GeneralConfig {
+                alt_variants: true,
+                ..GeneralConfig::default()
+            },
+            ..Config::default()
+        };
+        let (resolved, warnings) = config.resolve();
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        assert!(resolved.alt_variants);
     }
 
     #[test]
@@ -2828,6 +2851,7 @@ hover_preview = false
 hide_empty_static = true
 inhibit_compositor_shortcuts = false
 confirm_delete = false
+alt_variants = true
 theme = "nord"
 
 [keybinds]
@@ -3685,6 +3709,7 @@ type = "text"
             hide_empty_static: false,
             inhibit_compositor_shortcuts: true,
             confirm_delete: true,
+            alt_variants: false,
             layout: &LAYOUT_QWERTY,
             theme: Theme::default(),
             templates,
