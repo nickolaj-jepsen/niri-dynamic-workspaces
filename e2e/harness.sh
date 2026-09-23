@@ -53,6 +53,11 @@ key_position() {
     echo "$((x0 + 98 * ${#rest})) $y"
 }
 
+# static_position <i> [n]: the i-th of n cards in the static row, which is centred above the number row.
+static_position() {
+    echo "$((636 + 98 * ($1 - 1) - 49 * (${2:-1} - 1))) 95"
+}
+
 mode_position() {
     case $1 in
     switch) echo "546 618" ;;
@@ -200,6 +205,7 @@ usage: harness.sh <command>
   config [file]    replace its config.toml with file, or stdin
   overlay [mode]   open the overlay in the background, wait until it is mapped
   key <char>       click the card for a-z / 0-9
+  static <i> [n]   click the i-th of n cards in the static row
   mode <name>      click switch | delete | move
   click <x> <y>    click anywhere
   type <args...>   press keys with wtype (c, -M ctrl -k c, ...)
@@ -238,6 +244,7 @@ press)   press_codes "$1" "${2:-}" ;;
 escape)  in_env wtype -k Escape ;;
 click)   click_at "$1" "$2" ;;
 key)     click_at $(key_position "$1") ;;
+static)  click_at $(static_position "$1" "${2:-1}") ;;
 mode)    click_at $(mode_position "$1") ;;
 shot)    in_env grim "$out_dir/${1:-shot}.png" && echo "$out_dir/${1:-shot}.png" ;;
 state)   in_env niri msg -j workspaces ;;

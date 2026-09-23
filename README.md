@@ -143,7 +143,8 @@ their key instead of in the row above the keyboard.
 - `programs` has no effect on a pinned key and produces a warning
 - Empty pinned workspaces appear dimmed in switch mode (the key still works)
 - Urgent windows highlight the key, like any other workspace card
-- If the named workspace doesn't exist, the key appears disabled
+- If the named workspace doesn't exist, the key appears disabled and pressing it shows an error
+- Names match case-insensitively, as in niri
 
 #### Templates
 

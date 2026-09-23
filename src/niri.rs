@@ -47,6 +47,40 @@ pub fn focus_workspace_by_name(name: &str) -> anyhow::Result<()> {
     })
 }
 
+/// Focus an existing workspace by id (no creation).
+///
+/// niri answers `Handled` even when no workspace has that id.
+pub fn focus_workspace_by_id(id: u64) -> anyhow::Result<()> {
+    send_action(Action::FocusWorkspace {
+        reference: WorkspaceReferenceArg::Id(id),
+    })
+}
+
+/// Whether two workspace names match the way niri matches them: ASCII case-insensitively.
+pub fn same_workspace_name(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b)
+}
+
+fn workspace_id_by_name_with(client: &mut impl NiriClient, name: &str) -> anyhow::Result<u64> {
+    list_workspaces_with(client)?
+        .iter()
+        .find(|w| {
+            w.name
+                .as_deref()
+                .is_some_and(|n| same_workspace_name(n, name))
+        })
+        .map(|w| w.id)
+        .with_context(|| format!("workspace '{name}' not found"))
+}
+
+/// Id of the existing workspace named `name`, matched like niri matches names.
+///
+/// # Errors
+/// When no workspace has that name.
+pub fn workspace_id_by_name(name: &str) -> anyhow::Result<u64> {
+    workspace_id_by_name_with(&mut SocketClient, name)
+}
+
 /// The focused workspace's active window: what `window_id: None` would move.
 ///
 /// Layout-based, so it stays valid while the overlay holds keyboard focus.
@@ -385,11 +419,11 @@ fn reorder_workspace_columns_inner(request: &ReorderRequest) -> anyhow::Result<(
     Ok(())
 }
 
-/// Move the focused window to an existing workspace by name.
-pub fn move_window_to_workspace_by_name(name: &str) -> anyhow::Result<()> {
+/// Move the focused window to an existing workspace by id.
+pub fn move_window_to_workspace_by_id(id: u64) -> anyhow::Result<()> {
     send_action(Action::MoveWindowToWorkspace {
         window_id: None,
-        reference: WorkspaceReferenceArg::Name(name.to_string()),
+        reference: WorkspaceReferenceArg::Id(id),
         focus: true,
     })
 }
@@ -970,6 +1004,28 @@ mod tests {
         let err = move_window_impl(&mut client, "dyn-", 'x', "dyn-x").unwrap_err();
 
         assert!(err.to_string().contains("no focused window"), "{err}");
+        assert_eq!(client.sent.len(), 1);
+    }
+
+    #[test]
+    fn workspace_id_by_name_ignores_ascii_case() {
+        let mut client = MockClient::new(vec![Response::Workspaces(vec![
+            test_workspace(4, Some("dyn-a"), false),
+            test_workspace(5, Some("Mail"), false),
+        ])]);
+
+        assert_eq!(workspace_id_by_name_with(&mut client, "mail").unwrap(), 5);
+    }
+
+    #[test]
+    fn workspace_id_by_name_errors_when_missing() {
+        let mut client = MockClient::new(vec![Response::Workspaces(vec![test_workspace(
+            1, None, true,
+        )])]);
+
+        let err = workspace_id_by_name_with(&mut client, "mail").unwrap_err();
+
+        assert!(err.to_string().contains("'mail' not found"), "{err}");
         assert_eq!(client.sent.len(), 1);
     }
 

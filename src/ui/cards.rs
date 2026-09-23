@@ -17,6 +17,8 @@ use super::{
     reason = "four bools represent independent workspace states"
 )]
 pub(super) struct StaticWorkspaceInfo {
+    id: u64,
+    /// Display label: the name, or the index of an unnamed workspace.
     name: String,
     is_focused: bool,
     is_active: bool,
@@ -40,6 +42,8 @@ pub(super) struct DynWorkspaceInfo {
     pub(super) is_empty: bool,
     pub(super) name: Option<String>,
     pub(super) ws_name: Option<String>,
+    /// Id of the live workspace; `None` when it does not exist.
+    pub(super) ws_id: Option<u64>,
     pub(super) output: Option<String>,
 }
 
@@ -55,6 +59,7 @@ impl DynWorkspaceInfo {
             is_empty: false,
             name: None,
             ws_name: None,
+            ws_id: None,
             output: None,
         }
     }
@@ -120,6 +125,7 @@ fn build_dyn_workspace_infos(
                 is_empty: !occupied_ws_ids.contains(&ws.id),
                 name,
                 ws_name: Some(ws_name.clone()),
+                ws_id: Some(ws.id),
                 output: ws.output.clone(),
             })
         })
@@ -145,9 +151,11 @@ fn build_dyn_workspace_infos(
     // Statically mapped keys mirror the state of their pinned workspace;
     // a missing target renders as uncreated (disabled).
     for (&ch, target) in &config.static_workspaces {
-        let live = workspaces
-            .iter()
-            .find(|ws| ws.name.as_deref() == Some(target.as_str()));
+        let live = workspaces.iter().find(|ws| {
+            ws.name
+                .as_deref()
+                .is_some_and(|n| niri::same_workspace_name(n, target))
+        });
         let is_focused = live.is_some_and(|ws| Some(ws.id) == focused_ws_id);
         infos.push(DynWorkspaceInfo {
             char_id: ch,
@@ -159,6 +167,7 @@ fn build_dyn_workspace_infos(
             is_empty: live.is_some_and(|ws| !occupied_ws_ids.contains(&ws.id)),
             name: config.workspace_names.get(&ch).cloned(),
             ws_name: Some(target.clone()),
+            ws_id: live.map(|ws| ws.id),
             output: live.and_then(|ws| ws.output.clone()),
         });
     }
@@ -192,9 +201,12 @@ pub(super) fn build_static_workspace_infos(
         })
         // Workspaces pinned to a key appear on the keyboard, not in this row.
         .filter(|ws| {
-            ws.name
-                .as_ref()
-                .is_none_or(|n| !config.static_workspaces.values().any(|t| t == n))
+            ws.name.as_ref().is_none_or(|n| {
+                !config
+                    .static_workspaces
+                    .values()
+                    .any(|t| niri::same_workspace_name(t, n))
+            })
         })
         // Never hide the focused or urgent workspace, even when empty.
         .filter(|ws| {
@@ -205,6 +217,7 @@ pub(super) fn build_static_workspace_infos(
                 || urgent_ws_ids.contains(&ws.id)
         })
         .map(|ws| StaticWorkspaceInfo {
+            id: ws.id,
             name: ws.name.clone().unwrap_or_else(|| ws.idx.to_string()),
             is_focused: ws.is_focused,
             is_active: !ws.is_focused && ws.is_active,
@@ -311,13 +324,12 @@ fn build_card_shell(classes: Vec<&str>, key_size: i32) -> (GtkBox, GtkBox) {
 /// the cursor is already over a card the moment the overlay appears. It is
 /// set to `true` by the window-level motion controller after the first real
 /// mouse movement.
-fn attach_hover_preview(widget: &GtkBox, ws_name: &str, session: &Rc<OverlaySession>) {
-    let hover_name = ws_name.to_owned();
+fn attach_hover_preview(widget: &GtkBox, ws_id: u64, session: &Rc<OverlaySession>) {
     let hover_session = session.clone();
     let motion = EventControllerMotion::new();
     motion.connect_enter(move |_, _, _| {
         if hover_session.hover_armed.get() {
-            let _ = niri::focus_workspace_by_name(&hover_name);
+            let _ = niri::focus_workspace_by_id(ws_id);
         }
     });
     widget.add_controller(motion);
@@ -381,8 +393,8 @@ fn build_key_widget(
             _ => false,
         };
         if same_output {
-            if let Some(ref ws_name) = info.ws_name {
-                attach_hover_preview(&key_box, ws_name, &ctx.session);
+            if let Some(ws_id) = info.ws_id {
+                attach_hover_preview(&key_box, ws_id, &ctx.session);
             }
         }
     }
@@ -455,13 +467,13 @@ fn build_static_card(
     inner.append(&name_label);
 
     if !is_disabled {
-        let name = info.name.clone();
+        let id = info.id;
         let click_ctx = ctx.clone();
         let click = GestureClick::new();
         click.connect_released(move |_, _, _, _| {
             let result = match click_ctx.mode {
-                Mode::Normal => niri::focus_workspace_by_name(&name),
-                Mode::MoveWindow => niri::move_window_to_workspace_by_name(&name),
+                Mode::Normal => niri::focus_workspace_by_id(id),
+                Mode::MoveWindow => niri::move_window_to_workspace_by_id(id),
                 Mode::Delete => return,
             };
             if let Err(e) = result {
@@ -473,7 +485,7 @@ fn build_static_card(
         card.add_controller(click);
 
         if mode == Mode::Normal && ctx.session.config.hover_preview {
-            attach_hover_preview(&card, &info.name, &ctx.session);
+            attach_hover_preview(&card, info.id, &ctx.session);
         }
     }
 
@@ -614,7 +626,9 @@ pub(super) mod tests {
         assert_eq!(infos.len(), 2);
         // Sorted by char_id
         assert_eq!(infos[0].char_id, 'a');
+        assert_eq!(infos[0].ws_id, Some(20));
         assert_eq!(infos[1].char_id, 'b');
+        assert_eq!(infos[1].ws_id, Some(10));
     }
 
     #[test]
@@ -752,6 +766,7 @@ pub(super) mod tests {
         assert!(info.is_focused);
         assert!(!info.is_active); // focused trumps active
         assert_eq!(info.ws_name.as_deref(), Some("01"));
+        assert_eq!(info.ws_id, Some(5));
         // No configured display name → no name label
         assert_eq!(info.name, None);
         assert_eq!(info.output.as_deref(), Some("DP-1"));
@@ -806,8 +821,21 @@ pub(super) mod tests {
         assert_eq!(infos.len(), 1);
         assert!(infos[0].is_static);
         assert!(infos[0].is_uncreated);
+        assert_eq!(infos[0].ws_id, None);
         // Configured display name overrides the target workspace name
         assert_eq!(infos[0].name.as_deref(), Some("Main"));
+    }
+
+    #[test]
+    fn build_dyn_workspace_infos_static_mapping_ignores_case() {
+        let workspaces = vec![test_workspace(5, Some("Mail"), false)];
+        let mut config = default_test_config();
+        config.static_workspaces.insert('q', "mail".to_string());
+
+        let infos = build_dyn_workspace_infos(&workspaces, &[], &config);
+
+        assert!(!infos[0].is_uncreated);
+        assert_eq!(infos[0].ws_id, Some(5));
     }
 
     #[test]
@@ -847,6 +875,20 @@ pub(super) mod tests {
         ];
         let mut config = default_test_config();
         config.static_workspaces.insert('q', "01".to_string());
+
+        let infos = build_static_workspace_infos(&workspaces, &[], &config);
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].name, "browser");
+    }
+
+    #[test]
+    fn static_infos_excludes_pinned_workspaces_ignoring_case() {
+        let workspaces = vec![
+            test_workspace(1, Some("Mail"), true),
+            test_workspace(2, Some("browser"), false),
+        ];
+        let mut config = default_test_config();
+        config.static_workspaces.insert('q', "mail".to_string());
 
         let infos = build_static_workspace_infos(&workspaces, &[], &config);
         assert_eq!(infos.len(), 1);
@@ -905,6 +947,7 @@ pub(super) mod tests {
         let infos = build_static_workspace_infos(&workspaces, &[], &config);
         assert_eq!(infos.len(), 1);
         assert_eq!(infos[0].name, "3");
+        assert_eq!(infos[0].id, 1);
     }
 
     #[test]

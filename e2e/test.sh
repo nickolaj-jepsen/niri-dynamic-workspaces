@@ -8,6 +8,8 @@ out=${NDW_E2E_OUT:-$here/out}
 failed=0
 
 focused_ws() { "$h" state | jq -r '.[] | select(.is_focused).name // empty'; }
+focused_id() { "$h" state | jq -r '.[] | select(.is_focused).id'; }
+focused_id_is() { [[ $(focused_id) == "$1" ]]; }
 ws_id() { "$h" state | jq -r --arg n "$1" '.[] | select(.name == $n) | .id'; }
 focused_is() { [[ $(focused_ws) == "$1" ]]; }
 
@@ -31,8 +33,10 @@ has_focused_window() {
     windows | jq -e --arg app "${1:-}" 'any(.[]; .is_focused and ($app == "" or .app_id == $app))' >/dev/null
 }
 # window_on <ws-name> [app-id]: a window (with that app id) is on the workspace.
-window_on() {
-    windows | jq -e --arg ws "$(ws_id "$1")" --arg app "${2:-}" \
+window_on() { window_in "$(ws_id "$1")" "${2:-}"; }
+# window_in <ws-id> [app-id]: window_on for a workspace without a name.
+window_in() {
+    windows | jq -e --arg ws "$1" --arg app "${2:-}" \
         'any(.[]; (.workspace_id | tostring) == $ws and ($app == "" or .app_id == $app))' >/dev/null
 }
 # windows_on <ws-name>: how many windows the workspace holds.
@@ -96,6 +100,40 @@ test_overlay_card_click_switches() {
     "$h" overlay switch || return 1
     "$h" key c || return 1
     until_true has_ws dyn-c && "$h" closed
+}
+
+# The static row labels an unnamed workspace with its index, which niri does not resolve as a name.
+test_overlay_static_card_moves_to_unnamed() {
+    local unnamed
+    spawn_window one && unnamed=$(focused_id) || return 1
+    "$h" app switch a && spawn_window two || return 1
+    # The row holds that workspace and the trailing empty one.
+    "$h" overlay move-window && "$h" static 1 2 && "$h" closed || return 1
+    until_true window_in "$unnamed" two
+}
+
+test_overlay_static_card_switches_to_unnamed() {
+    local unnamed
+    # Hover would focus the card before the click does.
+    general hover_preview false || return 1
+    spawn_window one && unnamed=$(focused_id) || return 1
+    "$h" app switch a && spawn_window two || return 1
+    "$h" overlay switch && "$h" static 1 2 && "$h" closed || return 1
+    until_true focused_id_is "$unnamed"
+}
+
+test_overlay_missing_pin_errors() {
+    local err status
+    add_config <<'EOF' || return 1
+[workspace.q]
+static = "mail"
+EOF
+    err=$("$h" app switch q 2>&1 >/dev/null)
+    status=$?
+    [[ $status == 1 && $err == *"workspace 'mail' not found"* ]] || return 1
+    "$h" overlay switch && "$h" key q || return 1
+    sleep 0.5
+    "$h" open
 }
 
 test_overlay_key_press_switches() {
@@ -297,6 +335,9 @@ tests=(
     missing_workspace_reports_to_caller
     overlay_card_click_switches
     overlay_move_without_window_stays_open
+    overlay_static_card_moves_to_unnamed
+    overlay_static_card_switches_to_unnamed
+    overlay_missing_pin_errors
     overlay_key_press_switches
     overlay_key_azerty_digit
     overlay_key_azerty_shift_digit
