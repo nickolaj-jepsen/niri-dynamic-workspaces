@@ -572,6 +572,17 @@ impl Config {
             }
         }
 
+        // An empty prefix would make every single-character niri workspace dynamic.
+        let prefix = if self.general.workspace_prefix.trim().is_empty() {
+            let fallback = GeneralConfig::default().workspace_prefix;
+            warnings.push(format!(
+                "workspace_prefix must not be empty, using '{fallback}'"
+            ));
+            fallback
+        } else {
+            self.general.workspace_prefix
+        };
+
         let mut workspace_programs = HashMap::new();
         let mut workspace_names = HashMap::new();
         let mut static_workspaces = HashMap::new();
@@ -586,10 +597,17 @@ impl Config {
                 Some(target) if target.is_empty() => {
                     warnings.push(format!("[workspace.{key}]: 'static' is empty, ignoring"));
                 }
-                Some(target) if target.starts_with(&self.general.workspace_prefix) => {
+                // niri matches names case-insensitively, so "DYN-A" is dyn-a.
+                Some(target)
+                    if parse_dynamic_name(
+                        &target.to_ascii_lowercase(),
+                        &prefix.to_ascii_lowercase(),
+                    )
+                    .is_some() =>
+                {
                     warnings.push(format!(
-                        "[workspace.{key}]: 'static' target '{target}' starts with the \
-                         dynamic workspace prefix, ignoring"
+                        "[workspace.{key}]: 'static' target '{target}' is a dynamic \
+                         workspace name, ignoring"
                     ));
                 }
                 Some(target) => {
@@ -761,7 +779,7 @@ impl Config {
         }
 
         let resolved = ResolvedConfig {
-            workspace_prefix: self.general.workspace_prefix,
+            workspace_prefix: prefix,
             close_keybinds,
             default_programs: self.general.default_programs,
             workspace_programs,
@@ -1597,17 +1615,51 @@ static = ""
         assert!(resolved.static_workspaces.is_empty());
     }
 
+    /// Resolve a config pinning key q to `target`, with `extra` [general] lines.
+    fn resolve_pin(target: &str, extra: &str) -> (ResolvedConfig, Vec<String>) {
+        let toml_str = format!("[general]\n{extra}\n[workspace.q]\nstatic = {target:?}\n");
+        toml::from_str::<Config>(&toml_str).unwrap().resolve()
+    }
+
     #[test]
     fn resolve_static_prefix_target_warns() {
-        let toml_str = r#"
-[workspace.q]
-static = "dyn-a"
-"#;
-        let config: Config = toml::from_str(toml_str).unwrap();
-        let (resolved, warnings) = config.resolve();
-        assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("dynamic workspace prefix"));
-        assert!(resolved.static_workspaces.is_empty());
+        for target in ["dyn-a", "dyn-a Title", "DYN-A"] {
+            let (resolved, warnings) = resolve_pin(target, "");
+            assert_eq!(warnings.len(), 1, "{target}: {warnings:?}");
+            assert!(
+                warnings[0].contains("is a dynamic workspace name"),
+                "{}",
+                warnings[0]
+            );
+            assert!(resolved.static_workspaces.is_empty());
+        }
+    }
+
+    #[test]
+    fn resolve_static_lookalike_target_accepted() {
+        for target in ["dyn-alpha", "dyn-", "dyn-a-b"] {
+            let (resolved, warnings) = resolve_pin(target, "");
+            assert!(warnings.is_empty(), "{target}: {warnings:?}");
+            assert_eq!(resolved.static_workspaces[&'q'], target);
+        }
+    }
+
+    #[test]
+    fn resolve_empty_prefix_falls_back() {
+        for prefix in ["", "  "] {
+            let (resolved, warnings) =
+                resolve_pin("main", &format!("workspace_prefix = {prefix:?}"));
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+            assert!(warnings[0].contains("workspace_prefix"), "{}", warnings[0]);
+            assert_eq!(resolved.workspace_prefix, "dyn-");
+        }
+    }
+
+    #[test]
+    fn resolve_empty_prefix_keeps_static_pins() {
+        let (resolved, warnings) = resolve_pin("1", "workspace_prefix = \"\"");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(resolved.static_workspaces[&'q'], "1");
     }
 
     // --- TOML deserialization ---
