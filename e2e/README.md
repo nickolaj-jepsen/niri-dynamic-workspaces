@@ -33,7 +33,7 @@ the `debug: overlay window freed` lines only debug builds log.
 | `key <char>` | click the card for `a`-`z` / `0`-`9` |
 | `hover <char>` | move the pointer onto that card, which previews it |
 | `static <i> [n]` | click the `i`-th of `n` cards (default 1) in the static row |
-| `mode <name>` | click `switch`, `delete` or `move` |
+| `mode <name>` | click `switch`, `delete` or `move`, and wait for the rebuilt grid |
 | `click <x> <y>` | click anywhere |
 | `type <args...>` | press keys with `wtype`, e.g. `type c` |
 | `press <codes> [ms]` | press evdev codes through niri's layout (`46` = c, `29+46` = Ctrl+c), optionally held for `ms` |
