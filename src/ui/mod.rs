@@ -329,9 +329,9 @@ fn follow_compositor(
             if current != tracked_output {
                 tracked_output.clone_from(&current);
                 // Previews stay on the overlay's output, so no preview moved focus here.
-                session
-                    .preview
-                    .rebase(focused_workspace_id_from(&fresh_workspaces));
+                let origin = focused_workspace_id_from(&fresh_workspaces);
+                session.preview.rebase(origin);
+                niri::set_overlay_origin(origin);
                 // The grid now shows that output, so Move Window acts on its window.
                 session
                     .origin_window
@@ -362,13 +362,17 @@ fn end_preview(session: &OverlaySession) {
     }
 }
 
-/// Undo the hover preview when the window closes without a selection.
+/// Spare the origin from cleanup while the window is open, and undo the
+/// hover preview when it closes without a selection.
 fn connect_session_close(window: &ApplicationWindow, session: &Rc<OverlaySession>) {
+    niri::set_overlay_origin(session.preview.origin.get());
     let session = session.clone();
     window.connect_close_request(move |_| {
         if !session.selection_made.get() {
             end_preview(&session);
         }
+        // Here rather than on drop: a leaked session would keep the spare.
+        niri::set_overlay_origin(None);
         Propagation::Proceed
     });
 }

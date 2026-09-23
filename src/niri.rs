@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::io::{BufRead, BufReader, Write as _};
 use std::os::unix::net::UnixStream;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -571,15 +572,19 @@ fn move_window_impl(
 /// not removed while they start.
 pub const SPAWN_GRACE: Duration = Duration::from_secs(15);
 
-/// Workspaces the daemon's cleanup must leave alone, each until a deadline.
+/// Workspaces the daemon's cleanup must leave alone: each until a deadline,
+/// and the open overlay's origin until it closes.
 struct SpareRegistry {
     until: BTreeMap<u64, Instant>,
+    /// Apart from `until`, so closing the overlay never cuts a deadline short.
+    overlay_origin: Option<u64>,
 }
 
 impl SpareRegistry {
     const fn new() -> Self {
         Self {
             until: BTreeMap::new(),
+            overlay_origin: None,
         }
     }
 
@@ -589,8 +594,14 @@ impl SpareRegistry {
         *deadline = (*deadline).max(until);
     }
 
+    /// Replace the overlay's origin; returns whether another one stopped
+    /// being spared.
+    fn set_overlay_origin(&mut self, id: Option<u64>) -> bool {
+        std::mem::replace(&mut self.overlay_origin, id).is_some_and(|old| Some(old) != id)
+    }
+
     fn is_spared(&self, id: u64, now: Instant) -> bool {
-        self.until.get(&id).is_some_and(|&until| until > now)
+        self.overlay_origin == Some(id) || self.until.get(&id).is_some_and(|&until| until > now)
     }
 
     /// Forget the spares that ran out and return the earliest one left.
@@ -608,11 +619,26 @@ fn spared() -> MutexGuard<'static, SpareRegistry> {
     SPARED.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Set when a spare ends early, so the cleanup loop runs again.
+static CLEANUP_POKE: AtomicBool = AtomicBool::new(false);
+
 /// Keep the daemon's cleanup from removing workspace `id` before `until`.
 ///
 /// Only takes effect in the process that runs the cleanup, the daemon.
 pub fn spare_workspace(id: u64, until: Instant) {
     spared().spare(id, until);
+}
+
+/// Keep the daemon's cleanup from removing `id`, the workspace an open
+/// overlay started from, until the next call; `None` once the overlay closes.
+///
+/// A hover preview moves focus away, which would leave an empty origin
+/// removable while cancelling can still return to it.
+pub fn set_overlay_origin(id: Option<u64>) {
+    if spared().set_overlay_origin(id) {
+        // Committing a preview sends no IPC, so no event would prompt a pass.
+        CLEANUP_POKE.store(true, Ordering::Relaxed);
+    }
 }
 
 /// Remove empty, unfocused dynamic workspaces matching the given prefix,
@@ -830,6 +856,9 @@ fn event_cleanup_loop(prefix_source: &mut impl FnMut() -> Option<String>) -> any
 
     loop {
         if read_event(&mut reader, &mut buf)?.is_some_and(|event| triggers_cleanup(&event)) {
+            debouncer.on_event(Instant::now());
+        }
+        if CLEANUP_POKE.swap(false, Ordering::Relaxed) {
             debouncer.on_event(Instant::now());
         }
 
@@ -1941,6 +1970,34 @@ mod tests {
         registry.spare(4, t0 + Duration::from_secs(5));
 
         assert!(registry.is_spared(4, t0 + Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn spare_registry_spares_the_overlay_origin_until_released() {
+        let mut registry = SpareRegistry::new();
+        let t0 = Instant::now();
+
+        assert!(!registry.set_overlay_origin(Some(4)));
+        assert!(registry.is_spared(4, t0 + Duration::from_secs(3600)));
+        assert_eq!(registry.next_deadline(t0), None);
+        // Setting the same origin again releases nothing.
+        assert!(!registry.set_overlay_origin(Some(4)));
+        assert!(registry.set_overlay_origin(Some(5)));
+        assert!(!registry.is_spared(4, t0));
+        assert!(registry.set_overlay_origin(None));
+        assert!(!registry.is_spared(5, t0));
+        assert!(!registry.set_overlay_origin(None));
+    }
+
+    #[test]
+    fn spare_registry_origin_release_keeps_a_deadline() {
+        let mut registry = SpareRegistry::new();
+        let t0 = Instant::now();
+        registry.spare(4, t0 + SPAWN_GRACE);
+        registry.set_overlay_origin(Some(4));
+        registry.set_overlay_origin(None);
+
+        assert!(registry.is_spared(4, t0));
     }
 
     #[test]

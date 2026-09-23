@@ -423,6 +423,30 @@ EOF
     "$h" app switch e && until_true window_on dyn-e
 }
 
+# hover_away_from_empty_origin: an overlay opened on the empty dyn-a previews dyn-b; dyn-a stays meanwhile.
+hover_away_from_empty_origin() {
+    general auto_delete_empty true && "$h" daemon || return 1
+    "$h" app switch b && spawn_window on-b || return 1
+    "$h" app switch a && "$h" overlay switch && "$h" hover b || return 1
+    until_true focused_is dyn-b || return 1
+    # Past the debounce and the confirming pass.
+    sleep 3
+    has_ws dyn-a
+}
+
+test_overlay_hover_keeps_empty_origin() {
+    hover_away_from_empty_origin || return 1
+    "$h" escape && "$h" closed || return 1
+    until_true focused_is dyn-a
+}
+
+# Committing the preview emits no event cleanup reacts to; the close itself must prompt a pass.
+test_overlay_hover_commit_cleans_origin() {
+    hover_away_from_empty_origin || return 1
+    "$h" key b && "$h" closed || return 1
+    until_true no_ws dyn-a
+}
+
 test_daemon_reloads_config_on_content_change() {
     local config
     config=$(config_toml)
@@ -484,6 +508,8 @@ tests=(
     daemon_forwards_errors_to_caller
     daemon_deletes_empty_workspaces
     daemon_keeps_workspace_for_slow_program
+    overlay_hover_keeps_empty_origin
+    overlay_hover_commit_cleans_origin
     daemon_reloads_config_on_content_change
     daemon_frees_closed_overlays
 )
