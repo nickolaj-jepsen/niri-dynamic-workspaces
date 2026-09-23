@@ -119,6 +119,17 @@ test_broken_config_still_opens() {
     [[ $log == *"config error:"* ]] && "$h" escape && "$h" closed
 }
 
+test_check_reports_problems() {
+    local err status bin=${NDW_BIN:-$here/../target/debug/niri-dynamic-workspaces}
+    "$h" app check >/dev/null || return 1
+    # No display, bus or HOME, as in a Nix build sandbox.
+    env -i "$bin" check --config "$here/fixtures/config.toml" >/dev/null || return 1
+    printf '[general\n' | "$h" config || return 1
+    err=$("$h" app check 2>&1 >/dev/null)
+    status=$?
+    [[ $status == 1 && $err == *"config error:"* ]]
+}
+
 test_overlay_delete_mode() {
     "$h" app switch d && "$h" app switch a || return 1
     until_true has_ws dyn-d || return 1
@@ -196,6 +207,7 @@ tests=(
     overlay_escape_closes
     overlay_delete_mode
     broken_config_still_opens
+    check_reports_problems
     daemon_serves_invocations
     daemon_forwards_errors_to_caller
     daemon_deletes_empty_workspaces

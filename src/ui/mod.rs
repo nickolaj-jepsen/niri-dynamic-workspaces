@@ -487,18 +487,23 @@ fn build_hint_footer(metrics: &KeyboardMetrics, hints: &[&str]) -> GtkBox {
 }
 
 /// One line for the overlay: the first problem, and how many more there are.
-fn diagnostics_summary(problems: &[String]) -> Option<String> {
+///
+/// The first `from_config` problems are config diagnostics, which `check`
+/// also lists; the line points there only when some of those are hidden.
+fn diagnostics_summary(problems: &[String], from_config: usize) -> Option<String> {
     let (first, rest) = problems.split_first()?;
-    Some(if rest.is_empty() {
-        first.clone()
-    } else {
-        format!("{first} (+{} more)", rest.len())
+    Some(match rest.len() {
+        0 => first.clone(),
+        more if from_config > 1 => {
+            format!("{first} (+{more} more, run `niri-dynamic-workspaces check`)")
+        }
+        more => format!("{first} (+{more} more)"),
     })
 }
 
 /// The config-problems line; its tooltip lists every problem.
-fn build_problems_line(problems: &[String]) -> Option<Label> {
-    let summary = diagnostics_summary(problems)?;
+fn build_problems_line(problems: &[String], from_config: usize) -> Option<Label> {
+    let summary = diagnostics_summary(problems, from_config)?;
     Some(
         Label::builder()
             .label(summary)
@@ -581,7 +586,7 @@ fn populate_overlay(
         &metrics,
         &["press key to select", "Tab switch mode", "Escape close"],
     ));
-    if let Some(line) = build_problems_line(&session.problems) {
+    if let Some(line) = build_problems_line(&session.problems, config.diagnostics.len()) {
         container.append(&line);
     }
     container.append(&error_revealer);
@@ -911,13 +916,13 @@ mod tests {
 
     #[test]
     fn diagnostics_summary_none_when_clean() {
-        assert_eq!(diagnostics_summary(&[]), None);
+        assert_eq!(diagnostics_summary(&[], 0), None);
     }
 
     #[test]
     fn diagnostics_summary_single_is_the_problem() {
         assert_eq!(
-            diagnostics_summary(&problems(1)),
+            diagnostics_summary(&problems(1), 1),
             Some("config warning: problem 1".to_string())
         );
     }
@@ -925,8 +930,26 @@ mod tests {
     #[test]
     fn diagnostics_summary_counts_the_rest() {
         assert_eq!(
-            diagnostics_summary(&problems(3)),
+            diagnostics_summary(&problems(3), 3),
+            Some(
+                "config warning: problem 1 (+2 more, run `niri-dynamic-workspaces check`)"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn diagnostics_summary_points_to_check_only_for_hidden_config_problems() {
+        // `check` does not load the theme, so it would not list these.
+        let theme = |i| format!("theme warning: problem {i}");
+        let mixed = vec![problems(1).remove(0), theme(2), theme(3)];
+        assert_eq!(
+            diagnostics_summary(&mixed, 1),
             Some("config warning: problem 1 (+2 more)".to_string())
+        );
+        assert_eq!(
+            diagnostics_summary(&[theme(1), theme(2)], 0),
+            Some("theme warning: problem 1 (+1 more)".to_string())
         );
     }
 
