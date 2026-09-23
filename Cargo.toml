@@ -29,7 +29,7 @@ shell-words = "1"
 # preserve_order hands tables over in document order, which IndexMap keeps.
 toml = { version = "0.9", features = ["preserve_order"] }
 indexmap = { version = "2", features = ["serde"] }
-dirs = "6"
+dirs = "7"
 nucleo-matcher = "0.3"
 libc = "0.2"
 
