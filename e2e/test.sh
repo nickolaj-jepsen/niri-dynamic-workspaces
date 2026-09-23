@@ -98,6 +98,23 @@ test_move_window_without_window_creates_nothing() {
     [[ $status == 1 && $err == *"no focused window"* ]] && no_ws dyn-x
 }
 
+# add_hooks: hooks that leave marks for has_mark; niri runs them with the session's XDG_CONFIG_HOME.
+add_hooks() {
+    add_config <<'EOF'
+[hooks]
+on_create = ['sleep 1; touch "$XDG_CONFIG_HOME/created-1-$NDW_WORKSPACE_KEY"', 'touch "$XDG_CONFIG_HOME/created-2-$NDW_WORKSPACE_KEY"']
+on_delete = ['touch "$XDG_CONFIG_HOME/deleted-$NDW_WORKSPACE_NAME"']
+EOF
+}
+# has_mark <name>: a hook left that mark.
+has_mark() { "$h" run sh -c 'test -e "$XDG_CONFIG_HOME/$1"' _ "$1"; }
+
+# Without a daemon the process exits right after the switch, before the second hook is due.
+test_hooks_outlive_the_process() {
+    add_hooks && "$h" app switch a || return 1
+    until_true has_mark created-1-a && until_true has_mark created-2-a
+}
+
 # A reorder still waiting on a late window must not pull the user back after they leave.
 test_reorder_leaves_focus_alone() {
     local ok
@@ -412,6 +429,7 @@ tests=(
     delete_removes_workspace
     move_window_moves_it
     move_window_without_window_creates_nothing
+    hooks_outlive_the_process
     reorder_leaves_focus_alone
     invalid_key_fails_in_caller
     missing_workspace_reports_to_caller
