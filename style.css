@@ -44,19 +44,24 @@ window {
     border-color: var(--card-border-hover);
 }
 
+/* A focused card is also .active; one visible on another output only gets the outline. */
 .workspace-card.active {
-    background-color: var(--accent);
-    color: var(--accent-fg);
     border: 2px solid var(--accent-text);
 }
 
+.workspace-card.focused {
+    background-color: var(--accent);
+    color: var(--accent-fg);
+}
+
+/* Equal specificity to .active and .focused: file order lets urgency win. */
 .workspace-card.urgent {
     background-color: var(--urgent);
     color: var(--urgent-fg);
     border: 2px solid var(--urgent);
 }
 
-/* After .active and .urgent: an armed card reads as a pending delete whatever else it is. */
+/* After the other states: an armed card reads as a pending delete whatever else it is. */
 .workspace-card.confirm {
     background-color: var(--danger);
     color: var(--bg);
