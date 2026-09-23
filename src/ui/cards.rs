@@ -366,6 +366,22 @@ fn build_card_shell(classes: Vec<&str>, key_size: i32) -> (GtkBox, GtkBox) {
     (card, inner)
 }
 
+/// Characters per line of a card's name. `--font-name` is 13% of the key and
+/// `--key-pad-h` 10%, so about 11 fit at any key size; 10 leaves a margin.
+const CARD_NAME_MAX_CHARS: i32 = 10;
+
+/// Show the label's full text as a tooltip while it is ellipsized.
+fn tooltip_when_ellipsized(label: &Label) {
+    label.set_has_tooltip(true);
+    label.connect_query_tooltip(|label, _, _, _, tooltip| {
+        let clipped = label.layout().is_ellipsized();
+        if clipped {
+            tooltip.set_text(Some(&label.text()));
+        }
+        clipped
+    });
+}
+
 /// Attach a hover-preview controller that focuses a workspace on mouse enter.
 ///
 /// The session's `hover_armed` flag prevents hover-preview from firing when
@@ -422,9 +438,14 @@ fn build_key_widget(
         let name_label = Label::builder()
             .label(name)
             .css_classes(["card-name"])
+            .wrap(true)
+            .wrap_mode(gtk4::pango::WrapMode::WordChar)
+            .lines(2)
             .ellipsize(gtk4::pango::EllipsizeMode::End)
-            .max_width_chars(8)
+            .max_width_chars(CARD_NAME_MAX_CHARS)
+            .justify(gtk4::Justification::Center)
             .build();
+        tooltip_when_ellipsized(&name_label);
         inner.append(&name_label);
     }
 
@@ -517,6 +538,7 @@ fn build_static_card(
         .ellipsize(gtk4::pango::EllipsizeMode::End)
         .max_width_chars(6)
         .build();
+    tooltip_when_ellipsized(&name_label);
     inner.append(&name_label);
 
     if !is_disabled {
