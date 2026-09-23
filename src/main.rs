@@ -57,6 +57,8 @@ enum Command {
         /// Workspace key (a-z, 0-9) — act directly without overlay
         #[arg(value_parser = parse_key_arg)]
         key: Option<char>,
+        #[command(flatten)]
+        create: CreateArgs,
     },
     /// Delete a workspace
     Delete {
@@ -82,6 +84,45 @@ enum Command {
         /// New title; omit it or pass "" to clear the title
         title: Option<String>,
     },
+}
+
+/// How `switch KEY` creates the workspace when it does not exist yet.
+#[derive(clap::Args, Clone, Default)]
+struct CreateArgs {
+    /// Template for a new workspace
+    #[arg(long, value_name = "NAME", requires = "key")]
+    template: Option<String>,
+    /// Template variable value; repeat for each variable
+    #[arg(
+        long = "var",
+        value_name = "NAME=VALUE",
+        value_parser = parse_var,
+        requires = "key"
+    )]
+    vars: Vec<(String, String)>,
+    /// Title for a new workspace, overriding the template's ("" for none)
+    #[arg(long, value_name = "TITLE", requires = "key")]
+    title: Option<String>,
+}
+
+impl CreateArgs {
+    fn is_set(&self) -> bool {
+        self.template.is_some() || !self.vars.is_empty() || self.title.is_some()
+    }
+}
+
+/// Parse `NAME=VALUE`; the value may be empty or contain `=`.
+fn parse_var(s: &str) -> Result<(String, String), String> {
+    match s.split_once('=') {
+        Some((name, value)) if !name.is_empty() => Ok((name.to_string(), value.to_string())),
+        _ => Err("must be NAME=VALUE".to_string()),
+    }
+}
+
+/// Flags that change what a direct action does.
+#[derive(Default)]
+struct DirectOptions {
+    create: CreateArgs,
 }
 
 /// Parse a workspace key argument, so a bad key fails in the caller's own pre-parse.
@@ -199,14 +240,21 @@ fn handle_direct_action(
     cli: &Cli,
     mode: ui::Mode,
     ch: char,
+    options: &DirectOptions,
 ) -> anyhow::Result<()> {
     let cfg = config::load_config(cli.config.as_deref());
     for d in &cfg.diagnostics {
         report(cmdline, &d.to_string());
     }
+    let create = &options.create;
 
     // Statically mapped key: act on the pinned workspace directly.
     if let Some(target) = cfg.static_workspaces.get(&ch) {
+        anyhow::ensure!(
+            !create.is_set(),
+            "--template, --var and --title create dynamic workspaces, \
+             and key '{ch}' is pinned to static workspace '{target}'"
+        );
         // Resolved first: niri ignores an action on a missing workspace.
         return match mode {
             ui::Mode::Normal => {
@@ -222,14 +270,41 @@ fn handle_direct_action(
 
     let ws_name = config::workspace_name(&cfg.workspace_prefix, ch);
     match mode {
-        ui::Mode::Normal => actions::switch_workspace(
-            app,
-            &cfg,
-            ch,
-            &ws_name,
-            cfg.programs_for(ch),
-            &actions::HookInfo::default(),
-        ),
+        ui::Mode::Normal => {
+            // Checked only when it matters, so a plain switch keeps its IPC sequence.
+            if create.is_set() && niri::dynamic_workspace_exists(&cfg.workspace_prefix, ch)? {
+                report(
+                    cmdline,
+                    &format!(
+                        "note: {ws_name} exists; --template, --var and --title only \
+                         apply when it is created"
+                    ),
+                );
+                return actions::switch_workspace(
+                    app,
+                    &cfg,
+                    ch,
+                    &ws_name,
+                    &[],
+                    &actions::HookInfo::default(),
+                );
+            }
+            let request = actions::resolve_create_request(
+                &cfg,
+                ch,
+                create.template.as_deref(),
+                &create.vars,
+                create.title.as_deref(),
+            )?;
+            actions::switch_workspace(
+                app,
+                &cfg,
+                ch,
+                &request.ws_name,
+                &request.programs,
+                &request.hook_info,
+            )
+        }
         ui::Mode::Delete => {
             let cmdline = cmdline.clone();
             actions::delete_workspace(app, &cfg, ch, move |result| {
@@ -345,13 +420,19 @@ fn main() -> glib::ExitCode {
                 return 0;
             }
             None => (ui::Mode::Normal, None),
-            Some(Command::Switch { key }) => (ui::Mode::Normal, key),
+            Some(Command::Switch { key, .. }) => (ui::Mode::Normal, key),
             Some(Command::Delete { key }) => (ui::Mode::Delete, key),
             Some(Command::MoveWindow { key }) => (ui::Mode::MoveWindow, key),
         };
+        let options = match &cli.command {
+            Some(Command::Switch { create, .. }) => DirectOptions {
+                create: create.clone(),
+            },
+            _ => DirectOptions::default(),
+        };
 
         if let Some(ch) = key {
-            return match handle_direct_action(app, cmdline, &cli, mode, ch) {
+            return match handle_direct_action(app, cmdline, &cli, mode, ch, &options) {
                 Ok(()) => 0,
                 Err(e) => {
                     report(cmdline, &format!("error: {e:#}"));
@@ -412,8 +493,72 @@ mod tests {
         let cli = Cli::try_parse_from(["ndw", "switch", "a"]).unwrap();
         assert!(matches!(
             cli.command,
-            Some(Command::Switch { key: Some('a') })
+            Some(Command::Switch { key: Some('a'), .. })
         ));
+    }
+
+    #[test]
+    fn cli_switch_collects_repeated_vars() {
+        let cli = Cli::try_parse_from([
+            "ndw",
+            "switch",
+            "p",
+            "--template",
+            "dev",
+            "--var",
+            "project=my proj",
+            "--var",
+            "query=a=b",
+            "--var",
+            "empty=",
+            "--title",
+            "",
+        ])
+        .unwrap();
+        let Some(Command::Switch { create, .. }) = cli.command else {
+            panic!("not a switch");
+        };
+        assert_eq!(create.template.as_deref(), Some("dev"));
+        assert_eq!(
+            create.vars,
+            [
+                ("project".to_string(), "my proj".to_string()),
+                ("query".to_string(), "a=b".to_string()),
+                ("empty".to_string(), String::new()),
+            ]
+        );
+        assert_eq!(create.title.as_deref(), Some(""));
+        assert!(create.is_set());
+    }
+
+    #[test]
+    fn cli_var_requires_equals_sign() {
+        for var in ["project", "=value"] {
+            let Err(e) = Cli::try_parse_from(["ndw", "switch", "p", "--var", var]) else {
+                panic!("--var {var} must not parse");
+            };
+            assert!(e.to_string().contains("NAME=VALUE"), "{e}");
+        }
+    }
+
+    #[test]
+    fn cli_create_flags_require_key() {
+        for flag in [
+            &["--template", "dev"][..],
+            &["--var", "a=b"],
+            &["--title", "Notes"],
+        ] {
+            let args = ["ndw", "switch"].iter().chain(flag);
+            let Err(e) = Cli::try_parse_from(args) else {
+                panic!("{flag:?} without a key must not parse");
+            };
+            assert_eq!(e.exit_code(), 2, "{flag:?}");
+        }
+        let cli = Cli::try_parse_from(["ndw", "switch", "a"]).unwrap();
+        let Some(Command::Switch { create, .. }) = cli.command else {
+            panic!("not a switch");
+        };
+        assert!(!create.is_set());
     }
 
     /// Run `check_config` on `path`: its status, and what it reported and printed.

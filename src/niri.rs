@@ -118,6 +118,11 @@ fn find_workspace_by_char<'a>(
     })
 }
 
+/// Whether the dynamic workspace for `ch` exists, titled or not.
+pub fn dynamic_workspace_exists(prefix: &str, ch: char) -> anyhow::Result<bool> {
+    Ok(find_workspace_by_char(&list_workspaces()?, prefix, ch).is_some())
+}
+
 /// Get the full name of an existing workspace matched by prefix+char.
 fn find_workspace_name(workspaces: &[Workspace], prefix: &str, ch: char) -> Option<String> {
     find_workspace_by_char(workspaces, prefix, ch).and_then(|w| w.name.clone())

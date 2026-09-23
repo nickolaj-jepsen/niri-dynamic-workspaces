@@ -473,6 +473,49 @@ test_rename_sets_and_clears_title() {
     [[ $status == 1 && $err == *"workspace 'dyn-z' does not exist"* ]]
 }
 
+# marker_is <text>: a program wrote that text to $XDG_CONFIG_HOME/marker.
+marker_is() { "$h" run sh -c '[ "$(cat "$XDG_CONFIG_HOME/marker" 2>/dev/null)" = "$1" ]' _ "$1"; }
+
+test_cli_switch_template_with_vars() {
+    local err status
+    add_config <<'EOF' || return 1
+[template.dev]
+programs = ['''sh -c 'printf %s "$1" >"$XDG_CONFIG_HOME/marker"' sh {{project}}''']
+on_create = ['touch "$XDG_CONFIG_HOME/created-$NDW_TEMPLATE-$NDW_VAR_PROJECT"']
+
+[template.dev.variables.project]
+name = "Project"
+EOF
+    "$h" app switch p --template dev --var 'project=my proj' || return 1
+    until_true has_ws "dyn-p my proj" && until_true marker_is "my proj" || return 1
+    until_true has_mark "created-dev-my proj" || return 1
+    # Refused before anything is sent.
+    err=$("$h" app switch q --template dev 2>&1 >/dev/null)
+    status=$?
+    [[ $status == 1 && $err == *"needs --var for: project"* ]] && no_ws dyn-q || return 1
+    err=$("$h" app switch q --template nope 2>&1 >/dev/null)
+    status=$?
+    [[ $status == 1 && $err == *"unknown template 'nope' (known: dev)"* ]] && no_ws dyn-q
+}
+
+test_cli_switch_title() {
+    local err status
+    add_config <<'EOF' || return 1
+[workspace.q]
+static = "mail"
+EOF
+    # Through the daemon, which reads the flags off the forwarded command line.
+    "$h" daemon && "$h" app switch t --title Notes || return 1
+    until_true has_ws "dyn-t Notes" && "$h" app switch a && until_true focused_is dyn-a || return 1
+    err=$("$h" app switch t --title Other 2>&1 >/dev/null)
+    status=$?
+    [[ $status == 0 && $err == *"only apply when it is created"* ]] || return 1
+    until_true focused_is "dyn-t Notes" || return 1
+    err=$("$h" app switch q --title x 2>&1 >/dev/null)
+    status=$?
+    [[ $status == 1 && $err == *"pinned to static workspace 'mail'"* ]]
+}
+
 test_broken_config_still_opens() {
     local log
     printf '[general\n' | "$h" config && "$h" overlay switch || return 1
@@ -640,6 +683,8 @@ tests=(
     invalid_key_fails_in_caller
     missing_workspace_reports_to_caller
     rename_sets_and_clears_title
+    cli_switch_template_with_vars
+    cli_switch_title
     overlay_card_click_switches
     overlay_move_without_window_stays_open
     overlay_static_card_moves_to_unnamed
