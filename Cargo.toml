@@ -18,10 +18,10 @@ niri-ipc = "=26.4.0"
 # v4_16 fails the build on older GTK, which would silently drop style.css's var() and color-mix().
 gtk4 = { version = "0.9", features = ["v4_16"] }
 gtk4-layer-shell = "0.5"
-gdk4 = "0.9"
-glib = "0.20"
+gdk4 = "0.11"
+glib = "0.22"
 # The gio gtk4 re-exports; v2_80 adds ApplicationCommandLine::printerr_literal.
-gio = { version = "0.20", features = ["v2_80"] }
+gio = { version = "0.22", features = ["v2_80"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_ignored = "0.1"
