@@ -148,8 +148,7 @@ pub(super) fn show_template_picker(ch: char, ctx: &ActionContext) {
     remove_app_controllers(window);
 
     let config = &ctx.session.config;
-    let metrics =
-        KeyboardMetrics::from_monitor_width(ctx.session.monitor_width.get(), config.layout);
+    let metrics = ctx.session.metrics.get();
     // The overlay may have moved monitors since the grid applied its sizes.
     apply_scaled_css(&metrics.scaled_css_variables());
 
