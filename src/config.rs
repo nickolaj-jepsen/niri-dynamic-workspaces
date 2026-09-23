@@ -2434,6 +2434,18 @@ options = ["main"]
         assert!(build_argv("code 'unclosed", &HashMap::new()).is_err());
     }
 
+    /// The README's safe form for a shell program: the value is `$1`, never script text.
+    #[test]
+    fn build_argv_positional_shell_idiom_keeps_value_out_of_script() {
+        let readme: toml::Value =
+            toml::from_str(r#"p = '''sh -c 'cd "$1" && exec nvim' sh {{project}}'''"#).unwrap();
+        let values = values(&[("project", "Bob's notes")]);
+        assert_eq!(
+            build_argv(readme["p"].as_str().unwrap(), &values).unwrap(),
+            vec!["sh", "-c", r#"cd "$1" && exec nvim"#, "sh", "Bob's notes"]
+        );
+    }
+
     // --- load_config and diagnostics ---
 
     /// Write `contents` to a per-process temp file named after `tag`.
