@@ -140,15 +140,22 @@ static = "01"                          # pin an existing niri workspace to this 
 name = "Main"                          # optional display name shown on the key
 ```
 
-#### Program order
+#### Program windows
 
-When a new workspace starts two or more programs, their columns are put in
-list order once the windows appear. Each window is matched to its program by
-app id: through the executable name (`firefox` for `org.mozilla.firefox`) or,
-for a wrapper, a later argument (`flatpak run com.slack.Slack`,
-`uwsm app -- kitty`, `sh -c 'sleep 1; exec foot'`). A window that matches no
-program keeps niri's placement, and nothing is moved once you switch to
-another workspace.
+niri opens a window on whichever workspace is focused when it appears. If you
+switch away while a new workspace's programs start, their windows are moved to
+that workspace as they appear, without taking focus; each program is watched
+for up to 15 seconds. When a new workspace starts two or more programs, their
+columns are also put in list order once the windows appear, unless you have
+switched to another workspace by then.
+
+Each window is matched to its program by app id: through the executable name
+(`firefox` for `org.mozilla.firefox`) or, for a wrapper, a later argument
+(`flatpak run com.slack.Slack`, `uwsm app -- kitty`,
+`sh -c 'sleep 1; exec foot'`). Only windows that open after the programs start
+count, so a window of the same app that you open elsewhere before the
+program's own can be taken for it. A window that matches no program keeps
+niri's placement.
 
 #### Static workspace mappings
 
@@ -471,6 +478,10 @@ action exits non-zero, also when a daemon handles the call. A relative
 `delete a && switch a` creates a fresh dyn-a. If a window is still open after
 5 seconds, the workspace keeps its name and the command fails.
 
+Without a daemon, a `switch` that creates a workspace with programs keeps
+running until each program has a window, for up to 15 seconds, to place them
+(see [Program windows](#program-windows)).
+
 #### Renaming
 
 `rename` changes a workspace's title after it was created and keeps its key:
@@ -502,7 +513,7 @@ spawn-at-startup "niri-dynamic-workspaces" "daemon"
 
 The daemon keeps GTK initialized and subsequent `switch`/`delete`/`move-window` invocations are forwarded to it over D-Bus, skipping startup overhead.
 
-With `auto_delete_empty`, the daemon also removes dynamic workspaces that are empty and unfocused, running the `on_delete` hooks for each. A workspace created with programs is left alone for its first 15 seconds, so switching away while they start does not remove it. The workspace the overlay was opened from is left alone until the overlay closes, so a hover preview can still return to it.
+With `auto_delete_empty`, the daemon also removes dynamic workspaces that are empty and unfocused, running the `on_delete` hooks for each. A workspace created with programs is left alone for its first 20 seconds, so switching away while they start does not remove it. The workspace the overlay was opened from is left alone until the overlay closes, so a hover preview can still return to it.
 
 Config changes are picked up automatically: the daemon reloads the config file whenever its contents change, including on a Home Manager switch, so no restart is needed. If an edit breaks the file, auto-delete keeps following the last config that loaded, while the overlay opens with the defaults and names the problem.
 
