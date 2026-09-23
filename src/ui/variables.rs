@@ -20,7 +20,7 @@ use super::picker::{show_template_picker, TemplateOption};
 use super::{
     attach_close_on_backdrop_click, build_hint_footer, create_error_revealer,
     format_workspace_display, matches_close_keybind, new_key_controller, remove_app_controllers,
-    scroll_to_child, switch_and_close, wrap_in_backdrop, wrap_index, ActionContext,
+    scroll_to_child, show_error, switch_and_close, wrap_in_backdrop, wrap_index, ActionContext,
 };
 
 /// Filter `options` by fuzzy-matching against `query`, returning indices sorted
@@ -52,6 +52,50 @@ fn fuzzy_filter(query: &str, options: &[String], matcher: &mut Matcher) -> Vec<u
 /// Rows rendered by a fuzzy select; further matches are reached by typing.
 const MAX_VISIBLE_OPTIONS: usize = 50;
 
+/// What Enter does with typed text that matches no option.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Unmatched {
+    /// A closed list: refuse to submit.
+    Reject,
+    /// The list only aids discovery: submit the typed text.
+    UseText,
+    /// Submit the typed path if it is an existing absolute directory.
+    UseDir,
+}
+
+impl Unmatched {
+    fn for_source(source: &Select) -> Self {
+        match source {
+            Select::Options(_) => Self::Reject,
+            Select::Command(_) => Self::UseText,
+            Select::Dirs { .. } => Self::UseDir,
+        }
+    }
+}
+
+/// The value Enter submits: the highlighted option `best`, else `typed` as
+/// `unmatched` allows. Errors describe why nothing can be submitted.
+fn select_value(best: Option<&str>, typed: &str, unmatched: Unmatched) -> Result<String, String> {
+    if let Some(best) = best {
+        return Ok(best.to_owned());
+    }
+    let text = typed.trim();
+    match unmatched {
+        Unmatched::UseText if !text.is_empty() => Ok(text.to_owned()),
+        Unmatched::UseDir => {
+            let path = crate::config::expand_tilde(text);
+            let dir = std::path::Path::new(&path);
+            // A relative path would resolve against the daemon's cwd.
+            if dir.is_absolute() && dir.is_dir() {
+                Ok(path)
+            } else {
+                Err(format!("no directory at \"{text}\""))
+            }
+        }
+        _ => Err(format!("no option matches \"{text}\"")),
+    }
+}
+
 #[derive(Clone)]
 struct FuzzySelect {
     entry: Entry,
@@ -60,17 +104,18 @@ struct FuzzySelect {
     /// Indices into `options` of all current matches, best first.
     filtered: Rc<RefCell<Vec<usize>>>,
     options: Rc<Vec<String>>,
+    unmatched: Unmatched,
 }
 
 impl FuzzySelect {
-    fn value(&self) -> String {
-        let indices = self.filtered.borrow();
-        let idx = self.selected.get();
-        indices
-            .get(idx)
+    fn value(&self) -> Result<String, String> {
+        let best = self
+            .filtered
+            .borrow()
+            .get(self.selected.get())
             .and_then(|&i| self.options.get(i))
-            .cloned()
-            .unwrap_or_default()
+            .cloned();
+        select_value(best.as_deref(), &self.entry.text(), self.unmatched)
     }
 }
 
@@ -83,11 +128,12 @@ enum VariableWidget {
 }
 
 impl VariableWidget {
-    fn value(&self) -> String {
+    /// The value to submit, or why there is none. Empty text is a valid value.
+    fn value(&self) -> Result<String, String> {
         match self {
-            Self::Text(entry) => entry.text().to_string(),
+            Self::Text(entry) => Ok(entry.text().to_string()),
             Self::Enum(fuzzy) => fuzzy.value(),
-            Self::Loading(_) => String::new(),
+            Self::Loading(_) => Ok(String::new()),
         }
     }
 
@@ -103,8 +149,19 @@ impl VariableWidget {
     }
 }
 
-/// Text for the row shown under a truncated match list, if any matches are hidden.
-fn hidden_matches_hint(match_count: usize) -> Option<String> {
+/// Text for the row under the match list: what Enter does when nothing
+/// matches, or how many matches are hidden.
+fn fuzzy_hint(match_count: usize, unmatched: Unmatched) -> Option<String> {
+    if match_count == 0 {
+        return Some(
+            match unmatched {
+                Unmatched::Reject => "no match",
+                Unmatched::UseText => "no match, Enter uses the typed text",
+                Unmatched::UseDir => "no match, Enter uses the typed path if it is a directory",
+            }
+            .to_owned(),
+        );
+    }
     let hidden = match_count
         .checked_sub(MAX_VISIBLE_OPTIONS)
         .filter(|&n| n > 0)?;
@@ -118,6 +175,7 @@ fn render_fuzzy_rows(
     options: &[String],
     filtered: &[usize],
     selected: usize,
+    unmatched: Unmatched,
 ) {
     for (slot, row) in rows.iter().enumerate() {
         match filtered.get(slot) {
@@ -133,7 +191,7 @@ fn render_fuzzy_rows(
             row.remove_css_class("selected");
         }
     }
-    let hint = hidden_matches_hint(filtered.len());
+    let hint = fuzzy_hint(filtered.len(), unmatched);
     more_label.set_visible(hint.is_some());
     more_label.set_label(hint.as_deref().unwrap_or_default());
 }
@@ -228,6 +286,7 @@ fn build_resolved_select(
     options: &[String],
     var_name: &str,
     metrics: &KeyboardMetrics,
+    unmatched: Unmatched,
 ) -> VariableWidget {
     if options.is_empty() {
         let entry = Entry::builder()
@@ -237,7 +296,7 @@ fn build_resolved_select(
         row.append(&entry);
         VariableWidget::Text(entry)
     } else {
-        build_fuzzy_select(row, options, metrics)
+        build_fuzzy_select(row, options, metrics, unmatched)
     }
 }
 
@@ -254,13 +313,14 @@ fn spawn_select_resolution(
     var_name: String,
     metrics: KeyboardMetrics,
 ) {
+    let unmatched = Unmatched::for_source(&source);
     glib::spawn_future_local(async move {
         let resolved = gio::spawn_blocking(move || resolve_select_options(&source))
             .await
             .unwrap_or_default();
         let had_focus = placeholder.has_focus();
         row.remove(&placeholder);
-        let widget = build_resolved_select(&row, &resolved, &var_name, &metrics);
+        let widget = build_resolved_select(&row, &resolved, &var_name, &metrics, unmatched);
         if had_focus {
             widget.grab_focus();
         }
@@ -272,6 +332,7 @@ fn build_fuzzy_select(
     row: &GtkBox,
     options: &[String],
     metrics: &KeyboardMetrics,
+    unmatched: Unmatched,
 ) -> VariableWidget {
     let search_entry = Entry::builder()
         .css_classes(["variable-entry"])
@@ -316,7 +377,14 @@ fn build_fuzzy_select(
     let filtered = Rc::new(RefCell::new((0..options.len()).collect::<Vec<usize>>()));
     let selected = Rc::new(Cell::new(0_usize));
     let rows = Rc::new(rows);
-    render_fuzzy_rows(&rows, &more_label, &options, &filtered.borrow(), 0);
+    render_fuzzy_rows(
+        &rows,
+        &more_label,
+        &options,
+        &filtered.borrow(),
+        0,
+        unmatched,
+    );
 
     // Filter on text change
     {
@@ -329,7 +397,7 @@ fn build_fuzzy_select(
         search_entry.connect_changed(move |entry| {
             let hits = fuzzy_filter(&entry.text(), &options, &mut matcher.borrow_mut());
             selected.set(0);
-            render_fuzzy_rows(&rows, &more_label, &options, &hits, 0);
+            render_fuzzy_rows(&rows, &more_label, &options, &hits, 0, unmatched);
             scrolled.vadjustment().set_value(0.0);
             *filtered.borrow_mut() = hits;
         });
@@ -365,6 +433,7 @@ fn build_fuzzy_select(
         selected,
         filtered,
         options,
+        unmatched,
     })
 }
 
@@ -402,7 +471,7 @@ fn build_variable_row(
             VariableWidget::Text(entry)
         }
         VariableType::Select(Select::Options(opts)) => {
-            build_resolved_select(&row, opts, &var.name, metrics)
+            build_resolved_select(&row, opts, &var.name, metrics, Unmatched::Reject)
         }
         VariableType::Select(source) => {
             let placeholder = Entry::builder()
@@ -523,7 +592,6 @@ fn attach_variable_input_key_handler(
     let close_keybinds = ctx.session.config.close_keybinds.clone();
     let prefix = ctx.session.config.workspace_prefix.clone();
     let widgets: Vec<Rc<RefCell<VariableWidget>>> = widgets.to_vec();
-    let var_names: Vec<String> = option.variables.iter().map(|v| v.name.clone()).collect();
     let programs = option.programs.clone();
     let template_title = option.title.clone();
     let template_variables = option.variables.clone();
@@ -553,9 +621,20 @@ fn attach_variable_input_key_handler(
             {
                 return Propagation::Stop;
             }
+            // Widgets were built from the same variables, in the same order.
             let mut values = HashMap::new();
-            for (name, widget) in var_names.iter().zip(widgets.iter()) {
-                values.insert(name.clone(), widget.borrow().value());
+            for (var, widget) in template_variables.iter().zip(widgets.iter()) {
+                let value = widget.borrow().value();
+                match value {
+                    Ok(value) => {
+                        values.insert(var.name.clone(), value);
+                    }
+                    Err(reason) => {
+                        show_error(&key_ctx, &format!("{}: {reason}", var.label));
+                        widget.borrow().grab_focus();
+                        return Propagation::Stop;
+                    }
+                }
             }
             let title = crate::config::resolve_workspace_title(
                 template_title.as_deref(),
@@ -619,17 +698,98 @@ mod tests {
         assert!(result.contains(&2));
     }
 
-    // --- run_options_command ---
-
     #[test]
-    fn hidden_matches_hint_only_when_truncated() {
-        assert_eq!(hidden_matches_hint(0), None);
-        assert_eq!(hidden_matches_hint(MAX_VISIBLE_OPTIONS), None);
+    fn fuzzy_hint_only_when_truncated_or_empty() {
         assert_eq!(
-            hidden_matches_hint(MAX_VISIBLE_OPTIONS + 3).as_deref(),
+            fuzzy_hint(0, Unmatched::Reject).as_deref(),
+            Some("no match")
+        );
+        assert_eq!(
+            fuzzy_hint(0, Unmatched::UseText).as_deref(),
+            Some("no match, Enter uses the typed text")
+        );
+        assert_eq!(
+            fuzzy_hint(0, Unmatched::UseDir).as_deref(),
+            Some("no match, Enter uses the typed path if it is a directory")
+        );
+        assert_eq!(fuzzy_hint(1, Unmatched::Reject), None);
+        assert_eq!(fuzzy_hint(MAX_VISIBLE_OPTIONS, Unmatched::UseText), None);
+        assert_eq!(
+            fuzzy_hint(MAX_VISIBLE_OPTIONS + 3, Unmatched::Reject).as_deref(),
             Some("\u{2026} and 3 more, keep typing to narrow")
         );
     }
+
+    // --- select_value ---
+
+    #[test]
+    fn unmatched_for_source() {
+        assert_eq!(
+            Unmatched::for_source(&Select::Options(vec!["a".into()])),
+            Unmatched::Reject
+        );
+        assert_eq!(
+            Unmatched::for_source(&Select::Command("ls".into())),
+            Unmatched::UseText
+        );
+        assert_eq!(
+            Unmatched::for_source(&Select::Dirs {
+                dirs: vec!["~/dev".into()],
+                depth: 1
+            }),
+            Unmatched::UseDir
+        );
+    }
+
+    #[test]
+    fn select_value_prefers_highlighted_match() {
+        for unmatched in [Unmatched::Reject, Unmatched::UseText, Unmatched::UseDir] {
+            assert_eq!(
+                select_value(Some("main"), "mn", unmatched),
+                Ok("main".to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn select_value_options_rejects_unmatched() {
+        assert_eq!(
+            select_value(None, "feature-x", Unmatched::Reject),
+            Err("no option matches \"feature-x\"".to_string())
+        );
+    }
+
+    #[test]
+    fn select_value_command_uses_trimmed_text() {
+        assert_eq!(
+            select_value(None, "  feature-x ", Unmatched::UseText),
+            Ok("feature-x".to_string())
+        );
+        assert!(select_value(None, "  ", Unmatched::UseText).is_err());
+    }
+
+    #[test]
+    fn select_value_dir_accepts_existing_absolute_dir() {
+        let tmp = TempDir::new("ndw_test_select_dir");
+        let typed = format!(" {} ", tmp.path_str());
+        assert_eq!(
+            select_value(None, &typed, Unmatched::UseDir),
+            Ok(tmp.path_str())
+        );
+    }
+
+    #[test]
+    fn select_value_dir_rejects_missing_or_relative() {
+        assert_eq!(
+            select_value(None, "/nonexistent_ndw_dir", Unmatched::UseDir),
+            Err("no directory at \"/nonexistent_ndw_dir\"".to_string())
+        );
+        // Exists relative to the test's cwd, but would follow the daemon's.
+        assert!(std::path::Path::new("src").is_dir());
+        assert!(select_value(None, "src", Unmatched::UseDir).is_err());
+    }
+
+    // --- run_options_command ---
 
     #[test]
     fn run_options_command_basic() {
