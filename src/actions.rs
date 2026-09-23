@@ -46,16 +46,21 @@ pub fn switch_workspace(
         spawn_reorder(app, request);
     }
     if created.is_some() {
-        let hooks = config::collect_create_hooks(config, hook_info.template_name.as_deref());
-        let env = config::build_hook_env(
-            ws_name,
-            ch,
-            hook_info.template_name.as_deref(),
-            &hook_info.variables,
-        );
-        niri::run_hooks(&hooks, &env);
+        run_create_hooks(config, ch, ws_name, hook_info);
     }
     Ok(())
+}
+
+/// Run the global on-create hooks, then those of `hook_info`'s template.
+fn run_create_hooks(config: &ResolvedConfig, ch: char, ws_name: &str, hook_info: &HookInfo) {
+    let hooks = config::collect_create_hooks(config, hook_info.template_name.as_deref());
+    let env = config::build_hook_env(
+        ws_name,
+        ch,
+        hook_info.template_name.as_deref(),
+        &hook_info.variables,
+    );
+    niri::run_hooks(&hooks, &env);
 }
 
 /// Delete a workspace and run on-delete hooks on success.
@@ -66,8 +71,10 @@ pub fn delete_workspace(config: &ResolvedConfig, ch: char, ws_name: &str) -> any
     Ok(())
 }
 
-/// Move a window (`None`: the focused one) to a workspace, creating it if needed.
+/// Move a window (`None`: the focused one) to a workspace, creating it if
+/// needed, and run the global on-create hooks when it was created.
 ///
+/// No programs are spawned: the moved window is the workspace's content.
 /// Errors, creating nothing, when `window_id` is `None` and no window is focused.
 pub fn move_window(
     config: &ResolvedConfig,
@@ -75,7 +82,10 @@ pub fn move_window(
     ws_name: &str,
     window_id: Option<u64>,
 ) -> anyhow::Result<()> {
-    niri::move_window_to_workspace(&config.workspace_prefix, ch, ws_name, window_id)
+    if niri::move_window_to_workspace(&config.workspace_prefix, ch, ws_name, window_id)? {
+        run_create_hooks(config, ch, ws_name, &HookInfo::default());
+    }
+    Ok(())
 }
 
 /// Run column reordering on a blocking thread, holding the application alive

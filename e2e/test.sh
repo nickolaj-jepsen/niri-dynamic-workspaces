@@ -115,6 +115,12 @@ test_hooks_outlive_the_process() {
     until_true has_mark created-1-a && until_true has_mark created-2-a
 }
 
+test_move_window_runs_create_hooks() {
+    add_hooks && "$h" app switch a && spawn_window || return 1
+    "$h" app move-window b || return 1
+    until_true window_on dyn-b && until_true has_mark created-2-b
+}
+
 # A reorder still waiting on a late window must not pull the user back after they leave.
 test_reorder_leaves_focus_alone() {
     local ok
@@ -430,6 +436,7 @@ tests=(
     move_window_moves_it
     move_window_without_window_creates_nothing
     hooks_outlive_the_process
+    move_window_runs_create_hooks
     reorder_leaves_focus_alone
     invalid_key_fails_in_caller
     missing_workspace_reports_to_caller
