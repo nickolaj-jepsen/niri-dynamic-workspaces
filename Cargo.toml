@@ -8,7 +8,7 @@ repository = "https://github.com/nickolaj-jepsen/niri-dynamic-workspaces"
 readme = "README.md"
 keywords = ["niri", "wayland", "workspace", "gtk4"]
 categories = ["command-line-utilities"]
-include = ["/src/**/*.rs", "/build.rs", "/style.css", "/themes/*.css", "/README.md", "/LICENSE"]
+include = ["/src/**/*.rs", "/build.rs", "/style.css", "/themes/*.css", "/README.md", "/CHANGELOG.md", "/LICENSE"]
 
 [dependencies]
 anyhow = "1"
