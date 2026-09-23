@@ -1,6 +1,12 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::io::Read;
+use std::os::unix::process::CommandExt;
+use std::process::{Child, Command, Stdio};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
+use std::time::{Duration, Instant};
 
 use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config as MatcherConfig, Matcher, Utf32Str};
@@ -14,7 +20,7 @@ use gtk4::{
 };
 
 use crate::actions::HookInfo;
-use crate::config::{Select, VariableType};
+use crate::config::{Select, TemplateVariable, VariableType};
 
 use super::metrics::{apply_scaled_css, KeyboardMetrics};
 use super::picker::{show_template_picker, TemplateOption};
@@ -237,28 +243,137 @@ fn render_fuzzy_rows(
     more_label.set_label(hint.as_deref().unwrap_or_default());
 }
 
-/// Run a shell command and return each non-empty stdout line as a `String`.
+/// How long a `command` source may run before the form offers text input instead.
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+/// How often the worker checks for exit, the deadline and cancellation.
+const POLL_INTERVAL: Duration = Duration::from_millis(20);
+/// How long output may stay open after the command exits.
+const LINGER_GRACE: Duration = Duration::from_millis(100);
+/// The error of a run stopped through its cancel flag.
+const CANCELLED: &str = "cancelled";
+
+/// Run `cmd` with `sh -c` and return each non-empty stdout line, trimmed.
 ///
-/// Returns an empty `Vec` if the command fails or produces no output.
-fn run_options_command(cmd: &str) -> Vec<String> {
-    match std::process::Command::new("sh").args(["-c", cmd]).output() {
-        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .map(String::from)
-            .collect(),
-        Ok(output) => {
-            eprintln!(
-                "warning: enum command failed (exit {}): {cmd}",
-                output.status.code().unwrap_or(-1)
-            );
-            Vec::new()
+/// The command runs in its own process group, which is killed when
+/// `timeout` passes or `cancel` is set. Errors say why there are no options
+/// (a failed launch or exit, the timeout, [`CANCELLED`], or a leftover
+/// process holding stdout); all but a cancellation are also logged.
+fn run_options_command(
+    cmd: &str,
+    timeout: Duration,
+    cancel: &AtomicBool,
+) -> Result<Vec<String>, String> {
+    let result = run_command_lines(cmd, timeout, cancel);
+    match &result {
+        Err(reason) if reason != CANCELLED => {
+            eprintln!("warning: options command '{cmd}': {reason}");
         }
-        Err(e) => {
-            eprintln!("warning: could not run enum command '{cmd}': {e}");
-            Vec::new()
-        }
+        _ => {}
+    }
+    result
+}
+
+fn run_command_lines(
+    cmd: &str,
+    timeout: Duration,
+    cancel: &AtomicBool,
+) -> Result<Vec<String>, String> {
+    let mut child = Command::new("sh")
+        .args(["-c", cmd])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .map_err(|e| format!("could not run command: {e}"))?;
+    // Drained concurrently: a command filling a pipe would never exit.
+    let stdout = read_in_background(child.stdout.take());
+    let stderr = read_in_background(child.stderr.take());
+
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        let stop = match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if cancel.load(Ordering::Relaxed) => CANCELLED.to_owned(),
+            Ok(None) if Instant::now() >= deadline => {
+                format!("command timed out after {} s", timeout.as_secs())
+            }
+            Ok(None) => {
+                std::thread::sleep(POLL_INTERVAL);
+                continue;
+            }
+            Err(e) => format!("could not wait for command: {e}"),
+        };
+        // Killed before the reap, so the group id cannot be reused meanwhile.
+        kill_group(&child);
+        let _ = child.wait();
+        return Err(stop);
+    };
+
+    // A background job the command started can keep stdout open; one that
+    // left the group (setsid) survives the kill too.
+    let stdout = stdout
+        .recv_timeout(LINGER_GRACE)
+        .or_else(|_| {
+            kill_group(&child);
+            stdout.recv_timeout(LINGER_GRACE)
+        })
+        .map_err(|_| "command left a process holding its output".to_owned())?;
+    if status.success() {
+        Ok(parse_option_lines(&stdout))
+    } else {
+        let stderr = stderr.recv_timeout(LINGER_GRACE).unwrap_or_default();
+        Err(failure_message(status.code(), &stderr))
+    }
+}
+
+/// Read `pipe` to its end on a new thread, which sends the bytes when done.
+fn read_in_background(pipe: Option<impl Read + Send + 'static>) -> mpsc::Receiver<Vec<u8>> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("options-command".into())
+        .spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut buf);
+            }
+            // The receiver is gone if the worker stopped waiting.
+            let _ = tx.send(buf);
+        })
+        .ok();
+    rx
+}
+
+/// SIGKILL every process in the group `child` leads.
+fn kill_group(child: &Child) {
+    if let Ok(pid) = libc::pid_t::try_from(child.id()) {
+        // SAFETY: kill(2) takes no pointers; the child was spawned with
+        // process_group(0), so -pid names its group.
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
+    }
+}
+
+/// Each non-empty line of `stdout`, trimmed.
+fn parse_option_lines(stdout: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+/// Why a command that exited unsuccessfully has no options: its exit code
+/// (or signal) and the first non-empty line of its stderr.
+fn failure_message(code: Option<i32>, stderr: &[u8]) -> String {
+    let status = code.map_or_else(|| "killed by a signal".to_owned(), |c| format!("exit {c}"));
+    match String::from_utf8_lossy(stderr)
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+    {
+        Some(line) => format!("command failed ({status}): {line}"),
+        None => format!("command failed ({status})"),
     }
 }
 
@@ -311,12 +426,13 @@ fn scan_dir_options(dirs: &[String], depth: u32) -> Vec<String> {
     results
 }
 
-/// Resolve the options for a select variable from its source.
-fn resolve_select_options(source: &Select) -> Vec<String> {
+/// Resolve the options for a select variable from its source. Only a
+/// `command` source can fail; see [`run_options_command`].
+fn resolve_select_options(source: &Select, cancel: &AtomicBool) -> Result<Vec<String>, String> {
     match source {
-        Select::Options(opts) => opts.clone(),
-        Select::Command(cmd) => run_options_command(cmd),
-        Select::Dirs { dirs, depth } => scan_dir_options(dirs, *depth),
+        Select::Options(opts) => Ok(opts.clone()),
+        Select::Command(cmd) => run_options_command(cmd, COMMAND_TIMEOUT, cancel),
+        Select::Dirs { dirs, depth } => Ok(scan_dir_options(dirs, *depth)),
     }
 }
 
@@ -345,23 +461,42 @@ fn build_resolved_select(
 /// loading placeholder for the real widget once done.
 ///
 /// Keeps arbitrary shell commands and deep directory scans from freezing the
-/// overlay while the variable form opens.
+/// overlay while the variable form opens. A failed source becomes a text
+/// entry and its reason is shown in `ctx`'s error line. Once `cancel` is
+/// set the form is gone, and the result is dropped.
 fn spawn_select_resolution(
+    var: &TemplateVariable,
     source: Select,
     slot: Rc<RefCell<VariableWidget>>,
     row: GtkBox,
-    placeholder: Entry,
-    var_name: String,
     metrics: KeyboardMetrics,
+    ctx: ActionContext,
+    cancel: Arc<AtomicBool>,
 ) {
+    let placeholder = match &*slot.borrow() {
+        VariableWidget::Loading(entry) => entry.clone(),
+        _ => unreachable!("deferred source always pairs with a Loading widget"),
+    };
     let unmatched = Unmatched::for_source(&source);
+    let (var_name, var_label) = (var.name.clone(), var.label.clone());
     glib::spawn_future_local(async move {
-        let resolved = gio::spawn_blocking(move || resolve_select_options(&source))
+        let worker_cancel = cancel.clone();
+        let resolved = gio::spawn_blocking(move || resolve_select_options(&source, &worker_cancel))
             .await
-            .unwrap_or_default();
+            .unwrap_or_else(|_| Err("option source panicked".to_owned()));
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
+        let options = resolved.unwrap_or_else(|reason| {
+            show_error(
+                &ctx,
+                &format!("{var_label}: {reason}; type a value instead"),
+            );
+            Vec::new()
+        });
         let had_focus = placeholder.has_focus();
         row.remove(&placeholder);
-        let widget = build_resolved_select(&row, &resolved, &var_name, &metrics, unmatched);
+        let widget = build_resolved_select(&row, &options, &var_name, &metrics, unmatched);
         if had_focus {
             widget.grab_focus();
         }
@@ -487,11 +622,13 @@ fn build_fuzzy_select(
 ///
 /// Static sources build synchronously; command/dir sources can be slow, so
 /// they show a placeholder and resolve off-thread (the slot is swapped in
-/// place once resolution finishes).
+/// place once resolution finishes; see [`spawn_select_resolution`]).
 fn build_variable_row(
-    var: &crate::config::TemplateVariable,
+    var: &TemplateVariable,
     form: &GtkBox,
     metrics: &KeyboardMetrics,
+    ctx: &ActionContext,
+    cancel: &Arc<AtomicBool>,
 ) -> Rc<RefCell<VariableWidget>> {
     let row = GtkBox::builder()
         .orientation(Orientation::Vertical)
@@ -535,17 +672,14 @@ fn build_variable_row(
     let slot = Rc::new(RefCell::new(widget));
 
     if let Some(source) = deferred_source {
-        let placeholder = match &*slot.borrow() {
-            VariableWidget::Loading(entry) => entry.clone(),
-            _ => unreachable!("deferred source always pairs with a Loading widget"),
-        };
         spawn_select_resolution(
+            var,
             source,
             slot.clone(),
             row,
-            placeholder,
-            var.name.clone(),
             *metrics,
+            ctx.clone(),
+            cancel.clone(),
         );
     }
 
@@ -588,6 +722,24 @@ pub(super) fn show_variable_input(
 
     // Error revealer
     let (error_label, error_revealer) = create_error_revealer();
+    // A long reason (a command's stderr line) wraps instead of widening the form.
+    error_label.set_max_width_chars(FUZZY_OPTION_MAX_CHARS);
+    let var_ctx = ActionContext {
+        error_label,
+        error_revealer: error_revealer.clone(),
+        ..ctx.clone()
+    };
+
+    // Stops option commands once the form is left; set explicitly because
+    // the form outlives an output change's remap.
+    let cancel = Arc::new(AtomicBool::new(false));
+    {
+        let cancel = cancel.clone();
+        window.connect_close_request(move |_| {
+            cancel.store(true, Ordering::Relaxed);
+            Propagation::Proceed
+        });
+    }
 
     // Variable form
     let form = GtkBox::builder()
@@ -599,7 +751,7 @@ pub(super) fn show_variable_input(
     let widgets: Vec<Rc<RefCell<VariableWidget>>> = option
         .variables
         .iter()
-        .map(|var| build_variable_row(var, &form, &metrics))
+        .map(|var| build_variable_row(var, &form, &metrics, &var_ctx, &cancel))
         .collect();
     container.append(&form);
 
@@ -617,13 +769,7 @@ pub(super) fn show_variable_input(
         first.borrow().grab_focus();
     }
 
-    let var_ctx = ActionContext {
-        error_label,
-        error_revealer,
-        ..ctx.clone()
-    };
-
-    attach_variable_input_key_handler(&var_ctx, ch, &widgets, option, template_name);
+    attach_variable_input_key_handler(&var_ctx, ch, &widgets, option, template_name, cancel);
     attach_close_on_backdrop_click(window, &container);
 }
 
@@ -633,6 +779,7 @@ fn attach_variable_input_key_handler(
     widgets: &[Rc<RefCell<VariableWidget>>],
     option: &TemplateOption,
     template_name: Option<String>,
+    cancel: Arc<AtomicBool>,
 ) {
     let key_ctx = ctx.clone();
     let close_keybinds = ctx.session.config.close_keybinds.clone();
@@ -650,6 +797,7 @@ fn attach_variable_input_key_handler(
         // Close keybinds / Escape → go back to template picker
         if matches_close_keybind(&event, &close_keybinds) {
             key_ctx.session.held_key.hold(keycode);
+            cancel.store(true, Ordering::Relaxed);
             let ctx_clone = key_ctx.clone();
             glib::idle_add_local_once(move || {
                 show_template_picker(ch, &ctx_clone);
@@ -837,22 +985,123 @@ mod tests {
 
     // --- run_options_command ---
 
+    fn run(cmd: &str) -> Result<Vec<String>, String> {
+        run_options_command(cmd, Duration::from_secs(5), &AtomicBool::new(false))
+    }
+
+    /// Whether `pid` has exited: gone from /proc, or a zombie nobody reaped
+    /// yet (the Nix build sandbox's init may not reap promptly).
+    fn gone(pid: u32) -> bool {
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(stat) => stat
+                .rsplit_once(") ")
+                .is_some_and(|(_, state)| state.starts_with('Z')),
+            Err(_) => true,
+        }
+    }
+
+    fn within(limit: Duration, cond: impl Fn() -> bool) -> bool {
+        let deadline = Instant::now() + limit;
+        while !cond() {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        true
+    }
+
+    fn read_pid(path: &std::path::Path) -> u32 {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+    }
+
     #[test]
     fn run_options_command_basic() {
-        let result = run_options_command("printf 'a\nb\nc'");
-        assert_eq!(result, vec!["a", "b", "c"]);
+        assert_eq!(run("printf 'a\nb\nc'").unwrap(), vec!["a", "b", "c"]);
     }
 
     #[test]
     fn run_options_command_trims_and_filters() {
-        let result = run_options_command("printf '  a \n\n  b  \n\n'");
-        assert_eq!(result, vec!["a", "b"]);
+        assert_eq!(run("printf '  a \n\n  b  \n\n'").unwrap(), vec!["a", "b"]);
     }
 
     #[test]
-    fn run_options_command_failure() {
-        let result = run_options_command("nonexistent_command_12345");
-        assert!(result.is_empty());
+    fn run_options_command_reads_output_larger_than_a_pipe() {
+        assert_eq!(run("seq 100000").unwrap().len(), 100_000);
+    }
+
+    #[test]
+    fn run_options_command_failure_reports_stderr() {
+        assert_eq!(
+            run("echo boom >&2; echo ignored; exit 3"),
+            Err("command failed (exit 3): boom".to_string())
+        );
+    }
+
+    #[test]
+    fn run_options_command_missing_binary() {
+        let err = run("nonexistent_command_12345").unwrap_err();
+        assert!(err.starts_with("command failed (exit 127)"), "{err}");
+    }
+
+    #[test]
+    fn run_options_command_times_out_and_kills_group() {
+        let tmp = TempDir::new("ndw_test_cmd_timeout");
+        let pidfile = tmp.0.join("pid");
+        // The sleep is a grandchild: only a group kill reaches it.
+        let cmd = format!("sleep 30 & echo $! > '{}'; wait", pidfile.display());
+        let start = Instant::now();
+        let result = run_options_command(&cmd, Duration::from_millis(300), &AtomicBool::new(false));
+        let err = result.unwrap_err();
+        assert!(err.starts_with("command timed out"), "{err}");
+        assert!(start.elapsed() < Duration::from_secs(3));
+        let pid = read_pid(&pidfile);
+        assert!(within(Duration::from_secs(2), || gone(pid)));
+    }
+
+    #[test]
+    fn run_options_command_background_job_does_not_block() {
+        let tmp = TempDir::new("ndw_test_cmd_background");
+        let pidfile = tmp.0.join("pid");
+        let cmd = format!("sleep 30 & echo $! > '{}'; echo a", pidfile.display());
+        let start = Instant::now();
+        assert_eq!(run(&cmd), Ok(vec!["a".to_string()]));
+        assert!(start.elapsed() < Duration::from_secs(2));
+        let pid = read_pid(&pidfile);
+        assert!(within(Duration::from_secs(2), || gone(pid)));
+    }
+
+    #[test]
+    fn run_options_command_cancelled() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let setter = {
+            let cancel = cancel.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                cancel.store(true, Ordering::Relaxed);
+            })
+        };
+        let start = Instant::now();
+        let result = run_options_command("sleep 30", Duration::from_secs(5), &cancel);
+        setter.join().unwrap();
+        assert_eq!(result, Err(CANCELLED.to_string()));
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn failure_message_uses_first_stderr_line() {
+        assert_eq!(
+            failure_message(Some(2), b"\n  first\nsecond"),
+            "command failed (exit 2): first"
+        );
+        assert_eq!(
+            failure_message(None, b""),
+            "command failed (killed by a signal)"
+        );
     }
 
     // --- resolve_select_options ---
@@ -860,22 +1109,21 @@ mod tests {
     #[test]
     fn resolve_select_options_static() {
         let source = Select::Options(vec!["a".to_string(), "b".to_string()]);
-        let result = resolve_select_options(&source);
-        assert_eq!(result, vec!["a", "b"]);
+        let result = resolve_select_options(&source, &AtomicBool::new(false));
+        assert_eq!(result.unwrap(), vec!["a", "b"]);
     }
 
     #[test]
     fn resolve_select_options_command_succeeds() {
         let source = Select::Command("printf 'x\ny'".to_string());
-        let result = resolve_select_options(&source);
-        assert_eq!(result, vec!["x", "y"]);
+        let result = resolve_select_options(&source, &AtomicBool::new(false));
+        assert_eq!(result.unwrap(), vec!["x", "y"]);
     }
 
     #[test]
     fn resolve_select_options_command_fails() {
         let source = Select::Command("nonexistent_cmd_12345".to_string());
-        let result = resolve_select_options(&source);
-        assert!(result.is_empty());
+        assert!(resolve_select_options(&source, &AtomicBool::new(false)).is_err());
     }
 
     // --- scan_dir_options ---
