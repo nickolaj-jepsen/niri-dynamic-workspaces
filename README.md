@@ -384,6 +384,7 @@ Variable and class names are covered by semver. The widget tree between them is 
 - **`niri-dynamic-workspaces move-window`** — opens the move-window overlay (press a key to move the window that was focused when it opened)
 - **`niri-dynamic-workspaces daemon`** — starts as a background daemon (no overlay shown)
 - **`niri-dynamic-workspaces check`** — lists config problems and exits non-zero if there are any; needs no display
+- **`niri-dynamic-workspaces rename <KEY|focused> [TITLE]`** — sets the title of an existing dynamic workspace, or clears it when TITLE is omitted or empty (see [Renaming](#renaming))
 
 Every command takes `-c/--config FILE` to read another config file.
 
@@ -423,6 +424,27 @@ action exits non-zero, also when a daemon handles the call. A relative
 `delete` returns only after the windows have closed and the name is gone, so
 `delete a && switch a` creates a fresh dyn-a. If a window is still open after
 5 seconds, the workspace keeps its name and the command fails.
+
+#### Renaming
+
+`rename` changes a workspace's title after it was created and keeps its key:
+`rename a "My project"` turns dyn-a into `dyn-a My project`, and
+`rename focused` clears the focused workspace's title. It only renames dynamic
+workspaces (rename a pinned one in niri's config), and fails when another
+workspace already has the new name. A `[workspace.X].name` is shown on the
+card in place of the title.
+
+Bound with a prompt, it titles the workspace you are on:
+
+```kdl
+binds {
+    Mod+Alt+R hotkey-overlay-title="Retitle Workspace" { spawn "sh" "-c" "t=$(fuzzel --dmenu --prompt-only 'Title: ') && niri-dynamic-workspaces rename focused -- \"$t\""; }
+}
+```
+
+fuzzel exits non-zero when the prompt is cancelled, so the `&&` leaves the
+title alone; submitting an empty prompt clears it. The `--` lets a title start
+with `-`.
 
 ### Daemon mode
 
