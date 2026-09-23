@@ -84,6 +84,44 @@ test_delete_removes_workspace() {
     until_true no_ws dyn-a
 }
 
+# stop_window: SIGSTOP the only window's client, which then leaves close requests unanswered; prints its pid.
+# Callers must SIGCONT it: a stopped client outlives the session.
+stop_window() {
+    local pid
+    pid=$(windows | jq -r '.[0].pid')
+    [[ $pid =~ ^[0-9]+$ ]] && kill -STOP "$pid" && echo "$pid"
+}
+
+test_delete_closes_windows_before_unnaming() {
+    local pid ok
+    "$h" app switch a && spawn_window && pid=$(stop_window) || return 1
+    "$h" app delete a &
+    sleep 1
+    has_ws dyn-a
+    ok=$?
+    kill -CONT "$pid"
+    # The caller returns once the name is gone.
+    wait $! && ((ok == 0)) && windows | jq -e 'length == 0' >/dev/null && no_ws dyn-a
+}
+
+# delete_a_is_refused: delete a waits out the close timeout, fails, and dyn-a keeps its name and window.
+delete_a_is_refused() {
+    local err status
+    err=$("$h" app delete a 2>&1 >/dev/null)
+    status=$?
+    [[ $status == 1 && $err == *"did not close"* ]] && has_ws dyn-a && window_on dyn-a
+}
+
+test_delete_keeps_workspace_with_open_window() {
+    local pid ok
+    "$h" app switch a && spawn_window && pid=$(stop_window) || return 1
+    # Then through the daemon, which learns the outcome after its handler returned.
+    delete_a_is_refused && "$h" daemon && delete_a_is_refused
+    ok=$?
+    kill -CONT "$pid"
+    return "$ok"
+}
+
 test_move_window_moves_it() {
     "$h" app switch a && spawn_window || return 1
     "$h" app move-window b || return 1
@@ -119,6 +157,14 @@ test_move_window_runs_create_hooks() {
     add_hooks && "$h" app switch a && spawn_window || return 1
     "$h" app move-window b || return 1
     until_true window_on dyn-b && until_true has_mark created-2-b
+}
+
+test_delete_hook_gets_full_name() {
+    add_hooks && "$h" app switch a || return 1
+    "$h" run niri msg action set-workspace-name "dyn-a Notes" || return 1
+    until_true has_ws "dyn-a Notes" || return 1
+    "$h" app delete a || return 1
+    until_true has_mark "deleted-dyn-a Notes"
 }
 
 # A reorder still waiting on a late window must not pull the user back after they leave.
@@ -474,10 +520,13 @@ test_daemon_frees_closed_overlays() {
 tests=(
     switch_creates_workspace
     delete_removes_workspace
+    delete_closes_windows_before_unnaming
+    delete_keeps_workspace_with_open_window
     move_window_moves_it
     move_window_without_window_creates_nothing
     hooks_outlive_the_process
     move_window_runs_create_hooks
+    delete_hook_gets_full_name
     reorder_leaves_focus_alone
     invalid_key_fails_in_caller
     missing_workspace_reports_to_caller

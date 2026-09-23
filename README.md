@@ -226,6 +226,10 @@ on_delete = ["cleanup-workspace.sh"]
 - `on_delete` runs whenever a workspace is deleted, also when the daemon
   removes an empty one (`auto_delete_empty`); `NDW_TEMPLATE` is empty and no
   `NDW_VAR_*` are set for it
+- Deleting a workspace asks its windows to close and runs `on_delete` once
+  they have. If one is still open after 5 seconds (an editor asking to save,
+  a terminal with a running job), the workspace keeps its name and `on_delete`
+  does not run
 - niri launches them, like `programs`: they get niri's environment and
   working directory, keep running after the overlay closes, and are not part
   of the daemon's service
@@ -384,13 +388,17 @@ Pass a workspace key to act immediately without opening the overlay:
 
 ```bash
 niri-dynamic-workspaces switch a        # switch to / create dyn-a
-niri-dynamic-workspaces delete a        # delete dyn-a
+niri-dynamic-workspaces delete a        # close dyn-a's windows, then delete it
 niri-dynamic-workspaces move-window a   # move focused window to dyn-a
 ```
 
 Errors and config warnings are printed in the invoking terminal, and a failed
 action exits non-zero, also when a daemon handles the call. A relative
 `--config` path is resolved against the caller's directory.
+
+`delete` returns only after the windows have closed and the name is gone, so
+`delete a && switch a` creates a fresh dyn-a. If a window is still open after
+5 seconds, the workspace keeps its name and the command fails.
 
 ### Daemon mode
 

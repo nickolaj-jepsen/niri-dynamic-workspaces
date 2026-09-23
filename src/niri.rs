@@ -989,37 +989,102 @@ pub fn run_hooks(commands: &[String], env: &[(String, String)]) {
     run_hooks_with(&mut SocketClient, commands, env);
 }
 
-pub fn delete_workspace(prefix: &str, ch: char) -> anyhow::Result<()> {
-    delete_workspace_impl(&mut SocketClient, prefix, ch)
+/// A workspace whose windows were asked to close, for [`finish_delete`].
+#[derive(Debug, PartialEq, Eq)]
+pub struct PendingDelete {
+    pub id: u64,
+    /// Full name at lookup, title included.
+    pub name: String,
 }
 
-fn delete_workspace_impl(
+/// How long [`finish_delete`] waits for the windows to close.
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+const CLOSE_POLL: Duration = Duration::from_millis(100);
+
+/// Ask every window on the workspace for `ch` to close, keeping its name
+/// for [`finish_delete`]. The daemon's cleanup leaves it alone meanwhile.
+///
+/// # Errors
+/// When no workspace has key `ch`, or an IPC call fails.
+pub fn begin_delete(prefix: &str, ch: char) -> anyhow::Result<PendingDelete> {
+    let pending = begin_delete_impl(&mut SocketClient, prefix, ch)?;
+    // Past the wait: cleanup unsetting it under finish_delete would run on_delete twice.
+    spare_workspace(
+        pending.id,
+        Instant::now() + CLOSE_TIMEOUT + Duration::from_secs(1),
+    );
+    Ok(pending)
+}
+
+fn begin_delete_impl(
     client: &mut impl NiriClient,
     prefix: &str,
     ch: char,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<PendingDelete> {
     let workspaces = list_workspaces_with(client)?;
     let ws = find_workspace_by_char(&workspaces, prefix, ch)
         .ok_or_else(|| anyhow::anyhow!("workspace '{prefix}{ch}' not found"))?;
     let ws_id = ws.id;
-    let ws_name = ws
-        .name
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("workspace has no name"))?;
+    let name = ws.name.clone().context("workspace has no name")?;
 
-    // Close all windows on this workspace
     let windows = list_windows_with(client)?;
     for win in windows.iter().filter(|w| w.workspace_id == Some(ws_id)) {
         send_action_with(client, Action::CloseWindow { id: Some(win.id) })?;
     }
+    Ok(PendingDelete { id: ws_id, name })
+}
 
-    // Unset the workspace name so niri cleans it up
+/// Wait until the pending workspace has no windows, then unset its name.
+///
+/// Returns whether it did: `false` when the workspace no longer carries the
+/// name, because the daemon's cleanup or a rename got there first.
+///
+/// # Errors
+/// When a window is still open after [`CLOSE_TIMEOUT`] (an app asking to
+/// save, say), which leaves the name in place, or an IPC call fails.
+pub fn finish_delete(pending: &PendingDelete) -> anyhow::Result<bool> {
+    finish_delete_impl(&mut SocketClient, pending, CLOSE_POLL, CLOSE_TIMEOUT)
+}
+
+fn finish_delete_impl(
+    client: &mut impl NiriClient,
+    pending: &PendingDelete,
+    poll: Duration,
+    timeout: Duration,
+) -> anyhow::Result<bool> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        // Every window counts, so a save prompt opened meanwhile also keeps the name.
+        let remaining = list_windows_with(client)?
+            .iter()
+            .filter(|w| w.workspace_id == Some(pending.id))
+            .count();
+        if remaining == 0 {
+            break;
+        }
+        if Instant::now() >= deadline {
+            bail!(
+                "{remaining} window(s) did not close; '{}' keeps its name",
+                pending.name
+            );
+        }
+        thread::sleep(poll);
+    }
+
+    // niri acknowledges unsetting a name that is gone, so check it is still ours.
+    let still_named = list_workspaces_with(client)?
+        .iter()
+        .any(|w| w.id == pending.id && w.name.as_deref() == Some(pending.name.as_str()));
+    if !still_named {
+        return Ok(false);
+    }
     send_action_with(
         client,
         Action::UnsetWorkspaceName {
-            reference: Some(WorkspaceReferenceArg::Name(ws_name)),
+            reference: Some(WorkspaceReferenceArg::Id(pending.id)),
         },
-    )
+    )?;
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -1689,20 +1754,32 @@ mod tests {
         assert!(focused_window_id(&unfocused).is_err());
     }
 
+    fn is_unset(request: &Request) -> bool {
+        matches!(request, Request::Action(Action::UnsetWorkspaceName { .. }))
+    }
+
     #[test]
-    fn delete_workspace_closes_windows_then_unsets_name() {
+    fn begin_delete_closes_only_that_workspaces_windows() {
         let mut client = MockClient::new(vec![
-            Response::Workspaces(vec![test_workspace(10, Some("dyn-a"), false)]),
+            Response::Workspaces(vec![test_workspace(10, Some("dyn-a My Project"), false)]),
             Response::Windows(vec![
                 test_window(1, 10, "firefox"),
                 test_window(2, 20, "kitty"),
+                test_window(3, 10, "foot"),
             ]),
             Response::Handled,
             Response::Handled,
         ]);
 
-        delete_workspace_impl(&mut client, "dyn-", 'a').unwrap();
+        let pending = begin_delete_impl(&mut client, "dyn-", 'a').unwrap();
 
+        assert_eq!(
+            pending,
+            PendingDelete {
+                id: 10,
+                name: "dyn-a My Project".to_string()
+            }
+        );
         assert_eq!(client.sent.len(), 4);
         assert!(matches!(
             &client.sent[2],
@@ -1710,20 +1787,103 @@ mod tests {
         ));
         assert!(matches!(
             &client.sent[3],
-            Request::Action(Action::UnsetWorkspaceName {
-                reference: Some(WorkspaceReferenceArg::Name(n)),
-            }) if n == "dyn-a"
+            Request::Action(Action::CloseWindow { id: Some(3) })
         ));
     }
 
     #[test]
-    fn delete_workspace_missing_errors_without_actions() {
+    fn begin_delete_missing_errors_without_actions() {
         let mut client = MockClient::new(vec![Response::Workspaces(vec![])]);
 
-        let err = delete_workspace_impl(&mut client, "dyn-", 'a').unwrap_err();
+        let err = begin_delete_impl(&mut client, "dyn-", 'a').unwrap_err();
 
         assert!(err.to_string().contains("not found"));
         assert_eq!(client.sent.len(), 1);
+    }
+
+    fn pending_a() -> PendingDelete {
+        PendingDelete {
+            id: 10,
+            name: "dyn-a".to_string(),
+        }
+    }
+
+    #[test]
+    fn finish_delete_waits_for_windows_then_unsets_by_id() {
+        let mut client = MockClient::new(vec![
+            Response::Windows(vec![
+                test_window(1, 10, "firefox"),
+                test_window(2, 20, "kitty"),
+            ]),
+            Response::Windows(vec![test_window(2, 20, "kitty")]),
+            Response::Workspaces(vec![test_workspace(10, Some("dyn-a"), false)]),
+            Response::Handled,
+        ]);
+
+        let unset = finish_delete_impl(
+            &mut client,
+            &pending_a(),
+            Duration::ZERO,
+            Duration::from_secs(60),
+        )
+        .unwrap();
+
+        assert!(unset);
+        assert_eq!(client.sent.len(), 4);
+        assert!(matches!(
+            &client.sent[3],
+            Request::Action(Action::UnsetWorkspaceName {
+                reference: Some(WorkspaceReferenceArg::Id(10)),
+            })
+        ));
+    }
+
+    #[test]
+    fn finish_delete_keeps_name_when_windows_remain() {
+        // A window that opened after the close request, such as a save prompt.
+        let mut client = MockClient::new(vec![Response::Windows(vec![test_window(7, 10, "foot")])]);
+
+        let err = finish_delete_impl(&mut client, &pending_a(), Duration::ZERO, Duration::ZERO)
+            .unwrap_err();
+
+        assert!(err.to_string().contains("did not close"), "{err}");
+        assert_eq!(client.sent.len(), 1);
+    }
+
+    #[test]
+    fn finish_delete_empty_workspace_unsets_at_once() {
+        let mut client = MockClient::new(vec![
+            Response::Windows(vec![]),
+            Response::Workspaces(vec![test_workspace(10, Some("dyn-a"), false)]),
+            Response::Handled,
+        ]);
+
+        let unset =
+            finish_delete_impl(&mut client, &pending_a(), Duration::ZERO, Duration::ZERO).unwrap();
+
+        assert!(unset);
+        assert!(is_unset(&client.sent[2]));
+    }
+
+    #[test]
+    fn finish_delete_leaves_a_workspace_that_lost_its_name() {
+        let unnamed = test_workspace(10, None, false);
+        let renamed = test_workspace(10, Some("dyn-a Notes"), false);
+        // Cleanup removed it, and the user made a new dyn-a.
+        let reused = test_workspace(11, Some("dyn-a"), false);
+        for workspace in [unnamed, renamed, reused] {
+            let mut client = MockClient::new(vec![
+                Response::Windows(vec![]),
+                Response::Workspaces(vec![workspace]),
+            ]);
+
+            let unset =
+                finish_delete_impl(&mut client, &pending_a(), Duration::ZERO, Duration::ZERO)
+                    .unwrap();
+
+            assert!(!unset);
+            assert!(!client.sent.iter().any(is_unset));
+        }
     }
 
     fn strings(words: &[&str]) -> Vec<String> {

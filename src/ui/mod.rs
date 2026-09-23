@@ -786,7 +786,18 @@ fn dispatch_action(ch: char, ctx: &ActionContext) {
             switch_and_close(&ws_name, ch, programs, ctx, &HookInfo::default());
             return;
         }
-        Mode::Delete => crate::actions::delete_workspace(config, ch, &ws_name),
+        Mode::Delete => {
+            let Some(app) = ctx.window.application() else {
+                show_error(ctx, "Failed: window has no application");
+                return;
+            };
+            // The overlay closes first: it would cover the apps' own save prompts.
+            crate::actions::delete_workspace(&app, config, ch, |result| {
+                if let Err(e) = result {
+                    eprintln!("warning: {e:#}");
+                }
+            })
+        }
         Mode::MoveWindow => window_to_move(ctx)
             .and_then(|window| crate::actions::move_window(config, ch, &ws_name, Some(window))),
     };
