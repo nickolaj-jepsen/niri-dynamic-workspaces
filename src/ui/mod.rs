@@ -948,8 +948,8 @@ fn attach_close_on_backdrop_click(window: &ApplicationWindow, container: &GtkBox
     click.set_name(Some("ndw-backdrop"));
     click.connect_released(move |_, _, x, y| {
         let (cx, cy) = container_ref
-            .translate_coordinates(&window_ref, 0.0, 0.0)
-            .unwrap_or((0.0, 0.0));
+            .compute_point(&window_ref, &gtk4::graphene::Point::zero())
+            .map_or((0.0, 0.0), |p| (f64::from(p.x()), f64::from(p.y())));
         let cw = f64::from(container_ref.width());
         let ch = f64::from(container_ref.height());
         if x < cx || x > cx + cw || y < cy || y > cy + ch {

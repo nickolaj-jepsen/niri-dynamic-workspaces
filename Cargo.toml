@@ -15,7 +15,8 @@ anyhow = "1"
 async-channel = "2"
 clap = { version = "4", features = ["derive"] }
 niri-ipc = "=26.4.0"
-gtk4 = "0.9"
+# v4_16 fails the build on older GTK, which would silently drop style.css's var() and color-mix().
+gtk4 = { version = "0.9", features = ["v4_16"] }
 gtk4-layer-shell = "0.5"
 gdk4 = "0.9"
 glib = "0.20"

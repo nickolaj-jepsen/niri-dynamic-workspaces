@@ -126,7 +126,7 @@ pub(super) fn apply_scaled_css(css: &str) {
             gtk4::style_context_remove_provider_for_display(&display, &old);
         }
         let provider = gtk4::CssProvider::new();
-        provider.load_from_data(css);
+        provider.load_from_string(css);
         gtk4::style_context_add_provider_for_display(
             &display,
             &provider,
