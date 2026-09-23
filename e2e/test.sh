@@ -23,6 +23,14 @@ until_true_for() {
     done
 }
 until_true() { until_true_for 5 "$@"; }
+# stays_focused <ws> <secs>: the workspace keeps focus that long.
+stays_focused() {
+    local deadline=$((SECONDS + $2))
+    while ((SECONDS < deadline)); do
+        focused_is "$1" || return 1
+        sleep 0.25
+    done
+}
 
 has_ws() { [[ -n $(ws_id "$1") ]]; }
 no_ws() { [[ -z $(ws_id "$1") ]]; }
@@ -88,6 +96,24 @@ test_move_window_without_window_creates_nothing() {
     err=$("$h" app move-window x 2>&1 >/dev/null)
     status=$?
     [[ $status == 1 && $err == *"no focused window"* ]] && no_ws dyn-x
+}
+
+# A reorder still waiting on a late window must not pull the user back after they leave.
+test_reorder_leaves_focus_alone() {
+    local ok
+    # The direct foot is listed second, so it is out of its slot and the reorder cannot skip it.
+    add_config <<'EOF' || return 1
+[workspace.c]
+programs = ["sh -c 'sleep 2; exec foot sleep 60'", "foot sleep 60"]
+EOF
+    "$h" app switch b || return 1
+    # The reorder's hold keeps this instance up until it is done; the switch back is forwarded to it.
+    "$h" app switch c &
+    # The late foot maps on dyn-b, so the reorder waits out its 5 s budget and acts at about 5.6 s.
+    until_true window_on dyn-c && "$h" app switch b && stays_focused dyn-b 8
+    ok=$?
+    wait
+    ((ok == 0)) && focused_is dyn-b
 }
 
 test_overlay_move_without_window_stays_open() {
@@ -386,6 +412,7 @@ tests=(
     delete_removes_workspace
     move_window_moves_it
     move_window_without_window_creates_nothing
+    reorder_leaves_focus_alone
     invalid_key_fails_in_caller
     missing_workspace_reports_to_caller
     overlay_card_click_switches
