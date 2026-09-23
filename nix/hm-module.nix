@@ -70,14 +70,13 @@
           description = ''
             Configuration written to
             {file}`$XDG_CONFIG_HOME/niri-dynamic-workspaces/config.toml`.
-
-            See the available options in README.md
-            ```
+            See Configuration in README.md for the options;
+            `niri-dynamic-workspaces check` lists any problems.
           '';
           example = lib.literalExpression ''
             {
               general.workspace_prefix = "ws-";
-              layout.max_columns = 3;
+              general.layout = "dvorak";
             }
           '';
         };

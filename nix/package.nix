@@ -22,7 +22,9 @@ in
           || name == "Cargo.toml"
           || name == "Cargo.lock"
           || name == "build.rs"
-          || name == "style.css";
+          || name == "style.css"
+          # config.rs tests the README's TOML examples.
+          || relPath == "README.md";
       };
 
       cargoLock.lockFile = cargoLock;
