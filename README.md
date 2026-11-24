@@ -4,6 +4,7 @@ A keyboard-driven workspace switcher for the [niri](https://github.com/YaLTeR/ni
 Wayland compositor. A keybind shows your workspaces on a keyboard-shaped grid;
 press a letter or digit to switch to that workspace, or to create it and launch
 its programs. The same overlay deletes workspaces and moves the focused window.
+[Experimental Umbriel support](docs/umbriel.md) uses the same overlay and config.
 
 ![The overlay, in the fireproof theme, over an editor and two terminals](docs/readme.png)
 

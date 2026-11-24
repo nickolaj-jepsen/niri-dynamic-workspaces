@@ -10,6 +10,8 @@ use anyhow::{bail, Context};
 use niri_ipc::socket::Socket;
 use niri_ipc::{Action, Event, Request, Response, Window, Workspace, WorkspaceReferenceArg};
 
+use crate::backend::{OverlayEvent, WorkspaceSelector};
+
 /// Transport for niri IPC requests.
 ///
 /// Implemented by [`SocketClient`] for the real compositor socket; tests use
@@ -731,15 +733,6 @@ fn move_workspace_to_focused_output_impl(
     )
 }
 
-/// The workspace a command acts on.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WorkspaceSelector {
-    /// The dynamic workspace with this key.
-    Key(char),
-    /// The focused workspace, which must be dynamic.
-    Focused,
-}
-
 /// Whether a workspace other than `except_id` is named `name`, as niri compares names.
 fn name_taken(workspaces: &[Workspace], except_id: u64, name: &str) -> bool {
     workspaces.iter().any(|w| {
@@ -1150,15 +1143,6 @@ fn event_cleanup_loop(source: &mut impl FnMut() -> Option<CleanupConfig>) -> any
     }
 }
 
-/// Overlay-relevant compositor changes, coarsened from the niri event stream.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OverlayEvent {
-    /// Focus may have moved (workspace activation or window focus change).
-    FocusChanged,
-    /// Workspaces or windows changed; overlay cards may be stale.
-    Structural,
-}
-
 fn classify_event(event: &Event) -> Option<OverlayEvent> {
     match event {
         Event::WorkspacesChanged { .. }
@@ -1228,7 +1212,10 @@ const HOOK_RUNNER: &str = r#"for hook in "$@"; do sh -c "$hook"; done"#;
 /// niri's `Spawn` takes no environment, so `env` sets it. Every name in
 /// `env` must be a valid variable name, so that `env` never reads an entry
 /// as an option.
-fn hook_spawn_command(commands: &[String], env: &[(String, String)]) -> Option<Vec<String>> {
+pub(crate) fn hook_spawn_command(
+    commands: &[String],
+    env: &[(String, String)],
+) -> Option<Vec<String>> {
     if commands.is_empty() {
         return None;
     }

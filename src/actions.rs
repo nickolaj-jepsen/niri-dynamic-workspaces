@@ -1,5 +1,5 @@
 //! Workspace action choreography shared by the CLI and the overlay UI:
-//! niri IPC call → on-create/on-delete hooks. Window placement and delete
+//! compositor IPC call → on-create/on-delete hooks. Niri window placement and delete
 //! completion run in the background while the application is held.
 
 use std::collections::HashMap;
@@ -9,9 +9,9 @@ use anyhow::Context as _;
 use gtk4::gio;
 use gtk4::prelude::*;
 
+use crate::backend;
 use crate::config::{self, ResolvedConfig, Select, Template, VariableType};
 use crate::niri;
-use crate::state;
 
 /// Template context passed to on-create hooks.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -29,33 +29,6 @@ pub struct CreateRequest {
     /// The local working directory its processes start in, already resolved
     /// with the template's variable values.
     pub cwd: Option<String>,
-}
-
-/// The local working directory recorded for a dynamic workspace: the one with
-/// key `ch`, or the focused one without it. `None` when it has none, and an
-/// error when there is no such workspace or it is not dynamic.
-pub fn workspace_cwd(prefix: &str, ch: Option<char>) -> anyhow::Result<Option<std::path::PathBuf>> {
-    let name = niri::list_workspaces()?
-        .into_iter()
-        .find(|ws| match ch {
-            Some(ch) => ws.name.as_deref().is_some_and(|name| {
-                config::parse_dynamic_name(name, prefix).is_some_and(|(key, _)| key == ch)
-            }),
-            None => ws.is_focused,
-        })
-        .with_context(|| match ch {
-            Some(ch) => format!("workspace '{prefix}{ch}' not found"),
-            None => "no focused workspace".to_string(),
-        })?
-        .name
-        .with_context(|| match ch {
-            Some(ch) => format!("workspace '{prefix}{ch}' is not a dynamic workspace"),
-            None => "the focused workspace is not a dynamic workspace".to_string(),
-        })?;
-    let Some((ch, _)) = config::parse_dynamic_name(&name, prefix) else {
-        anyhow::bail!("workspace '{name}' is not a dynamic workspace");
-    };
-    Ok(state::lookup(ch, &name))
 }
 
 /// Resolve how the CLI creates the workspace for `ch`: from `template`, or
@@ -180,6 +153,14 @@ pub fn switch_workspace(
                 .with_context(|| format!("failed to parse command '{program}'"))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
+    if let Some(client) = backend::umbriel() {
+        let title = config::parse_dynamic_name(ws_name, &config.workspace_prefix)
+            .and_then(|(_, title)| title);
+        if client.switch_workspace(&config.workspace_prefix, ch, title, &commands, cwd)? {
+            run_create_hooks(config, ch, ws_name, hook_info);
+        }
+        return Ok(());
+    }
     let (created, placement) =
         niri::switch_workspace(&config.workspace_prefix, ch, ws_name, &commands)?;
     if let Some(programs) = placement {
@@ -191,7 +172,7 @@ pub fn switch_workspace(
         if commands.iter().any(|command| !command.is_empty()) {
             niri::spare_workspace(id, Instant::now() + niri::SPAWN_GRACE);
         }
-        if let Err(e) = state::remember(ch, ws_name, cwd) {
+        if let Err(e) = backend::remember_cwd(ch, ws_name, cwd) {
             eprintln!("warning: {e:#}");
         }
         run_create_hooks(config, ch, ws_name, hook_info);
@@ -208,7 +189,7 @@ fn run_create_hooks(config: &ResolvedConfig, ch: char, ws_name: &str, hook_info:
         hook_info.template_name.as_deref(),
         &hook_info.variables,
     );
-    niri::run_hooks(&hooks, &env);
+    backend::run_hooks(&hooks, &env);
 }
 
 /// Delete the workspace for `ch`: ask its windows to close, then, on a
@@ -226,12 +207,19 @@ pub fn delete_workspace(
     ch: char,
     on_done: impl FnOnce(anyhow::Result<()>) + 'static,
 ) -> anyhow::Result<()> {
+    if let Some(client) = backend::umbriel() {
+        let name = client.retire_empty(&config.workspace_prefix, ch)?;
+        let env = config::build_hook_env(&name, ch, None, &HashMap::new());
+        backend::run_hooks(&config.hooks.on_delete, &env);
+        on_done(Ok(()));
+        return Ok(());
+    }
     let pending = niri::begin_delete(&config.workspace_prefix, ch)?;
     let on_delete = config.hooks.on_delete.clone();
     let finish = move || {
         if niri::finish_delete(&pending)? {
             // Before the hooks, so a workspace recreated meanwhile starts clean.
-            state::forget(ch, &pending.name);
+            backend::forget_cwd(ch, &pending.name);
             let env = config::build_hook_env(&pending.name, ch, None, &HashMap::new());
             niri::run_hooks(&on_delete, &env);
         }
@@ -262,9 +250,14 @@ pub fn move_window(
     window_id: Option<u64>,
     follow: bool,
 ) -> anyhow::Result<()> {
-    if niri::move_window_to_workspace(&config.workspace_prefix, ch, ws_name, window_id, follow)? {
+    let created = if let Some(client) = backend::umbriel() {
+        client.move_window(&config.workspace_prefix, ch, window_id, follow)?
+    } else {
+        niri::move_window_to_workspace(&config.workspace_prefix, ch, ws_name, window_id, follow)?
+    };
+    if created {
         // The moved window is the workspace's content: no template, so no directory.
-        if let Err(e) = state::remember(ch, ws_name, None) {
+        if let Err(e) = backend::remember_cwd(ch, ws_name, None) {
             eprintln!("warning: {e:#}");
         }
         run_create_hooks(config, ch, ws_name, &HookInfo::default());

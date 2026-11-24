@@ -4,8 +4,8 @@ use std::rc::Rc;
 use gtk4::prelude::*;
 use gtk4::{Align, Box as GtkBox, EventControllerMotion, GestureClick, Label, Orientation};
 
+use crate::backend;
 use crate::config::ResolvedConfig;
-use crate::niri;
 
 use super::keys::{click_variant, KeyVariant};
 use super::metrics::KeyboardMetrics;
@@ -73,7 +73,7 @@ impl DynWorkspaceInfo {
 }
 
 /// Collect workspace IDs that contain at least one urgent window.
-fn urgent_workspace_ids(windows: &[niri_ipc::Window]) -> HashSet<u64> {
+fn urgent_workspace_ids(windows: &[backend::Window]) -> HashSet<u64> {
     windows
         .iter()
         .filter(|w| w.is_urgent)
@@ -82,7 +82,7 @@ fn urgent_workspace_ids(windows: &[niri_ipc::Window]) -> HashSet<u64> {
 }
 
 /// Number of windows on each workspace that has any.
-fn window_counts(windows: &[niri_ipc::Window]) -> HashMap<u64, usize> {
+fn window_counts(windows: &[backend::Window]) -> HashMap<u64, usize> {
     let mut counts = HashMap::new();
     for id in windows.iter().filter_map(|w| w.workspace_id) {
         *counts.entry(id).or_insert(0) += 1;
@@ -91,8 +91,8 @@ fn window_counts(windows: &[niri_ipc::Window]) -> HashMap<u64, usize> {
 }
 
 fn build_dyn_workspace_infos(
-    workspaces: &[niri_ipc::Workspace],
-    windows: &[niri_ipc::Window],
+    workspaces: &[backend::Workspace],
+    windows: &[backend::Window],
     config: &ResolvedConfig,
 ) -> Vec<DynWorkspaceInfo> {
     let prefix = &config.workspace_prefix;
@@ -167,7 +167,7 @@ fn build_dyn_workspace_infos(
         let live = workspaces.iter().find(|ws| {
             ws.name
                 .as_deref()
-                .is_some_and(|n| niri::same_workspace_name(n, target))
+                .is_some_and(|n| backend::same_workspace_name(n, target))
         });
         let is_focused = live.is_some_and(|ws| Some(ws.id) == focused_ws_id);
         infos.push(DynWorkspaceInfo {
@@ -191,8 +191,8 @@ fn build_dyn_workspace_infos(
 }
 
 fn build_static_workspace_infos(
-    workspaces: &[niri_ipc::Workspace],
-    windows: &[niri_ipc::Window],
+    workspaces: &[backend::Workspace],
+    windows: &[backend::Window],
     config: &ResolvedConfig,
 ) -> Vec<StaticWorkspaceInfo> {
     let prefix = &config.workspace_prefix;
@@ -219,7 +219,7 @@ fn build_static_workspace_infos(
                 !config
                     .static_workspaces
                     .values()
-                    .any(|t| niri::same_workspace_name(t, n))
+                    .any(|t| backend::same_workspace_name(t, n))
             })
         })
         // Never hide the focused or urgent workspace, even when empty.
@@ -246,8 +246,8 @@ fn build_static_workspace_infos(
 /// Build a map of all keyboard keys to their workspace info.
 /// Keys without a live or configured workspace get a default empty entry.
 fn build_full_keyboard_info(
-    workspaces: &[niri_ipc::Workspace],
-    windows: &[niri_ipc::Window],
+    workspaces: &[backend::Workspace],
+    windows: &[backend::Window],
     config: &ResolvedConfig,
 ) -> HashMap<char, DynWorkspaceInfo> {
     let live_infos = build_dyn_workspace_infos(workspaces, windows, config);
@@ -281,8 +281,8 @@ pub(super) struct GridModel {
 
 impl GridModel {
     pub(super) fn new(
-        workspaces: &[niri_ipc::Workspace],
-        windows: &[niri_ipc::Window],
+        workspaces: &[backend::Workspace],
+        windows: &[backend::Window],
         config: &ResolvedConfig,
     ) -> Self {
         let mut outputs = workspaces.iter().map(|ws| &ws.output);
@@ -395,7 +395,7 @@ fn attach_hover_preview(widget: &GtkBox, ws_id: u64, session: &Rc<OverlaySession
     motion.connect_enter(move |_, _, _| {
         if hover_session.hover_armed.get()
             && hover_session.preview.should_focus(ws_id)
-            && niri::focus_workspace_by_id(ws_id).is_ok()
+            && backend::focus_workspace_by_id(ws_id).is_ok()
         {
             hover_session.preview.focused(ws_id);
         }
@@ -560,7 +560,7 @@ fn build_static_card(
             let result = match click_ctx.mode {
                 Mode::Normal => focus_selected(&click_ctx, id),
                 Mode::MoveWindow => window_to_move(&click_ctx).and_then(|window| {
-                    niri::move_window_to_workspace_by_id(id, Some(window), follow)
+                    backend::move_window_to_workspace_by_id(id, Some(window), follow)
                 }),
                 Mode::Delete => return,
             };
@@ -603,8 +603,8 @@ pub(super) fn build_static_workspace_row(
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+    use crate::backend::test_helpers::{test_window, test_workspace};
     use crate::config::{ALL_LAYOUTS, LAYOUT_QWERTY};
-    use crate::test_helpers::{test_window, test_workspace};
 
     // --- Keyboard layout coverage ---
 
@@ -1187,9 +1187,9 @@ pub(super) mod tests {
         let workspaces = vec![test_workspace(10, Some("dyn-a"), true)];
         let config = default_test_config();
         let titled = |title: &str| {
-            let mut window = test_window(1, 10, "kitty");
+            let mut window = crate::test_helpers::test_window(1, 10, "kitty");
             window.title = Some(title.to_string());
-            GridModel::new(&workspaces, &[window], &config)
+            GridModel::new(&workspaces, &[window.into()], &config)
         };
         assert_eq!(titled("~"), titled("~/src"));
     }

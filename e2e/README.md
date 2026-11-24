@@ -20,6 +20,13 @@ The suite drives `target/debug/niri-dynamic-workspaces` (`NDW_BIN` picks
 another binary). Keep it a debug build: `daemon_frees_closed_overlays` counts
 the `debug: overlay window freed` lines only debug builds log.
 
+## Umbriel smoke test
+
+With `umbriel` installed, run `nix develop --command ./e2e/test-umbriel.sh`
+against a debug build. This starts a separate headless Umbriel with its own
+runtime directory and D-Bus session. It checks the dynamic include lifecycle,
+template launch, move, rename, and keyboard input in the layer-shell overlay.
+
 ## Verbs
 
 | Command | What it does |

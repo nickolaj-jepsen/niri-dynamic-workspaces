@@ -21,8 +21,8 @@ use gtk4::{
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
 use crate::actions::HookInfo;
+use crate::backend;
 use crate::config::ResolvedConfig;
-use crate::niri;
 
 use cards::{build_keyboard, build_static_workspace_row, DynWorkspaceInfo, GridModel};
 use keys::KeyVariant;
@@ -31,19 +31,19 @@ use picker::{select_template_option, show_template_picker, TemplateOption};
 pub use theme::install_base as install_base_styles;
 
 /// Extract the output name of the focused workspace from a pre-fetched list.
-fn focused_output_from(workspaces: &[niri_ipc::Workspace]) -> Option<String> {
+fn focused_output_from(workspaces: &[backend::Workspace]) -> Option<String> {
     workspaces.iter().find(|w| w.is_focused)?.output.clone()
 }
 
 /// Id of the focused workspace in a pre-fetched list.
-fn focused_workspace_id_from(workspaces: &[niri_ipc::Workspace]) -> Option<u64> {
+fn focused_workspace_id_from(workspaces: &[backend::Workspace]) -> Option<u64> {
     workspaces.iter().find(|w| w.is_focused).map(|w| w.id)
 }
 
 /// Active window of the focused workspace in a pre-fetched list.
 ///
 /// Layout-based: `Window::is_focused` is false while the overlay has keyboard focus.
-fn focused_window_from(workspaces: &[niri_ipc::Workspace]) -> Option<u64> {
+fn focused_window_from(workspaces: &[backend::Workspace]) -> Option<u64> {
     workspaces.iter().find(|w| w.is_focused)?.active_window_id
 }
 
@@ -260,7 +260,7 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
     let theme_warnings = theme::apply(&config.theme);
 
     // Single IPC fetch — derive focused output, monitor, and workspace id from it.
-    let workspaces = niri::list_workspaces();
+    let workspaces = backend::list_workspaces();
     let listed = workspaces.as_deref().unwrap_or_default();
     let focused_output = focused_output_from(listed);
     let focused_monitor = focused_output.as_deref().and_then(find_monitor_for_output);
@@ -322,7 +322,7 @@ pub fn build_ui(app: &gtk4::Application, config: &Rc<ResolvedConfig>, mode: Mode
 }
 
 /// Follow compositor state while the overlay is open: a background thread
-/// forwards niri events; focus events move the overlay between outputs,
+/// forwards events; focus changes move the overlay between outputs,
 /// structural events refresh the cards.
 fn follow_compositor(
     window: &ApplicationWindow,
@@ -336,7 +336,7 @@ fn follow_compositor(
         std::thread::Builder::new()
             .name("overlay-events".into())
             .spawn(move || {
-                niri::run_overlay_event_stream(&alive, |event| {
+                backend::run_overlay_event_stream(&alive, |event| {
                     let _ = event_tx.send_blocking(event);
                 });
             })
@@ -351,13 +351,13 @@ fn follow_compositor(
     let weak_window = window.downgrade();
     glib::spawn_future_local(async move {
         while let Ok(event) = event_rx.recv().await {
-            let mut structural = event == niri::OverlayEvent::Structural;
+            let mut structural = event == backend::OverlayEvent::Structural;
             if structural {
                 // Debounce: coalesce event bursts into one refresh.
                 glib::timeout_future(std::time::Duration::from_millis(100)).await;
             }
             while let Ok(more) = event_rx.try_recv() {
-                structural |= more == niri::OverlayEvent::Structural;
+                structural |= more == backend::OverlayEvent::Structural;
             }
             // Checked after the await: repopulating a closed window rebuilds
             // what free_on_close tore down.
@@ -366,7 +366,7 @@ fn follow_compositor(
             };
 
             // A failed listing keeps the current cards and output.
-            let Ok(fresh_workspaces) = niri::list_workspaces() else {
+            let Ok(fresh_workspaces) = backend::list_workspaces() else {
                 continue;
             };
             let current = focused_output_from(&fresh_workspaces);
@@ -378,7 +378,7 @@ fn follow_compositor(
                 // Previews stay on the overlay's output, so no preview moved focus here.
                 let origin = focused_workspace_id_from(&fresh_workspaces);
                 session.preview.rebase(origin);
-                niri::set_overlay_origin(origin);
+                backend::set_overlay_origin(origin);
                 // The grid now shows that output, so Move Window acts on its window.
                 session
                     .origin_window
@@ -419,7 +419,7 @@ fn follow_compositor(
 /// Undo a hover preview, if one moved focus.
 fn end_preview(session: &OverlaySession) {
     if let Some(id) = session.preview.take_restore() {
-        if let Err(e) = niri::focus_workspace_by_id(id) {
+        if let Err(e) = backend::focus_workspace_by_id(id) {
             eprintln!("warning: failed to restore workspace {id}: {e:#}");
         }
     }
@@ -428,14 +428,14 @@ fn end_preview(session: &OverlaySession) {
 /// Spare the origin from cleanup while the window is open, and undo the
 /// hover preview when it closes without a selection.
 fn connect_session_close(window: &ApplicationWindow, session: &Rc<OverlaySession>) {
-    niri::set_overlay_origin(session.preview.origin.get());
+    backend::set_overlay_origin(session.preview.origin.get());
     let session = session.clone();
     window.connect_close_request(move |_| {
         if !session.selection_made.get() {
             end_preview(&session);
         }
         // Here rather than on drop: a leaked session would keep the spare.
-        niri::set_overlay_origin(None);
+        backend::set_overlay_origin(None);
         Propagation::Proceed
     });
 }
@@ -680,16 +680,16 @@ fn confirm_delete_hint(ch: char, window_count: usize) -> String {
     )
 }
 
-/// The grid for niri's current state; `workspaces` saves listing them again.
+/// The grid for the current compositor state; `workspaces` saves listing them again.
 fn fetch_grid(
     config: &ResolvedConfig,
-    workspaces: Option<Vec<niri_ipc::Workspace>>,
+    workspaces: Option<Vec<backend::Workspace>>,
 ) -> anyhow::Result<GridModel> {
     let workspaces = match workspaces {
         Some(workspaces) => workspaces,
-        None => niri::list_workspaces()?,
+        None => backend::list_workspaces()?,
     };
-    let windows = niri::list_windows()?;
+    let windows = backend::list_windows()?;
     Ok(GridModel::new(&workspaces, &windows, config))
 }
 
@@ -833,7 +833,7 @@ fn focus_selected(ctx: &ActionContext, id: u64) -> anyhow::Result<()> {
     if ctx.session.preview.is_previewed(id) {
         return Ok(());
     }
-    niri::focus_workspace_by_id(id)
+    backend::focus_workspace_by_id(id)
 }
 
 /// The window Move Window moves: the captured one, so later focus changes do not redirect it.
@@ -872,8 +872,9 @@ fn dispatch_action(ch: char, ctx: &ActionContext, variant: KeyVariant) {
                 return;
             }
             (Mode::Normal, Some(id)) => focus_selected(ctx, id),
-            (Mode::MoveWindow, Some(id)) => window_to_move(ctx)
-                .and_then(|window| niri::move_window_to_workspace_by_id(id, Some(window), follow)),
+            (Mode::MoveWindow, Some(id)) => window_to_move(ctx).and_then(|window| {
+                backend::move_window_to_workspace_by_id(id, Some(window), follow)
+            }),
         };
         if let Err(e) = result {
             show_error(ctx, &format!("Failed: {e:#}"));
@@ -902,7 +903,8 @@ fn dispatch_action(ch: char, ctx: &ActionContext, variant: KeyVariant) {
             let is_uncreated = info.is_none_or(|i| i.is_uncreated);
             // A new workspace is created on the focused output anyway.
             if variant == KeyVariant::Alt && !is_uncreated {
-                if let Err(e) = niri::move_workspace_to_focused_output(&config.workspace_prefix, ch)
+                if let Err(e) =
+                    backend::move_workspace_to_focused_output(&config.workspace_prefix, ch)
                 {
                     show_error(ctx, &format!("Failed: {e:#}"));
                     return;
@@ -922,6 +924,10 @@ fn dispatch_action(ch: char, ctx: &ActionContext, variant: KeyVariant) {
         }
         Mode::Delete => {
             let window_count = info.map_or(0, |i| i.window_count);
+            if window_count != 0 && backend::umbriel().is_some() {
+                show_error(ctx, "Umbriel can only delete empty workspaces");
+                return;
+            }
             let armed = ctx.session.delete_armed.get();
             if needs_confirmation(config.confirm_delete, ch, window_count, armed) {
                 ctx.session.delete_armed.set(Some(ch));
@@ -1078,7 +1084,7 @@ fn wrap_index(current: usize, len: usize, forward: bool) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_helpers::test_workspace;
+    use crate::backend::test_helpers::test_workspace;
 
     // --- focused extraction helpers ---
 

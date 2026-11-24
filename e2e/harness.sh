@@ -150,6 +150,7 @@ CONF
         XDG_CONFIG_HOME="$run_dir/config" \
         DBUS_SESSION_BUS_ADDRESS="$dbus_addr" \
         ${NDW_E2E_EGL_VENDOR:+__EGL_VENDOR_LIBRARY_FILENAMES=$NDW_E2E_EGL_VENDOR} \
+        UMBRIEL_SOCKET= \
         WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 WLR_RENDERER=pixman \
         cage -- sh -c 'echo "$WAYLAND_DISPLAY" >"$0"; exec "$@"' "$run_dir/cage.display" \
         niri -c "$here/fixtures/niri.kdl" >"$run_dir/niri.log" 2>&1 &
@@ -168,6 +169,8 @@ export DBUS_SESSION_BUS_ADDRESS=$dbus_addr
 export WAYLAND_DISPLAY=$(log_value "listening on Wayland socket: ")
 export NIRI_SOCKET=$(log_value "IPC listening on: ")
 export NDW_APP_ID=$app_id
+# The nested compositor is niri; a host Umbriel socket would make auto-detection ambiguous.
+unset UMBRIEL_SOCKET
 export GSK_RENDERER=cairo
 export GDK_DEBUG=no-portals
 export GTK_THEME=${NDW_E2E_GTK_THEME-Default:dark}

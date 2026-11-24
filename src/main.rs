@@ -1,10 +1,12 @@
 mod actions;
+mod backend;
 mod config;
 mod niri;
 mod state;
 #[cfg(test)]
 mod test_helpers;
 mod ui;
+mod umbriel;
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -36,7 +38,7 @@ fn application_id() -> String {
     }
 }
 
-/// A dynamic workspace switcher for the niri Wayland compositor.
+/// A dynamic workspace switcher for Niri and experimental Umbriel.
 ///
 /// Opens a fullscreen overlay showing workspace cards.
 /// Press a key to interact with workspaces, Escape to close.
@@ -46,6 +48,10 @@ struct Cli {
     /// Path to config file [default: ~/.config/niri-dynamic-workspaces/config.toml]
     #[arg(short, long, value_name = "FILE", global = true)]
     config: Option<PathBuf>,
+
+    /// Select the Wayland compositor backend
+    #[arg(long, value_enum, default_value = "auto", global = true)]
+    compositor: backend::Choice,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -93,7 +99,7 @@ enum Command {
     Rename {
         /// Workspace key (a-z, 0-9), or `focused` for the focused workspace
         #[arg(value_name = "KEY|focused", value_parser = parse_selector)]
-        target: niri::WorkspaceSelector,
+        target: backend::WorkspaceSelector,
         /// New title; omit it or pass "" to clear the title
         title: Option<String>,
     },
@@ -165,12 +171,12 @@ fn parse_key_arg(s: &str) -> Result<char, String> {
 }
 
 /// Parse a workspace key, or `focused`.
-fn parse_selector(s: &str) -> Result<niri::WorkspaceSelector, String> {
+fn parse_selector(s: &str) -> Result<backend::WorkspaceSelector, String> {
     if s == "focused" {
-        return Ok(niri::WorkspaceSelector::Focused);
+        return Ok(backend::WorkspaceSelector::Focused);
     }
     parse_key_arg(s)
-        .map(niri::WorkspaceSelector::Key)
+        .map(backend::WorkspaceSelector::Key)
         .map_err(|_| "must be `focused` or a single key, a-z or 0-9".to_string())
 }
 
@@ -234,7 +240,7 @@ fn check_config(path: Option<&Path>, report: impl Fn(&str), out: impl Fn(&str)) 
 /// Only IPC, so it runs before GTK starts and needs no D-Bus.
 fn run_rename(
     path: Option<&Path>,
-    target: niri::WorkspaceSelector,
+    target: backend::WorkspaceSelector,
     title: Option<&str>,
     report: impl Fn(&str),
 ) -> i32 {
@@ -242,16 +248,16 @@ fn run_rename(
     for d in &cfg.diagnostics {
         report(&d.to_string());
     }
-    if let niri::WorkspaceSelector::Key(ch) = target {
+    if let backend::WorkspaceSelector::Key(ch) = target {
         if let Some(pinned) = cfg.static_workspaces.get(&ch) {
             report(&format!(
                 "error: key '{ch}' is pinned to static workspace '{pinned}'; \
-                 rename it in your niri config"
+                 rename it in your compositor config"
             ));
             return 1;
         }
     }
-    match niri::retitle_workspace(&cfg.workspace_prefix, target, title) {
+    match backend::retitle_workspace(&cfg.workspace_prefix, target, title) {
         Ok(ch) => {
             let titled = title.is_some_and(|t| !t.trim().is_empty());
             if let Some(name) = cfg.workspace_names.get(&ch).filter(|_| titled) {
@@ -276,7 +282,7 @@ fn run_rename(
 fn run_cwd(path: Option<&Path>, key: Option<char>) -> i32 {
     let cfg = config::load_config(path);
     // An error, not a `None`, so the caller's fallback runs for both.
-    let result = actions::workspace_cwd(&cfg.workspace_prefix, key).and_then(|cwd| {
+    let result = backend::workspace_cwd(&cfg.workspace_prefix, key).and_then(|cwd| {
         cwd.ok_or_else(|| anyhow::anyhow!("no local working directory for this workspace"))
     });
     match result {
@@ -321,10 +327,11 @@ fn handle_direct_action(
         // Resolved first: niri ignores an action on a missing workspace.
         return match mode {
             ui::Mode::Normal => {
-                niri::workspace_id_by_name(target).and_then(niri::focus_workspace_by_id)
+                backend::workspace_id_by_name(target).and_then(backend::focus_workspace_by_id)
             }
-            ui::Mode::MoveWindow => niri::workspace_id_by_name(target)
-                .and_then(|id| niri::move_window_to_workspace_by_id(id, None, !options.no_follow)),
+            ui::Mode::MoveWindow => backend::workspace_id_by_name(target).and_then(|id| {
+                backend::move_window_to_workspace_by_id(id, None, !options.no_follow)
+            }),
             ui::Mode::Delete => anyhow::bail!(
                 "key '{ch}' is pinned to static workspace '{target}', which cannot be deleted"
             ),
@@ -335,12 +342,12 @@ fn handle_direct_action(
     match mode {
         ui::Mode::Normal => {
             if options.here {
-                niri::move_workspace_to_focused_output(&cfg.workspace_prefix, ch)?;
+                backend::move_workspace_to_focused_output(&cfg.workspace_prefix, ch)?;
             }
             // An existing workspace needs no template variables; checked only
             // then, so a plain switch keeps its IPC sequence.
             let from_template = create.is_set() || cfg.template_for(ch).is_some();
-            if from_template && niri::dynamic_workspace_exists(&cfg.workspace_prefix, ch)? {
+            if from_template && backend::dynamic_workspace_exists(&cfg.workspace_prefix, ch)? {
                 if create.is_set() {
                     report(
                         cmdline,
@@ -414,30 +421,33 @@ fn main() -> glib::ExitCode {
     // Pre-parse so --help / --version and bad arguments are handled in the
     // caller before GTK starts (important when a daemon is already running).
     let cli = Cli::try_parse().unwrap_or_else(|e| e.exit());
-    // Subcommands that never start GTK, so they need no display or D-Bus.
-    match cli.command {
-        Some(Command::Cwd { key }) => {
-            return run_cwd(cli.config.as_deref(), key).into();
-        }
-        Some(Command::Check) => {
-            return check_config(
-                cli.config.as_deref(),
-                |msg| eprintln!("{msg}"),
-                |msg| println!("{msg}"),
-            )
-            .into();
-        }
-        Some(Command::Rename { target, ref title }) => {
-            return run_rename(cli.config.as_deref(), target, title.as_deref(), |msg| {
-                eprintln!("{msg}");
-            })
-            .into();
-        }
-        _ => {}
+    // Config validation does not need a running compositor, GTK, or D-Bus.
+    if matches!(cli.command, Some(Command::Check)) {
+        return check_config(
+            cli.config.as_deref(),
+            |msg| eprintln!("{msg}"),
+            |msg| println!("{msg}"),
+        )
+        .into();
+    }
+    let mut app_id = application_id();
+    if let Err(e) = backend::select(cli.compositor, &mut app_id) {
+        eprintln!("error: {e:#}");
+        return glib::ExitCode::FAILURE;
+    }
+    // Rename and cwd use IPC only and do not initialize GTK.
+    if let Some(Command::Rename { target, ref title }) = cli.command {
+        return run_rename(cli.config.as_deref(), target, title.as_deref(), |msg| {
+            eprintln!("{msg}");
+        })
+        .into();
+    }
+    if let Some(Command::Cwd { key }) = cli.command {
+        return run_cwd(cli.config.as_deref(), key).into();
     }
 
     let app = gtk4::Application::builder()
-        .application_id(application_id())
+        .application_id(app_id)
         .flags(ApplicationFlags::HANDLES_COMMAND_LINE)
         .build();
 
@@ -487,11 +497,13 @@ fn main() -> glib::ExitCode {
                 // Always spawn: the source re-reads the config on change, so
                 // auto_delete_empty and on_delete change without a daemon
                 // restart.
-                let cleanup_source = config::cleanup_source(cli.config.as_deref());
-                std::thread::Builder::new()
-                    .name("cleanup".into())
-                    .spawn(move || niri::run_event_cleanup(cleanup_source))
-                    .ok();
+                if backend::umbriel().is_none() {
+                    let cleanup_source = config::cleanup_source(cli.config.as_deref());
+                    std::thread::Builder::new()
+                        .name("cleanup".into())
+                        .spawn(move || niri::run_event_cleanup(cleanup_source))
+                        .ok();
+                }
                 *hold_guard.borrow_mut() = Some(app.hold());
                 return 0;
             }
@@ -732,7 +744,7 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(Command::Rename {
-                target: niri::WorkspaceSelector::Key('a'),
+                target: backend::WorkspaceSelector::Key('a'),
                 title: Some(ref t),
             }) if t == "My title"
         ));
@@ -744,7 +756,7 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(Command::Rename {
-                target: niri::WorkspaceSelector::Focused,
+                target: backend::WorkspaceSelector::Focused,
                 title: None,
             })
         ));

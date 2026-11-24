@@ -9,6 +9,7 @@ Releases before 0.12.0 are listed on [GitHub Releases](https://github.com/nickol
 
 ### Added
 
+- Experimental Umbriel backend with compositor auto-detection and a `--compositor` override. An opt-in, session-local include enables dynamic workspace keys and templates on Umbriel.
 - Templates take an optional `cwd = "{{path}}"`, a local working directory recorded with the workspace when it is created.
 - `cwd [KEY]` prints the recorded directory of the focused workspace (or of `KEY`) for a hotkey to reuse. It opens no overlay, changes no focus, and exits non-zero with no output when the workspace has none, so callers can fall back.
 
