@@ -63,6 +63,9 @@ struct TemplateEntry {
     variables: IndexMap<String, VariableEntry>,
     on_create: Vec<String>,
     title: Option<String>,
+    /// Local working directory of the workspace's processes; `{{var}}`
+    /// placeholders are filled from the template's variables.
+    cwd: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -316,6 +319,9 @@ pub struct Template {
     pub variables: Vec<TemplateVariable>,
     pub on_create: Vec<String>,
     pub title: Option<String>,
+    /// Local working directory for the workspaces created from this template,
+    /// with its `{{var}}` placeholders still unresolved.
+    pub cwd: Option<String>,
 }
 
 impl ResolvedConfig {
@@ -812,6 +818,15 @@ impl Config {
                     ));
                 }
             }
+            if let Some(cwd) = &entry.cwd {
+                for r in extract_variable_references(cwd) {
+                    if !declared_names.contains(r.as_str()) {
+                        warnings.push(format!(
+                            "template '{name}': cwd references undefined variable '{{{{{r}}}}}'"
+                        ));
+                    }
+                }
+            }
             for v in unused_variables(&variables, entry, &self.hooks.on_create) {
                 warnings.push(format!(
                     "template '{name}': variable '{v}' is never referenced in programs, \
@@ -834,6 +849,7 @@ impl Config {
                 .programs
                 .iter()
                 .chain(&entry.title)
+                .chain(&entry.cwd)
                 .flat_map(|t| unknown_filters(t))
             {
                 if !filters.contains(&filter) {
@@ -845,6 +861,20 @@ impl Config {
                 }
             }
 
+            // A literal path can be checked now and is reported verbatim; a
+            // path with a placeholder only once it is filled in.
+            let cwd = entry.cwd.as_deref().filter(|cwd| {
+                let literal = extract_variable_references(cwd).is_empty();
+                let absolute = cwd.starts_with('/') || *cwd == "~" || cwd.starts_with("~/");
+                if !literal || absolute {
+                    return true;
+                }
+                warnings.push(format!(
+                    "template '{name}': cwd '{cwd}' is not an absolute path, ignoring it"
+                ));
+                false
+            });
+
             templates.push(Template {
                 name: name.clone(),
                 programs: entry.programs.clone(),
@@ -852,6 +882,7 @@ impl Config {
                 variables,
                 on_create: entry.on_create.clone(),
                 title: entry.title.clone(),
+                cwd: cwd.map(str::to_owned),
             });
         }
 
@@ -932,6 +963,7 @@ fn unused_variables<'a>(
         .programs
         .iter()
         .chain(&entry.title)
+        .chain(&entry.cwd)
         .flat_map(|text| extract_variable_references(text))
         .collect();
     let hooks: Vec<&String> = entry.on_create.iter().chain(global_on_create).collect();
@@ -1069,6 +1101,21 @@ pub fn substitute(template: &str, values: &HashMap<String, String>) -> String {
                 .unwrap_or(raw),
         })
         .collect()
+}
+
+/// Resolve a template's `cwd` with the variable values it was created with:
+/// `{{name}}` placeholders filled in and `~/` expanded.
+///
+/// `None` when there is no `cwd`, when it resolves to nothing, or when the
+/// result is not absolute (it is reported verbatim, not run).
+pub fn resolve_cwd(template: Option<&str>, values: &HashMap<String, String>) -> Option<String> {
+    let cwd = substitute(template?, values);
+    let cwd = match cwd.trim() {
+        // `expand_tilde` only handles `~/…`; the home directory itself is a path too.
+        "~" => dirs::home_dir().map_or_else(|| "~".to_string(), |home| home.display().to_string()),
+        cwd => expand_tilde(cwd),
+    };
+    (cwd.starts_with('/')).then_some(cwd)
 }
 
 /// Turn a program string into an argument vector: split with shell quoting
@@ -2876,6 +2923,7 @@ template = "dev"
 programs = ["code {{project}}", "kitty {{branch}} {{tool}} {{note}}"]
 key = "d"
 title = "{{project}}"
+cwd = "{{project}}"
 on_create = ["true"]
 
 [template.dev.variables.project]
@@ -3622,6 +3670,104 @@ type = "text"
     }
 
     #[test]
+    fn template_cwd_is_resolved_with_its_variables() {
+        let (config, warnings) = resolve_toml(
+            r#"
+[template.dev]
+programs = ["kitty"]
+cwd = "{{project}}"
+
+[template.dev.variables.project]
+name = "Project"
+type = "dir"
+dirs = ["~/dev"]
+"#,
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(config.templates[0].cwd.as_deref(), Some("{{project}}"));
+        let values = HashMap::from([("project".to_string(), "/home/u/dev/app".to_string())]);
+        assert_eq!(
+            resolve_cwd(config.templates[0].cwd.as_deref(), &values),
+            Some("/home/u/dev/app".to_string())
+        );
+    }
+
+    #[test]
+    fn template_cwd_filters_and_references_are_checked() {
+        let (_, warnings) = resolve_toml(
+            r#"
+[template.dev]
+programs = ["kitty {{project}}"]
+cwd = "{{project|upper}}/{{nope}}"
+
+[template.dev.variables.project]
+name = "Project"
+type = "text"
+"#,
+        );
+        assert_eq!(
+            warnings,
+            vec![
+                "template 'dev': cwd references undefined variable '{{nope}}'",
+                "template 'dev': unknown filter 'upper' (known: basename)",
+            ]
+        );
+    }
+
+    #[test]
+    fn template_cwd_relative_path_is_ignored() {
+        let (config, warnings) = resolve_toml(
+            r#"
+[template.dev]
+programs = ["kitty"]
+cwd = "relative/dir"
+"#,
+        );
+        assert_eq!(
+            warnings,
+            vec!["template 'dev': cwd 'relative/dir' is not an absolute path, ignoring it"]
+        );
+        assert_eq!(config.templates[0].cwd, None);
+    }
+
+    #[test]
+    fn resolve_cwd_expands_tilde_and_rejects_relative() {
+        let values = HashMap::new();
+        assert_eq!(
+            resolve_cwd(Some("~/dev/app"), &values),
+            Some(expand_tilde("~/dev/app"))
+        );
+        assert_eq!(
+            resolve_cwd(Some(" ~ "), &values),
+            dirs::home_dir().map(|home| home.display().to_string())
+        );
+        assert_eq!(
+            resolve_cwd(Some("/home/u/app"), &values),
+            Some("/home/u/app".to_string())
+        );
+        assert_eq!(resolve_cwd(Some("   "), &values), None);
+        assert_eq!(resolve_cwd(Some("app"), &values), None);
+        assert_eq!(resolve_cwd(None, &values), None);
+    }
+
+    #[test]
+    fn template_cwd_counts_as_referencing_its_variable() {
+        let (config, warnings) = resolve_toml(
+            r#"
+[template.dev]
+programs = ["kitty"]
+cwd = "{{project}}"
+
+[template.dev.variables.project]
+name = "Project"
+type = "text"
+"#,
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(config.templates[0].cwd.as_deref(), Some("{{project}}"));
+    }
+
+    #[test]
     fn template_variables_field() {
         let tmpl = Template {
             name: "test".to_string(),
@@ -3630,6 +3776,7 @@ type = "text"
             variables: Vec::new(),
             on_create: Vec::new(),
             title: None,
+            cwd: None,
         };
         assert!(tmpl.variables.is_empty());
 
@@ -3644,6 +3791,7 @@ type = "text"
             }],
             on_create: Vec::new(),
             title: None,
+            cwd: None,
         };
         assert!(!tmpl_with.variables.is_empty());
     }
@@ -3759,6 +3907,7 @@ type = "text"
                 variables: Vec::new(),
                 on_create: vec!["template-hook".to_string()],
                 title: None,
+                cwd: None,
             }],
         );
         let hooks = collect_create_hooks(&config, Some("dev"));
@@ -3776,6 +3925,7 @@ type = "text"
                 variables: Vec::new(),
                 on_create: vec!["template-hook".to_string()],
                 title: None,
+                cwd: None,
             }],
         );
         let hooks = collect_create_hooks(&config, Some("unknown"));

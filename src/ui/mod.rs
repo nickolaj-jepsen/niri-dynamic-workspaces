@@ -797,10 +797,13 @@ fn populate_overlay(
 }
 
 /// Switch to (or create) a workspace and close the overlay on success.
+///
+/// `cwd` is the new workspace's local directory, recorded for `cwd` to print.
 fn switch_and_close(
     ws_name: &str,
     ws_key: char,
     programs: &[String],
+    cwd: Option<&str>,
     ctx: &ActionContext,
     hook_info: &HookInfo,
 ) {
@@ -815,6 +818,7 @@ fn switch_and_close(
         ws_name,
         programs,
         hook_info,
+        cwd,
     );
     if let Err(e) = result {
         show_error(ctx, &format!("Failed: {e:#}"));
@@ -913,7 +917,7 @@ fn dispatch_action(ch: char, ctx: &ActionContext, variant: KeyVariant) {
                 return;
             }
             let programs = config.programs_for(ch);
-            switch_and_close(&ws_name, ch, programs, ctx, &HookInfo::default());
+            switch_and_close(&ws_name, ch, programs, None, ctx, &HookInfo::default());
             return;
         }
         Mode::Delete => {

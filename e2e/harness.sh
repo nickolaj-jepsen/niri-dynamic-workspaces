@@ -162,6 +162,8 @@ CONF
     # no-portals: on the private bus GTK's settings-portal lookup can stall startup for 25 s.
     cat >"$env_file" <<EOF
 export XDG_CONFIG_HOME=$run_dir/config
+# The app's cwd state would otherwise land in the host's state directory.
+export XDG_STATE_HOME=$run_dir/state
 export DBUS_SESSION_BUS_ADDRESS=$dbus_addr
 export WAYLAND_DISPLAY=$(log_value "listening on Wayland socket: ")
 export NIRI_SOCKET=$(log_value "IPC listening on: ")

@@ -789,6 +789,7 @@ fn attach_variable_input_key_handler(
     let programs = option.programs.clone();
     let template_title = option.title.clone();
     let template_variables = option.variables.clone();
+    let template_cwd = option.cwd.clone();
 
     let key_controller = new_key_controller(&ctx.session);
     key_controller.connect_key_pressed(move |ctrl, key, keycode, _| {
@@ -843,11 +844,19 @@ fn attach_variable_input_key_handler(
                 &values,
             );
             let full_name = crate::config::workspace_name_with_title(&prefix, ch, title.as_deref());
+            let cwd = crate::config::resolve_cwd(template_cwd.as_deref(), &values);
             let hook_info = HookInfo {
                 template_name: template_name.clone(),
                 variables: values,
             };
-            switch_and_close(&full_name, ch, &programs, &key_ctx, &hook_info);
+            switch_and_close(
+                &full_name,
+                ch,
+                &programs,
+                cwd.as_deref(),
+                &key_ctx,
+                &hook_info,
+            );
             return Propagation::Stop;
         }
 

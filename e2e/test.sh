@@ -577,6 +577,99 @@ EOF
     [[ $status == 1 && $err == *"pinned to static workspace 'mail'"* ]]
 }
 
+# app_cwd: the app's working directory for the focused workspace; empty when it has none.
+app_cwd() { "$h" app cwd 2>/dev/null; }
+
+test_cli_switch_records_cwd() {
+    local dir cwd_of_key
+    dir=$("$h" run mktemp -d) || return 1
+    mkdir -p "$dir/some project" || return 1
+    add_config <<'EOF' || return 1
+# A title without the path keeps the workspace name simple to match.
+[template.dev]
+programs = ["true"]
+cwd = "{{project}}"
+title = "project"
+
+[template.dev.variables.project]
+name = "Project"
+type = "text"
+EOF
+    # Spaced, so nothing along the way splits it.
+    "$h" app switch p --template dev --var "project=$dir/some project" || return 1
+    until_true has_ws "dyn-p project" || return 1
+    [[ $(app_cwd) == "$dir/some project" ]] || return 1
+    # Still there after switching away and back, after the program exits, and
+    # while a shell on the workspace sits in another directory.
+    "$h" app switch a || return 1
+    "$h" app switch p || return 1
+    "$h" run niri msg action spawn -- sh -c 'cd /tmp; sleep 30' || return 1
+    [[ $(app_cwd) == "$dir/some project" ]] || return 1
+    [[ $("$h" app cwd p) == "$dir/some project" ]] || return 1
+    # A query, not an overlay: nothing is mapped afterwards.
+    "$h" closed || return 1
+    # A key without one exits non-zero and prints nothing on stdout.
+    cwd_of_key=$("$h" app cwd a 2>/dev/null)
+    [[ $? == 1 && -z $cwd_of_key ]]
+}
+
+test_cli_cwd_without_one() {
+    "$h" app switch a || return 1
+    # Nothing configured: no output to fall back on.
+    [[ -z $("$h" app cwd 2>/dev/null) ]] || return 1
+    [[ -z $("$h" app cwd a 2>/dev/null) ]]
+}
+
+test_cli_cwd_follows_delete_and_rename() {
+    local dir
+    dir=$("$h" run mktemp -d) || return 1
+    mkdir -p "$dir" || return 1
+    # A plain key takes no cwd, so bind a template to one.
+    add_config <<EOF || return 1
+[template.here]
+programs = ["true"]
+cwd = "$dir"
+
+[workspace.p]
+template = "here"
+EOF
+    "$h" app switch p || return 1
+    [[ $(app_cwd) == "$dir" ]] || return 1
+    # Retitling keeps the directory, also when asked for by key.
+    "$h" app rename p "My Project" || return 1
+    until_true has_ws "dyn-p My Project" || return 1
+    [[ $("$h" app cwd p) == "$dir" ]] || return 1
+    # Deleting forgets it, so a workspace recreated under the key starts clean
+    # rather than inheriting the deleted one's directory.
+    "$h" app delete p || return 1
+    until_true no_ws "dyn-p My Project" || return 1
+    [[ -z $(app_cwd) && -z $("$h" app cwd p 2>/dev/null) ]] || return 1
+    add_config <<'EOF' || return 1
+[workspace.p]
+programs = ["true"]
+EOF
+    "$h" app switch p || return 1
+    until_true focused_is dyn-p || return 1
+    [[ -z $("$h" app cwd p 2>/dev/null) ]]
+}
+
+test_cli_cwd_missing_directory_fails() {
+    local dir
+    dir=$("$h" run mktemp -d) || return 1
+    mkdir -p "$dir" || return 1
+    add_config <<EOF || return 1
+[template.gone]
+programs = ["true"]
+cwd = "$dir"
+
+[workspace.g]
+template = "gone"
+EOF
+    "$h" app switch g || return 1
+    rmdir "$dir" || return 1
+    [[ -z $("$h" app cwd g 2>/dev/null) ]]
+}
+
 # add_bound_templates: key n creates from notes (no variables), key g from gamma (one variable, path).
 add_bound_templates() {
     add_config <<'EOF'
@@ -825,6 +918,10 @@ tests=(
     held_key_does_not_pick_template
     held_enter_does_not_submit_form
     form_refuses_unmatched_option
+    cli_switch_records_cwd
+    cli_cwd_without_one
+    cli_cwd_follows_delete_and_rename
+    cli_cwd_missing_directory_fails
     form_click_picks_option
     form_takes_typed_command_value
     form_escape_stops_slow_command

@@ -11,6 +11,7 @@ use gtk4::prelude::*;
 
 use crate::config::{self, ResolvedConfig, Select, Template, VariableType};
 use crate::niri;
+use crate::state;
 
 /// Template context passed to on-create hooks.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -25,6 +26,36 @@ pub struct CreateRequest {
     pub ws_name: String,
     pub programs: Vec<String>,
     pub hook_info: HookInfo,
+    /// The local working directory its processes start in, already resolved
+    /// with the template's variable values.
+    pub cwd: Option<String>,
+}
+
+/// The local working directory recorded for a dynamic workspace: the one with
+/// key `ch`, or the focused one without it. `None` when it has none, and an
+/// error when there is no such workspace or it is not dynamic.
+pub fn workspace_cwd(prefix: &str, ch: Option<char>) -> anyhow::Result<Option<std::path::PathBuf>> {
+    let name = niri::list_workspaces()?
+        .into_iter()
+        .find(|ws| match ch {
+            Some(ch) => ws.name.as_deref().is_some_and(|name| {
+                config::parse_dynamic_name(name, prefix).is_some_and(|(key, _)| key == ch)
+            }),
+            None => ws.is_focused,
+        })
+        .with_context(|| match ch {
+            Some(ch) => format!("workspace '{prefix}{ch}' not found"),
+            None => "no focused workspace".to_string(),
+        })?
+        .name
+        .with_context(|| match ch {
+            Some(ch) => format!("workspace '{prefix}{ch}' is not a dynamic workspace"),
+            None => "the focused workspace is not a dynamic workspace".to_string(),
+        })?;
+    let Some((ch, _)) = config::parse_dynamic_name(&name, prefix) else {
+        anyhow::bail!("workspace '{name}' is not a dynamic workspace");
+    };
+    Ok(state::lookup(ch, &name))
 }
 
 /// Resolve how the CLI creates the workspace for `ch`: from `template`, or
@@ -55,6 +86,7 @@ pub fn resolve_create_request(
             ws_name: config::workspace_name_with_title(&config.workspace_prefix, ch, title),
             programs: config.programs_for(ch).to_vec(),
             hook_info: HookInfo::default(),
+            cwd: None,
         });
     };
     let name = &template.name;
@@ -95,6 +127,7 @@ pub fn resolve_create_request(
             config::resolve_workspace_title(template.title.as_deref(), &template.variables, &values)
         }
     };
+    let cwd = config::resolve_cwd(template.cwd.as_deref(), &values);
     Ok(CreateRequest {
         ws_name: config::workspace_name_with_title(&config.workspace_prefix, ch, title.as_deref()),
         programs: template.programs.clone(),
@@ -102,6 +135,7 @@ pub fn resolve_create_request(
             template_name: Some(template.name.clone()),
             variables: values,
         },
+        cwd,
     })
 }
 
@@ -125,6 +159,9 @@ fn find_template<'a>(config: &'a ResolvedConfig, name: &str) -> anyhow::Result<&
 /// A new workspace with programs is spared from cleanup for
 /// [`niri::SPAWN_GRACE`].
 ///
+/// `cwd` is the new workspace's local directory, which `cwd` prints back
+/// (see [`state`]); an existing workspace keeps the one it was created with.
+///
 /// Placing the programs' windows runs on a background thread; see
 /// [`spawn_placement`].
 pub fn switch_workspace(
@@ -134,6 +171,7 @@ pub fn switch_workspace(
     ws_name: &str,
     programs: &[String],
     hook_info: &HookInfo,
+    cwd: Option<&str>,
 ) -> anyhow::Result<()> {
     let commands = programs
         .iter()
@@ -152,6 +190,9 @@ pub fn switch_workspace(
         // cleanup would take for abandoned once the user switches away.
         if commands.iter().any(|command| !command.is_empty()) {
             niri::spare_workspace(id, Instant::now() + niri::SPAWN_GRACE);
+        }
+        if let Err(e) = state::remember(ch, ws_name, cwd) {
+            eprintln!("warning: {e:#}");
         }
         run_create_hooks(config, ch, ws_name, hook_info);
     }
@@ -189,6 +230,8 @@ pub fn delete_workspace(
     let on_delete = config.hooks.on_delete.clone();
     let finish = move || {
         if niri::finish_delete(&pending)? {
+            // Before the hooks, so a workspace recreated meanwhile starts clean.
+            state::forget(ch, &pending.name);
             let env = config::build_hook_env(&pending.name, ch, None, &HashMap::new());
             niri::run_hooks(&on_delete, &env);
         }
@@ -220,6 +263,10 @@ pub fn move_window(
     follow: bool,
 ) -> anyhow::Result<()> {
     if niri::move_window_to_workspace(&config.workspace_prefix, ch, ws_name, window_id, follow)? {
+        // The moved window is the workspace's content: no template, so no directory.
+        if let Err(e) = state::remember(ch, ws_name, None) {
+            eprintln!("warning: {e:#}");
+        }
         run_create_hooks(config, ch, ws_name, &HookInfo::default());
     }
     Ok(())
@@ -245,8 +292,8 @@ mod tests {
     use super::*;
 
     /// Templates for [`resolve_create_request`]: `dev` with a dir variable and
-    /// a title, `note` with one text variable, `beta` with none. Key x is
-    /// bound to beta and y to note.
+    /// a title, `note` with one text variable, `beta` with none, and `place`
+    /// with a `cwd`. Key x is bound to beta and y to note.
     const TEMPLATES: &str = r#"
 [workspace.a]
 programs = ["firefox"]
@@ -278,6 +325,14 @@ name = "Topic"
 [template.beta]
 programs = ["true"]
 title = "BETA"
+
+[template.place]
+programs = ["true"]
+cwd = "{{project}}"
+
+[template.place.variables.project]
+name = "Project"
+type = "text"
 "#;
 
     fn request(
@@ -293,6 +348,45 @@ title = "BETA"
             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
             .collect();
         resolve_create_request(&config, ch, template, &vars, title)
+    }
+
+    #[test]
+    fn create_request_carries_the_template_cwd() {
+        let req = request('p', Some("place"), &[("project", "/home/u/my proj")], None).unwrap();
+        assert_eq!(req.cwd.as_deref(), Some("/home/u/my proj"));
+        let (config, _) = config::resolve_toml(
+            r#"
+[template.dev]
+programs = ["true"]
+cwd = "{{project}}/sub"
+
+[template.dev.variables.project]
+name = "Project"
+type = "text"
+"#,
+        );
+        let values = [("project".to_string(), "/home/u/app".to_string())];
+        let req = resolve_create_request(&config, 'p', Some("dev"), &values, None).unwrap();
+        assert_eq!(req.cwd.as_deref(), Some("/home/u/app/sub"));
+    }
+
+    #[test]
+    fn create_request_without_template_has_no_cwd() {
+        assert_eq!(request('a', None, &[], None).unwrap().cwd, None);
+        assert_eq!(request('b', Some("beta"), &[], None).unwrap().cwd, None);
+        // An empty or relative value records nothing.
+        assert_eq!(
+            request('p', Some("place"), &[("project", " ")], None)
+                .unwrap()
+                .cwd,
+            None
+        );
+        assert_eq!(
+            request('p', Some("place"), &[("project", "rel")], None)
+                .unwrap()
+                .cwd,
+            None
+        );
     }
 
     fn error(result: anyhow::Result<CreateRequest>) -> String {
@@ -364,7 +458,7 @@ title = "BETA"
     fn create_request_unknown_template_lists_known() {
         assert_eq!(
             error(request('a', Some("Dev"), &[], None)),
-            "unknown template 'Dev' (known: dev, note, beta)"
+            "unknown template 'Dev' (known: dev, note, beta, place)"
         );
         let (config, _) = config::resolve_toml("");
         assert_eq!(

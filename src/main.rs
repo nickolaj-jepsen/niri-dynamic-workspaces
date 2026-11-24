@@ -1,6 +1,7 @@
 mod actions;
 mod config;
 mod niri;
+mod state;
 #[cfg(test)]
 mod test_helpers;
 mod ui;
@@ -82,6 +83,12 @@ enum Command {
     Daemon,
     /// Report config problems; exit non-zero if there are any
     Check,
+    /// Print the local working directory of a dynamic workspace
+    Cwd {
+        /// Workspace key (a-z, 0-9) — default: the focused workspace
+        #[arg(value_parser = parse_key_arg)]
+        key: Option<char>,
+    },
     /// Set or clear the title of a dynamic workspace
     Rename {
         /// Workspace key (a-z, 0-9), or `focused` for the focused workspace
@@ -261,6 +268,29 @@ fn run_rename(
     }
 }
 
+/// Run `cwd`: print the workspace's local directory. On any failure it prints
+/// nothing on stdout and exits non-zero, so a caller can fall back.
+///
+/// IPC and the state file only, so it runs before GTK starts: it opens no
+/// overlay and does not change focus.
+fn run_cwd(path: Option<&Path>, key: Option<char>) -> i32 {
+    let cfg = config::load_config(path);
+    // An error, not a `None`, so the caller's fallback runs for both.
+    let result = actions::workspace_cwd(&cfg.workspace_prefix, key).and_then(|cwd| {
+        cwd.ok_or_else(|| anyhow::anyhow!("no local working directory for this workspace"))
+    });
+    match result {
+        Ok(cwd) => {
+            println!("{}", cwd.display());
+            0
+        }
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            1
+        }
+    }
+}
+
 fn handle_direct_action(
     app: &gtk4::Application,
     cmdline: &ApplicationCommandLine,
@@ -327,6 +357,7 @@ fn handle_direct_action(
                     &ws_name,
                     &[],
                     &actions::HookInfo::default(),
+                    None,
                 );
             }
             let request = actions::resolve_create_request(
@@ -343,6 +374,7 @@ fn handle_direct_action(
                 &request.ws_name,
                 &request.programs,
                 &request.hook_info,
+                request.cwd.as_deref(),
             )
         }
         ui::Mode::Delete => {
@@ -384,6 +416,9 @@ fn main() -> glib::ExitCode {
     let cli = Cli::try_parse().unwrap_or_else(|e| e.exit());
     // Subcommands that never start GTK, so they need no display or D-Bus.
     match cli.command {
+        Some(Command::Cwd { key }) => {
+            return run_cwd(cli.config.as_deref(), key).into();
+        }
         Some(Command::Check) => {
             return check_config(
                 cli.config.as_deref(),
@@ -432,6 +467,7 @@ fn main() -> glib::ExitCode {
 
         let (mode, key) = match cli.command {
             // main() runs these before GTK starts; only here for exhaustiveness.
+            Some(Command::Cwd { key }) => return run_cwd(cli.config.as_deref(), key),
             Some(Command::Check) => {
                 return check_config(
                     cli.config.as_deref(),
@@ -674,6 +710,20 @@ mod tests {
     fn cli_debug_assert() {
         use clap::CommandFactory;
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn cli_parses_cwd_with_and_without_a_key() {
+        let cli = Cli::try_parse_from(["ndw", "cwd"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Cwd { key: None })));
+        let cli = Cli::try_parse_from(["ndw", "cwd", "a"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Cwd { key: Some('a') })));
+        for args in [&["ndw", "cwd", "Q"][..], &["ndw", "cwd", "a", "b"]] {
+            let Err(e) = Cli::try_parse_from(args) else {
+                panic!("{args:?} must not parse");
+            };
+            assert_eq!(e.exit_code(), 2, "{args:?}");
+        }
     }
 
     #[test]

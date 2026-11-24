@@ -764,7 +764,31 @@ pub fn retitle_workspace(
     target: WorkspaceSelector,
     title: Option<&str>,
 ) -> anyhow::Result<char> {
-    retitle_workspace_impl(&mut SocketClient, prefix, target, title)
+    // The recorded directory belongs to the workspace, not its title.
+    let before = workspace_name_for(prefix, target)?;
+    let ch = retitle_workspace_impl(&mut SocketClient, prefix, target, title)?;
+    if let Some(old) = before {
+        let new = crate::config::workspace_name_with_title(
+            prefix,
+            ch,
+            title.map(str::trim).filter(|t| !t.is_empty()),
+        );
+        crate::state::retitle(ch, &old, &new);
+    }
+    Ok(ch)
+}
+
+/// The current full name of the workspace `target`, before renaming it.
+fn workspace_name_for(prefix: &str, target: WorkspaceSelector) -> anyhow::Result<Option<String>> {
+    Ok(match target {
+        WorkspaceSelector::Key(ch) => {
+            find_workspace_by_char(&list_workspaces()?, prefix, ch).and_then(|w| w.name.clone())
+        }
+        WorkspaceSelector::Focused => list_workspaces()?
+            .iter()
+            .find(|w| w.is_focused)
+            .and_then(|w| w.name.clone()),
+    })
 }
 
 fn retitle_workspace_impl(
@@ -964,6 +988,8 @@ fn cleanup_empty_workspaces_impl(
                 reference: Some(WorkspaceReferenceArg::Name(name.clone())),
             },
         )?;
+        // The key is free again; a workspace that reuses it starts without its directory.
+        crate::state::forget(key, &name);
         let env = crate::config::build_hook_env(&name, key, None, &HashMap::new());
         run_hooks_with(client, &cleanup.on_delete, &env);
     }

@@ -192,6 +192,7 @@ Templates let you choose from predefined program sets when creating a new worksp
 programs = ["kitty --directory {{project}}", "code {{project}}"]
 key = "d"                        # optional hotkey shortcut
 title = "{{task}}"               # optional workspace title (see below)
+cwd = "{{project}}"              # optional local directory, see below
 on_create = ['git -C "$NDW_VAR_PROJECT" switch "$NDW_VAR_BRANCH"']  # see Hooks
 
 [template.dev.variables.project]
@@ -258,6 +259,13 @@ template = "browser"             # key w always creates from browser
   - If omitted and the template has variables, the first declared variable's value is used automatically
   - For `dir`-type variables, the automatic title is the basename (e.g. `/home/user/dev/myproject` → `myproject`), while an explicit `{{project}}` gives the full path; write `title = "dev: {{project|basename}}"` for `dev: myproject`
   - The full workspace name becomes `{prefix}{key} {title}` (e.g. `dyn-a myproject`)
+- The optional `cwd` field records a local working directory for the workspace's
+  processes, which `niri-dynamic-workspaces cwd` prints back later (see
+  [Working directory](#working-directory)). It takes the same `{{var}}`
+  placeholders as `programs`, and a leading `~/` is expanded. It is recorded
+  when the workspace is created, so it survives the program exiting, a shell
+  inside it changing directory, and switching away and back; it is forgotten
+  when the workspace is deleted
 
 #### Hooks
 
@@ -492,6 +500,37 @@ action exits non-zero, also when a daemon handles the call. A relative
 Without a daemon, a `switch` that creates a workspace with programs keeps
 running until each program has a window, for up to 15 seconds, to place them
 (see [Program windows](#program-windows)).
+
+#### Working directory
+
+`cwd` prints the local working directory recorded for a workspace: the focused
+one, or the one whose key you pass. Nothing else goes to stdout and it changes
+no focus, so a hotkey can use it:
+
+```bash
+niri-dynamic-workspaces cwd        # the focused workspace's directory
+niri-dynamic-workspaces cwd a      # dyn-a's directory
+```
+
+A template records it with `cwd = "{{project}}"` (see
+[Templates](#templates)); a key created without a template records none. It is
+read back from the session's state directory (`$XDG_STATE_HOME`), so it does
+not depend on the original terminal still running or on what a shell inside it
+did to its own directory. Nothing is inferred from SSH commands or window
+titles.
+
+The command fails with no output when the workspace has no recorded directory,
+when the directory no longer exists, and when the focused workspace is not a
+dynamic one. A caller can then fall back:
+
+```sh
+# Open a terminal in the workspace's project directory, if it has one.
+dir=$(niri-dynamic-workspaces cwd) && exec kitty --directory "$dir"
+exec kitty
+```
+
+Deleting a workspace forgets its directory, and retitling keeps it, so a
+recreated workspace never inherits the directory of the one it replaced.
 
 #### Renaming
 

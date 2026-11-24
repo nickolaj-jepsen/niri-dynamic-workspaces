@@ -7,6 +7,11 @@ Releases before 0.12.0 are listed on [GitHub Releases](https://github.com/nickol
 
 ## [Unreleased]
 
+### Added
+
+- Templates take an optional `cwd = "{{path}}"`, a local working directory recorded with the workspace when it is created.
+- `cwd [KEY]` prints the recorded directory of the focused workspace (or of `KEY`) for a hotkey to reuse. It opens no overlay, changes no focus, and exits non-zero with no output when the workspace has none, so callers can fall back.
+
 ## [0.13.0] - 2026-09-23
 
 ### Added

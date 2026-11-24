@@ -29,6 +29,8 @@ pub(super) struct TemplateOption {
     pub(super) programs: Vec<String>,
     pub(super) variables: Vec<TemplateVariable>,
     pub(super) title: Option<String>,
+    /// Local working directory, with its `{{var}}` placeholders unresolved.
+    pub(super) cwd: Option<String>,
 }
 
 impl From<&Template> for TemplateOption {
@@ -40,6 +42,7 @@ impl From<&Template> for TemplateOption {
             programs: tmpl.programs.clone(),
             variables: tmpl.variables.clone(),
             title: tmpl.title.clone(),
+            cwd: tmpl.cwd.clone(),
         }
     }
 }
@@ -55,6 +58,7 @@ fn build_template_options(config: &ResolvedConfig) -> Vec<TemplateOption> {
         programs: config.default_programs.clone(),
         variables: Vec::new(),
         title: None,
+        cwd: None,
     });
     options.extend(config.templates.iter().map(TemplateOption::from));
     options
@@ -139,7 +143,16 @@ pub(super) fn select_template_option(option: &TemplateOption, ch: char, ctx: &Ac
             ch,
             option.title.as_deref(),
         );
-        switch_and_close(&full_name, ch, &option.programs, ctx, &hook_info);
+        // No variables, so nothing to substitute in the template's `cwd`.
+        let cwd = crate::config::resolve_cwd(option.cwd.as_deref(), &HashMap::new());
+        switch_and_close(
+            &full_name,
+            ch,
+            &option.programs,
+            cwd.as_deref(),
+            ctx,
+            &hook_info,
+        );
     } else {
         show_variable_input(option, ch, ctx, template_name);
     }
@@ -339,6 +352,7 @@ mod tests {
                 variables: Vec::new(),
                 on_create: Vec::new(),
                 title: None,
+                cwd: None,
             },
             Template {
                 name: "browser".to_string(),
@@ -347,6 +361,7 @@ mod tests {
                 variables: Vec::new(),
                 on_create: Vec::new(),
                 title: None,
+                cwd: None,
             },
         ];
 
@@ -376,6 +391,7 @@ mod tests {
             variables: Vec::new(),
             on_create: vec!["notify-send hi".to_string()],
             title: None,
+            cwd: None,
         }];
 
         let opts = build_template_options(&config);
@@ -396,6 +412,7 @@ mod tests {
             variables: Vec::new(),
             on_create: Vec::new(),
             title: None,
+            cwd: None,
         }];
 
         let opts = build_template_options(&config);
